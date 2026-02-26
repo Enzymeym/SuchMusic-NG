@@ -1,4 +1,4 @@
-import type { LyricLine, LyricWord } from "@applemusic-like-lyrics/amll-lyric";
+import type { LyricLine, LyricWord } from "@applemusic-like-lyrics/lyric";
 
 interface ParsedEvent {
     time: number;

@@ -41,7 +41,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import type { LyricLine } from '@applemusic-like-lyrics/amll-lyric'
+import type { LyricLine } from '@applemusic-like-lyrics/lyric'
 
 const lyrics = ref<LyricLine[]>([])
 const currentTime = ref(0)

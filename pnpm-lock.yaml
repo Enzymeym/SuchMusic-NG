@@ -11,6 +11,9 @@ importers:
       '@applemusic-like-lyrics/amll-lyric':
         specifier: link:packages/amll-lyric/pkg
         version: link:packages/amll-lyric/pkg
+      '@applemusic-like-lyrics/lyric':
+        specifier: ^0.3.0
+        version: 0.3.0
       '@applemusic-like-lyrics/vue':
         specifier: ^0.2.0
         version: 0.2.0(@pixi/app@7.4.3(@pixi/core@7.4.3)(@pixi/display@7.4.3(@pixi/core@7.4.3)))(@pixi/core@7.4.3)(@pixi/display@7.4.3(@pixi/core@7.4.3))(@pixi/filter-blur@7.4.3(@pixi/core@7.4.3))(@pixi/filter-bulge-pinch@5.1.1(@pixi/core@7.4.3))(@pixi/filter-color-matrix@7.4.3(@pixi/core@7.4.3))(@pixi/sprite@7.4.3(@pixi/core@7.4.3)(@pixi/display@7.4.3(@pixi/core@7.4.3)))(vue@3.5.28(typescript@5.9.3))
@@ -163,6 +166,9 @@ packages:
       '@pixi/filter-bulge-pinch': '*'
       '@pixi/filter-color-matrix': '*'
       '@pixi/sprite': '*'
+
+  '@applemusic-like-lyrics/lyric@0.3.0':
+    resolution: {integrity: sha512-ZGyBheZZfqjQmGnEUciNKCARwkqIP39ONZirJE+NOQjQ47TYlZz4tlLBRH/uRfq5qviYyJ1S9Q+pZxlYoyHWVw==}
 
   '@applemusic-like-lyrics/vue@0.2.0':
     resolution: {integrity: sha512-oLkB0YP1R413cObvuF9cQtGPU4HKD2maW6LP4OJU3rq44PI3KHvpanEBMr13AE67mfp6nEbTCkTMAwdVRWKRUQ==}
@@ -4510,6 +4516,8 @@ snapshots:
       bezier-easing: 2.1.0
       deep-freeze: 0.0.1
       gl-matrix: 4.0.0-beta.2
+
+  '@applemusic-like-lyrics/lyric@0.3.0': {}
 
   '@applemusic-like-lyrics/vue@0.2.0(@pixi/app@7.4.3(@pixi/core@7.4.3)(@pixi/display@7.4.3(@pixi/core@7.4.3)))(@pixi/core@7.4.3)(@pixi/display@7.4.3(@pixi/core@7.4.3))(@pixi/filter-blur@7.4.3(@pixi/core@7.4.3))(@pixi/filter-bulge-pinch@5.1.1(@pixi/core@7.4.3))(@pixi/filter-color-matrix@7.4.3(@pixi/core@7.4.3))(@pixi/sprite@7.4.3(@pixi/core@7.4.3)(@pixi/display@7.4.3(@pixi/core@7.4.3)))(vue@3.5.28(typescript@5.9.3))':
     dependencies:

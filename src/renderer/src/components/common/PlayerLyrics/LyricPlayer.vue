@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { parseYrc, parseQrc, parseTTML, decryptQrcHex } from '@applemusic-like-lyrics/amll-lyric'
+import { parseYrc, parseQrc, parseTTML, decryptQrcHex } from '@applemusic-like-lyrics/lyric'
 import type { LyricLine as CoreLyricLine, LyricWord as CoreLyricWord } from '@applemusic-like-lyrics/core'
 import { LyricsView, parseLyrics } from 'suth-lyric-kit'
 import AMLLLyricPlayer from '../AMLL/LyricPlayer.vue'

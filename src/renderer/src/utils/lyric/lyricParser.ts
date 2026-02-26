@@ -1,5 +1,5 @@
-import { parseYrc, parseQrc, parseTTML, decryptQrcHex } from '@applemusic-like-lyrics/amll-lyric'
-import type { LyricLine as CoreLyricLine, LyricWord as CoreLyricWord } from '@applemusic-like-lyrics/amll-lyric'
+import { parseYrc, parseQrc, parseTTML, decryptQrcHex } from '@applemusic-like-lyrics/lyric'
+import type { LyricLine as CoreLyricLine, LyricWord as CoreLyricWord } from '@applemusic-like-lyrics/lyric'
 import { parseLrc as parseBetterLrc } from './ParseLrc'
 
 export function parseLyricsToCore(content: string): CoreLyricLine[] {
