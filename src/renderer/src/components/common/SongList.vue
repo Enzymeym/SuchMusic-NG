@@ -356,12 +356,12 @@ function showContextMenu(song: Song, e: MouseEvent) {
   showDropdown.value = true
 }
 
-function handleDragStart(index: number, e: DragEvent) {
+function handleDragStart(index: number, _e: DragEvent) {
   if (!props.draggable) return
   draggingIndex.value = index
 }
 
-function handleDragOver(index: number, e: DragEvent) {
+function handleDragOver(_index: number, e: DragEvent) {
   if (!props.draggable) return
   e.preventDefault()
 }

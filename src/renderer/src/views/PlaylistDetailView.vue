@@ -92,7 +92,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NIcon, NAvatar, NEmpty, NButtonGroup, useMessage } from 'naive-ui'
+import { NButton, NIcon, NEmpty, useMessage } from 'naive-ui'
 import { usePlaylistStore } from '../stores/playlistStore'
 import { usePlayerStore } from '../stores/playerStore'
 import { useSettingsStore } from '../stores/settingsStore'
@@ -150,10 +150,6 @@ const songsForList = computed(() => {
     sourceSongId: t.sourceSongId
   }))
 })
-
-const formatDate = (ts: number) => {
-  return new Date(ts).toLocaleDateString()
-}
 
 const playAll = () => {
   if (!playlist.value || !playlist.value.tracks.length) return
@@ -323,7 +319,7 @@ const handleSongClick = async (song: any) => {
         cover: target.cover || '',
         durationMs: target.durationMs || 0,
         source: 'netease',
-        sourceSongId: neteaseId,
+        sourceSongId: neteaseId ?? undefined,
         lyrics
       })
       player.setPlaying(true)
