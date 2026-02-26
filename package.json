@@ -46,7 +46,7 @@
     "naive-ui": "^2.43.2",
     "node-id3": "^0.2.9",
     "pinia": "^3.0.4",
-    "suth-lyric-kit": "link:packages\\suth-lyric-kit",
+    "suth-lyric-kit": "link:packages/suth-lyric-kit",
     "vue-router": "^4.6.4",
     "wavefile": "^11.0.0"
   },
