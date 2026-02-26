@@ -1,0 +1,41 @@
+@import './base.css';
+@import './naive-hook.css';
+/* 引入 highlight.js 默认代码高亮主题样式 */
+@import 'highlight.js/styles/github.css';
+
+[class^='mgc_']::before,
+[class*=' mgc_']::before {
+  color: inherit !important;
+}
+
+#app {
+  /* 使用全局字体设置（通过 settingsStore 动态注入到 body） */
+  font-family: inherit;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* 深色模式下统一设置 body 背景色 */
+html[data-theme='dark'] body {
+  background-color: #101014 !important;
+}
+
+.route-fade-enter-active,
+.route-fade-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.route-fade-enter-from,
+.route-fade-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
+}
