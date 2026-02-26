@@ -1,4 +1,4 @@
-<img src="https://aethel-1314366757.cos.ap-hongkong.myqcloud.com/readme-image.png?q-sign-algorithm=sha1&q-ak=AKIDHwEMjLqPF9Ic51gbsAV6gUhcZhAn_aUnb_tYBCAbYwRyosbkSqyrHfn7u-Wy47Z8&q-sign-time=1771987298;1771990898&q-key-time=1771987298;1771990898&q-header-list=host&q-url-param-list=&q-signature=9fecdb90de80b9d3a3fc789bdb849a7b41862cd3&x-cos-security-token=16fpfJWtVYIJ70JxDOLYbQlLhQ2Svl5a29803601b93e4294f3d913e43e6bcc8dkwYMWOU0fQvS6fUa9HTZnlfq5YBu2UPjMkikFW0uvy4fdZyZSU2n5woQhXOzuW-m3_SPMCbWtwEcDwghhlKMYu53NVHE3OBPps9qv2t5rAkWyvUu0ncflGZToFvXUzW4s0MvA7FFu7zqJDXu__mBwiM6a_bmkCtag0pbJu4-4r09Vzc3KcmYYLu6vM5wOecKhsfIy2StKCOjEBCcmhdlKC9PuF5EpsDYyn5ixutNfTF8O1tMYJqPnIn-FQ49-5K52E3K2l-NkKS5n8NicTHF6g&" alt="logo">
+<img src="https://aethel-1314366757.cos.ap-hongkong.myqcloud.com/readme-image.png" alt="logo">
 
 # Such Music for Windows
 
