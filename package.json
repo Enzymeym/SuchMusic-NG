@@ -23,7 +23,7 @@
     "electron:generate-icons": "electron-icon-builder --input=./resources/icon.png --output=build --flatten"
   },
   "dependencies": {
-    "@applemusic-like-lyrics/amll-lyric": "link:packages\\amll-lyric\\pkg",
+    "@applemusic-like-lyrics/amll-lyric": "link:packages/amll-lyric/pkg",
     "@applemusic-like-lyrics/vue": "^0.2.0",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
