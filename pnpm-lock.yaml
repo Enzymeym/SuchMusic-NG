@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       '@applemusic-like-lyrics/amll-lyric':
-        specifier: link:packages\amll-lyric\pkg
+        specifier: link:packages/amll-lyric/pkg
         version: link:packages/amll-lyric/pkg
       '@applemusic-like-lyrics/vue':
         specifier: ^0.2.0
@@ -78,7 +78,7 @@ importers:
         specifier: ^3.0.4
         version: 3.0.4(typescript@5.9.3)(vue@3.5.28(typescript@5.9.3))
       suth-lyric-kit:
-        specifier: link:packages\suth-lyric-kit
+        specifier: link:packages/suth-lyric-kit
         version: link:packages/suth-lyric-kit
       vue-router:
         specifier: ^4.6.4
