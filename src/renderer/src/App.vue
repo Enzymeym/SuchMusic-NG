@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NConfigProvider,
@@ -41,6 +41,46 @@ const isDesktopLyric = computed(() => route.name === 'desktop-lyric')
 
 const playerStore = usePlayerStore()
 
+// 初始化时恢复播放器状态
+playerStore.loadPlayerState()
+
+// 监听关键状态变化并保存
+watch(
+  () => [
+    playerStore.currentSong?.id,
+    playerStore.playMode,
+    playerStore.volume,
+    playerStore.playlist.length, // 仅监听长度变化，避免频繁触发
+    playerStore.playlistSource
+  ],
+  () => {
+    playerStore.savePlayerState()
+  }
+)
+
+// 定期保存播放进度（每 5 秒一次），并在暂停/停止时立即保存
+let saveInterval: ReturnType<typeof setInterval> | null = null
+watch(
+  () => playerStore.isPlaying,
+  (playing) => {
+    if (playing) {
+      // 开始播放，启动定时保存
+      if (saveInterval) clearInterval(saveInterval)
+      saveInterval = setInterval(() => {
+        playerStore.savePlayerState()
+      }, 5000)
+    } else {
+      // 停止播放，清除定时器并立即保存一次
+      if (saveInterval) {
+        clearInterval(saveInterval)
+        saveInterval = null
+      }
+      playerStore.savePlayerState()
+    }
+  },
+  { immediate: true }
+)
+
 onMounted(() => {
   if (!isDesktopLyric.value) {
     window.electron.ipcRenderer.on('player:control', (_, action: string) => {
@@ -52,7 +92,7 @@ onMounted(() => {
             // But for now, we can use the webAudioEngine directly if we import it
             import('./audio/audio-engine').then(async ({ webAudioEngine }) => {
               if (playerStore.currentSong) {
-                await webAudioEngine.resume()
+                await webAudioEngine.play()
                 playerStore.setPlaying(true)
               }
             })
@@ -72,7 +112,7 @@ onMounted(() => {
               await webAudioEngine.pause()
               playerStore.setPlaying(false)
             } else if (playerStore.currentSong) {
-              await webAudioEngine.resume()
+              await webAudioEngine.play()
               playerStore.setPlaying(true)
             }
           })

@@ -22,6 +22,7 @@ export interface PlayRecord {
   cover: string
   filePath?: string // 本地文件路径（用于从本地重新获取封面等信息）
   timestamp: number
+  source?: string // 音源平台标识
 }
 
 export type PlaylistSource = 'search' | 'recent' | 'local'
@@ -42,7 +43,8 @@ export const usePlayerStore = defineStore('player', {
     localPlaylist: [] as PlayerSong[], // 最近一次本地音乐播放列表
     playMode: 'list' as 'list' | 'loop' | 'shuffle', // 播放模式
     currentIndex: -1, // 当前播放索引
-    isPlayerPageShown: false // 是否显示播放页
+    isPlayerPageShown: false, // 是否显示播放页
+    shouldAutoPlay: true // 是否自动播放（用于恢复状态时不自动播放）
   }),
   actions: {
     setPlayerPageShown(show: boolean) {
@@ -51,6 +53,7 @@ export const usePlayerStore = defineStore('player', {
     play() {
       if (this.currentSong) {
         this.isPlaying = true
+        this.shouldAutoPlay = true
       }
     },
     pause() {
@@ -187,15 +190,10 @@ export const usePlayerStore = defineStore('player', {
       if (index >= 0 && index < this.playlist.length) {
         this.currentIndex = index
         const song = this.playlist[index]
-        // 这里不直接调 setCurrentSong，因为需要触发播放逻辑，可能需要外部监听 currentSong 变化
-        // 或者直接在这里处理播放逻辑？
-        // 为了保持简单，我们更新 currentSong，外部 LocalMusicView 或者 PlayerBar 监听到变化后负责实际播放？
-        // 不，Store 应该只管状态。实际播放逻辑（调用音频引擎）目前在 View 层。
-        // 我们需要一种机制通知 View 层播放。
-        // 暂时先更新 currentSong，View 层需要监听 currentSong 的变化来触发播放。
         this.currentSong = song
         this.positionMs = 0
         this.isPlaying = true 
+        this.shouldAutoPlay = true // 用户主动切歌，自动播放
         this.recordPlay(song)
       }
     },
@@ -209,6 +207,48 @@ export const usePlayerStore = defineStore('player', {
         } catch (e) {
           console.error('Failed to parse play history', e)
           this.playHistory = []
+        }
+      }
+    },
+    // 保存播放器状态（当前歌曲、歌单、进度等）
+    savePlayerState() {
+      const state = {
+        currentSong: this.currentSong,
+        playlist: this.playlist,
+        playlistSource: this.playlistSource,
+        searchPlaylist: this.searchPlaylist,
+        localPlaylist: this.localPlaylist,
+        playMode: this.playMode,
+        currentIndex: this.currentIndex,
+        volume: this.volume,
+        positionMs: this.positionMs
+      }
+      try {
+        localStorage.setItem('player_state', JSON.stringify(state))
+      } catch (e) {
+        console.error('Failed to save player state', e)
+      }
+    },
+    // 加载播放器状态
+    loadPlayerState() {
+      const stateStr = localStorage.getItem('player_state')
+      if (stateStr) {
+        try {
+          const state = JSON.parse(stateStr)
+          if (state.currentSong) this.currentSong = state.currentSong
+          if (state.playlist) this.playlist = state.playlist
+          if (state.playlistSource) this.playlistSource = state.playlistSource
+          if (state.searchPlaylist) this.searchPlaylist = state.searchPlaylist
+          if (state.localPlaylist) this.localPlaylist = state.localPlaylist
+          if (state.playMode) this.playMode = state.playMode
+          if (typeof state.currentIndex === 'number') this.currentIndex = state.currentIndex
+          if (typeof state.volume === 'number') this.volume = state.volume
+          if (typeof state.positionMs === 'number') this.positionMs = state.positionMs
+          
+          this.shouldAutoPlay = false // 恢复状态时不自动播放
+          this.isPlaying = false // 确保不处于播放状态
+        } catch (e) {
+          console.error('Failed to parse player state', e)
         }
       }
     },
@@ -239,7 +279,8 @@ export const usePlayerStore = defineStore('player', {
             : song.cover,
         // 保留文件路径，便于“最近播放”等页面按需重新提取本地封面
         filePath: song.filePath,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        source: song.source || (song.filePath ? 'local' : 'netease') // 记录来源
       }
       
       this.playHistory.unshift(record)
@@ -305,6 +346,23 @@ export const usePlayerStore = defineStore('player', {
       this.currentSong = {
         ...this.currentSong,
         durationMs
+      }
+    },
+    // 更新当前歌曲歌词
+    setLyrics(lyrics: string): void {
+      if (!this.currentSong) return
+      this.currentSong = {
+        ...this.currentSong,
+        lyrics
+      }
+      
+      // 同时更新播放列表中对应歌曲的歌词
+      const index = this.playlist.findIndex((s) => s.id === this.currentSong?.id)
+      if (index !== -1) {
+        this.playlist[index] = {
+          ...this.playlist[index],
+          lyrics
+        }
       }
     }
   }

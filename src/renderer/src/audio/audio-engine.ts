@@ -63,8 +63,22 @@ class WebAudioEngine {
     this.applyEqSettings()
   }
 
+  // 停止位置更新，防止切歌时进度条跳变
+  private stopProgressUpdates(): void {
+    if (this.positionTimer !== null) {
+      window.clearInterval(this.positionTimer)
+      this.positionTimer = null
+    }
+    if (this.mediaElement) {
+      this.mediaElement.ontimeupdate = null
+    }
+  }
+
   // 停止当前播放
   stop(): void {
+    // 停止进度更新
+    this.stopProgressUpdates()
+
     if (this.currentSource) {
       this.currentSource.stop()
       this.currentSource.disconnect()
@@ -97,11 +111,6 @@ class WebAudioEngine {
     this.currentBuffer = null
     this.startOffset = 0
     this.startTime = 0
-
-    if (this.positionTimer !== null) {
-      window.clearInterval(this.positionTimer)
-      this.positionTimer = null
-    }
   }
 
   private fadeTo(target: number, durationMs: number): void {
@@ -115,7 +124,10 @@ class WebAudioEngine {
     gain.linearRampToValueAtTime(target, now + durationSec)
   }
 
-  private async fadeOutAndStop(durationMs: number): Promise<void> {
+  public async fadeOutAndStop(durationMs: number): Promise<void> {
+    // 立即停止进度更新，防止切歌时进度条跳变
+    this.stopProgressUpdates()
+
     if (!this.audioContext || !this.gainNode) {
       this.stop()
       return
@@ -139,14 +151,51 @@ class WebAudioEngine {
     }
   }
 
-  // 恢复播放
+  // 恢复播放（同时恢复 AudioContext 和播放源）
+  async play(): Promise<boolean> {
+    this.ensureContext()
+    if (this.audioContext?.state === 'suspended') {
+      await this.audioContext.resume()
+    }
+
+    if (this.mediaElement && !this.currentBuffer) {
+      // 恢复 HTMLAudioElement 播放
+      try {
+        await this.mediaElement.play()
+        this.fadeTo(this.volume, 200)
+        // 恢复位置更新定时器
+        this.startPositionTimer()
+        return true
+      } catch (e) {
+        console.error('Failed to play media element', e)
+        return false
+      }
+    } else if (this.currentBuffer) {
+      // 恢复 Buffer 播放
+      // 如果当前没有 source 在播放（例如刚加载完或者已停止），则重新开始
+      if (!this.currentSource) {
+        const p = usePlayerStore()
+        const offset = p.positionMs / 1000
+        this.playBuffer(this.currentBuffer, offset)
+        this.gainNode!.gain.value = 0
+        this.fadeTo(this.volume, 200)
+      }
+      // 恢复位置更新定时器
+      this.startPositionTimer()
+      return true
+    }
+    
+    return false
+  }
+
+  // 仅恢复 AudioContext（不触发播放源的 play）
   async resume(): Promise<void> {
     if (this.audioContext?.state === 'suspended') {
       await this.audioContext.resume()
     }
     
     // 恢复位置更新定时器
-    if (this.positionTimer === null && this.currentSource && this.audioContext) {
+    if (this.positionTimer === null && (this.currentSource || (this.mediaElement && !this.mediaElement.paused)) && this.audioContext) {
       this.startPositionTimer()
     }
   }
@@ -343,6 +392,19 @@ class WebAudioEngine {
 
   // 使用原始文件二进制数据播放
   async playFromFileData(data: ArrayBuffer): Promise<void> {
+    await this.loadFromFileData(data)
+    if (this.audioContext?.state === 'suspended') {
+      await this.audioContext.resume()
+    }
+    if (this.currentBuffer) {
+      this.playBuffer(this.currentBuffer, 0)
+      this.gainNode!.gain.value = 0
+      this.fadeTo(this.volume, 200)
+    }
+  }
+
+  // 加载文件数据但不播放
+  async loadFromFileData(data: ArrayBuffer): Promise<void> {
     this.ensureContext()
     if (!this.audioContext || !this.gainNode) return
 
@@ -352,23 +414,28 @@ class WebAudioEngine {
     const audioBuffer = await this.audioContext.decodeAudioData(bufferCopy)
     const durationMs = audioBuffer.duration * 1000
 
-    const source = this.audioContext.createBufferSource()
-    source.buffer = audioBuffer
-    source.connect(this.gainNode)
-
     const player = usePlayerStore()
     // 同步总时长到全局 store
     player.setDuration(durationMs)
 
     this.currentBuffer = audioBuffer
-    this.playBuffer(audioBuffer, 0)
-
-    this.gainNode.gain.value = 0
-    this.fadeTo(this.volume, 200)
   }
 
   // 通过 URL 播放音频，内部使用 HTMLAudioElement + Web Audio 管线
   async playFromUrl(url: string): Promise<void> {
+    await this.loadFromUrl(url)
+    if (this.mediaElement) {
+      if (this.audioContext!.state === 'suspended') {
+        await this.audioContext!.resume()
+      }
+      await this.mediaElement.play()
+      this.gainNode!.gain.value = 0
+      this.fadeTo(this.volume, 200)
+    }
+  }
+
+  // 加载 URL 但不播放
+  async loadFromUrl(url: string): Promise<void> {
     this.ensureContext()
     if (!this.audioContext || !this.gainNode) return
 
@@ -402,14 +469,6 @@ class WebAudioEngine {
       const positionMs = this.mediaElement.currentTime * 1000
       p.setPosition(positionMs)
     }
-
-    if (this.audioContext.state === 'suspended') {
-      await this.audioContext.resume()
-    }
-
-    await this.mediaElement.play()
-    this.gainNode.gain.value = 0
-    this.fadeTo(this.volume, 200)
   }
 
   // 开始流式播放会话

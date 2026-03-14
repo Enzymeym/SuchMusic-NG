@@ -15,6 +15,8 @@ const props = defineProps<{
   settingItemBorderColor: string
   // 当前高亮的设置项 key
   highlightKey?: string | null
+  // 是否为 Mac 平台
+  isMac?: boolean
 }>()
 
 // 字体标签渲染函数，使用对应字体展示名称（恢复为单行展示）
@@ -79,31 +81,33 @@ const handleCustomColorChange = (color: string | null) => {
 
 <template>
   <div class="settings-content">
-    <div class="section-group-title">字体设置</div>
+    <div v-if="!props.isMac">
+      <div class="section-group-title">字体设置</div>
 
-    <n-card
-      class="setting-item"
-      :class="{ 'setting-item--highlight': props.highlightKey === 'appearance.globalFont' }"
-      data-setting-key="appearance.globalFont"
-      :bordered="true"
-      size="small"
-      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
-    >
-      <div class="setting-row">
-        <div class="setting-label">
-          <div class="main-label">全局字体</div>
-          <div class="sub-label">软件界面的主要字体</div>
+      <n-card
+        class="setting-item"
+        :class="{ 'setting-item--highlight': props.highlightKey === 'appearance.globalFont' }"
+        data-setting-key="appearance.globalFont"
+        :bordered="true"
+        size="small"
+        :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
+      >
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="main-label">全局字体</div>
+            <div class="sub-label">软件界面的主要字体</div>
+          </div>
+          <n-select
+            v-model:value="settingsStore.appearance.globalFont"
+            :options="props.globalFontOptions"
+            :render-label="renderFontLabel"
+            filterable
+            placeholder="选择字体"
+            style="width: 200px"
+          />
         </div>
-        <n-select
-          v-model:value="settingsStore.appearance.globalFont"
-          :options="props.globalFontOptions"
-          :render-label="renderFontLabel"
-          filterable
-          placeholder="选择字体"
-          style="width: 200px"
-        />
-      </div>
-    </n-card>
+      </n-card>
+    </div>
 
     <n-card
       class="setting-item"
@@ -172,6 +176,30 @@ const handleCustomColorChange = (color: string | null) => {
           :render-label="renderFontLabel"
           filterable
           placeholder="选择字体"
+          style="width: 200px"
+        />
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
+      :class="{ 'setting-item--highlight': props.highlightKey === 'appearance.songListStyle' }"
+      data-setting-key="appearance.songListStyle"
+      :bordered="true"
+      size="small"
+      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">歌曲列表样式</div>
+          <div class="sub-label">除歌单页面外的全局歌曲列表样式</div>
+        </div>
+        <n-select
+          v-model:value="settingsStore.appearance.songListStyle"
+          :options="[
+            { label: '卡片模式', value: 'card' },
+            { label: '简约模式', value: 'plain' }
+          ]"
           style="width: 200px"
         />
       </div>

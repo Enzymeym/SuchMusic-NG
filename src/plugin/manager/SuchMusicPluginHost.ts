@@ -262,8 +262,9 @@ class SuchMusicPluginHost {
 
   /**
    * 获取支持的音源和音质信息
+   * 支持对象格式 { kw: {...}, wy: {...} } 或数组格式
    */
-  getSupportedSources(): PluginSource[] {
+  getSupportedSources(): PluginSource[] | Record<string, PluginSource> {
     this._ensurePluginInitialized()
     return this.plugin!.sources
   }
@@ -685,6 +686,9 @@ class SuchMusicPluginHost {
         error.name === 'AbortError' ? `请求超时: ${url}` : `请求失败: ${error.message}`
 
       console.error(`${CONSTANTS.LOG_PREFIX} ${errorMessage}`)
+      if (error.cause) {
+        console.error(`${CONSTANTS.LOG_PREFIX} 错误原因:`, error.cause)
+      }
       return this._createErrorResult(error, url)
     }
   }

@@ -71,8 +71,19 @@ export function loadNativeDecoder(): {
   const nativePath = getNativeDecoderPath()
   // 使用 require 载入 napi 插件
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const nativeModule = require(nativePath) as NativeDecoderModule
-  const decodeFn = resolveDecodeFn(nativeModule)
-  const decodeStreamFn = resolveDecodeStreamFn(nativeModule)
-  return { decode_audio_to_pcm: decodeFn, decode_audio_stream: decodeStreamFn }
+  try {
+    const nativeModule = require(nativePath) as NativeDecoderModule
+    const decodeFn = resolveDecodeFn(nativeModule)
+    const decodeStreamFn = resolveDecodeStreamFn(nativeModule)
+    return { decode_audio_to_pcm: decodeFn, decode_audio_stream: decodeStreamFn }
+  } catch (error) {
+    console.error('加载本地解码器失败:', error)
+    // 降级处理：返回抛出错误的函数，而不是让应用崩溃
+    return {
+      decode_audio_to_pcm: () => {
+        throw new Error('Native decoder not available')
+      },
+      decode_audio_stream: null
+    }
+  }
 }

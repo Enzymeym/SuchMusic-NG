@@ -44,6 +44,7 @@
           clearable
           size="large"
           round
+          class="search-input"
           style="width: 200px"
         >
           <template #prefix>
@@ -117,30 +118,21 @@ import SongList from '../components/common/SongList.vue'
 import TagEditDialog from '../components/common/TagEditDialog.vue'
 import { usePlayerStore } from '../stores/playerStore'
 import defaultCover from '@renderer/assets/icon.png'
-import { useSettingsStore } from '../stores/settingsStore'
 import { usePlaylistStore } from '../stores/playlistStore'
+import { useLocalMusicStore, type LocalSong } from '../stores/localMusicStore'
 
 // 本地音乐歌曲结构，尽量对齐 SongList 组件
-interface Song {
-  id: number | string
-  name: string
-  al?: { name: string; picUrl?: string }
-  ar?: { name: string }[]
-  filePath?: string
-  dt?: number
-  picUrl?: string
-  lyrics?: string
-  [key: string]: any
-}
+// Use LocalSong from store instead of defining locally, but for compatibility with existing code we can alias it or just use it.
+type Song = LocalSong
 
-const songs = ref<Song[]>([])
+const localMusicStore = useLocalMusicStore()
+const songs = computed(() => localMusicStore.songs)
 const searchKeyword = ref('')
-const loading = ref(false)
+const loading = computed(() => localMusicStore.loading)
 const message = useMessage()
 const dialog = useDialog()
-const fillingMeta = ref(false)
+// const fillingMeta = ref(false) // Use store fillingMeta
 const player = usePlayerStore()
-const settingsStore = useSettingsStore()
 const playlistStore = usePlaylistStore()
 
 const showTagEditor = ref(false)
@@ -175,7 +167,7 @@ const handleBatchDelete = () => {
     negativeText: '取消',
     onPositiveClick: async () => {
       try {
-        const filePaths = songs.value
+        const filePaths = localMusicStore.songs
           .filter(s => checkedRowKeys.value.includes(s.id))
           .map(s => s.filePath)
           .filter(fp => fp) as string[]
@@ -190,10 +182,13 @@ const handleBatchDelete = () => {
             message.warning(`${result.failedCount} 首歌曲删除失败`)
           }
           // 重新扫描或手动移除
-          // 为了即时反馈，我们手动从列表中移除
-          songs.value = songs.value.filter(s => !checkedRowKeys.value.includes(s.id))
+          // Store scanMusic handles update, but here we might want to manually remove for speed
+          // But simpler to just rescan or let store handle it.
+          // Since we deleted files, rescanning is safer.
+          void scanMusic()
+          
           checkedRowKeys.value = []
-          if (songs.value.length === 0) {
+          if (localMusicStore.songs.length === 0) {
             showBatchModal.value = false
           }
         }
@@ -211,7 +206,7 @@ const handleCreatePlaylistFromSelection = () => {
     return
   }
 
-  const selectedSongs = songs.value.filter((s) => checkedRowKeys.value.includes(s.id))
+  const selectedSongs = localMusicStore.songs.filter((s) => checkedRowKeys.value.includes(s.id))
   if (!selectedSongs.length) {
     message.info('未找到选中的歌曲')
     return
@@ -239,9 +234,9 @@ const handleCreatePlaylistFromSelection = () => {
 }
 
 const filteredSongs = computed(() => {
-  if (!searchKeyword.value) return songs.value
+  if (!searchKeyword.value) return localMusicStore.songs
   const keyword = searchKeyword.value.toLowerCase().trim()
-  return songs.value.filter((song) => {
+  return localMusicStore.songs.filter((song) => {
     const name = song.name?.toLowerCase() || ''
     const artist = getSongArtist(song).toLowerCase()
     const album = (song.al?.name || '').toLowerCase()
@@ -250,9 +245,14 @@ const filteredSongs = computed(() => {
 })
 
 onMounted((): void => {
-  scanMusic().catch((error) => {
-    console.error('初次扫描本地音乐失败', error)
-  })
+  // If store is empty, scan. Otherwise don't scan automatically to save time?
+  // Or always scan to keep up to date?
+  // Original code scanned on mount.
+  if (localMusicStore.songs.length === 0) {
+    scanMusic().catch((error) => {
+      console.error('初次扫描本地音乐失败', error)
+    })
+  }
 })
 
 // 从歌曲对象提取歌手名
@@ -269,29 +269,10 @@ const getSongCover = (song: Song): string => {
 }
 
 // 根据比特率和采样率映射为 LQ/HQ/SQ/Hi-Res 标签
-const formatQualityFromMeta = (bitrate?: number, sampleRate?: number): string => {
-  if (!bitrate && !sampleRate) return 'LQ'
-  const kbps = bitrate ? bitrate / 1000 : 0
-  const khz = sampleRate ? sampleRate / 1000 : 0
-
-  // 采样率或码率足够高时判定为 Hi-Res
-  if (khz >= 88.2 || kbps >= 2500) {
-    return 'Hi-Res'
-  }
-
-  // 近似无损（如 CD FLAC）判定为 SQ
-  if (kbps >= 800) {
-    return 'SQ'
-  }
-
-  // 中高码率判定为 HQ
-  if (kbps >= 192) {
-    return 'HQ'
-  }
-
-  // 其余归为 LQ
-  return 'LQ'
-}
+// Removed local helper since store logic handles filling meta, but we might need it if we wanted to display it in table?
+// Store fills `quality` field. SongList might use it.
+// The SongList component handles display.
+// The helper was used in fillMeta.
 
 // 播放指定歌曲并同步播放器状态
 const playSong = async (song: Song): Promise<void> => {
@@ -403,11 +384,11 @@ const handleTagSaved = () => {
 }
 
 const playAll = (): void => {
-  if (!songs.value.length) {
+  if (!localMusicStore.songs.length) {
     message.info('当前没有可播放的本地音乐')
     return
   }
-  void playSong(songs.value[0])
+  void playSong(localMusicStore.songs[0])
 }
 
 const openScanDirSettings = (): void => {
@@ -422,152 +403,12 @@ const openScanDirSettings = (): void => {
 }
 
 const scanMusic = async (): Promise<void> => {
-  loading.value = true
   try {
-    const rawDirs = settingsStore.local.scanDirs
-    const plainDirs = Array.isArray(rawDirs) ? [...rawDirs] : []
-    const result = (await window.electron.ipcRenderer.invoke(
-      'local-music:scan',
-      plainDirs.length ? plainDirs : undefined
-    )) as {
-      rootDir: string
-      rootDirs?: string[]
-      tracks: Array<{
-        id: string
-        name: string
-        filePath: string
-        ar: { name: string }[]
-        al: { name: string }
-        dt?: number
-        quality?: string
-      }>
-    }
-
-    const list = result.tracks.map((t) => ({
-      id: t.id,
-      name: t.name,
-      ar: t.ar,
-      // al: t.al, // 暂时不使用扫描返回的专辑信息（通常是文件夹名），等待元数据填充
-      filePath: t.filePath,
-      dt: t.dt,
-      quality: t.quality ?? 'Standard'
-    }))
-
-    songs.value = list
-    void fillMeta()
-
-    message.success(`扫描完成，找到 ${songs.value.length} 首本地音乐`)
+    await localMusicStore.scanMusic()
+    message.success(`扫描完成，找到 ${localMusicStore.songs.length} 首本地音乐`)
   } catch (error) {
     console.error('扫描本地音乐失败', error)
     message.error('扫描本地音乐失败')
-  } finally {
-    loading.value = false
-  }
-}
-
-const fillMeta = async (): Promise<void> => {
-  if (fillingMeta.value) return
-  fillingMeta.value = true
-  try {
-    const targets = songs.value.filter((song) => {
-      if (!song.filePath) return false
-      const missingBasic =
-        !song.dt || !song.picUrl || !song.name || !song.ar || song.ar.length === 0
-      const isPlaceholderArtist =
-        song.ar && song.ar.length > 0 && song.ar[0].name === '本地音乐'
-      return missingBasic || isPlaceholderArtist
-    })
-    console.log('fillMeta start', songs.value.length, 'targets', targets.length)
-    if (!targets.length) return
-
-    // 对所有目标歌曲并发请求 meta
-    await Promise.all(
-      targets.map(async (song, index) => {
-        if (!song.filePath) return
-        try {
-          const result = (await window.electron.ipcRenderer.invoke(
-            'local-music:get-meta',
-            song.filePath
-          )) as {
-            durationMs?: number
-            bitrate?: number
-            sampleRate?: number
-            cover?: { mimeType: string; base64: string }
-            title?: string
-            artists?: string[]
-            album?: string
-            lyrics?: string
-          }
-
-          console.log('meta result', index, song.filePath, result)
-
-          if (result.lyrics) {
-            song.lyrics = result.lyrics
-            // 如果当前正在播放这首歌，且没有歌词，尝试更新 store 中的歌词
-            if (player.currentSong?.id === song.id && !player.currentSong.lyrics) {
-              player.currentSong.lyrics = result.lyrics
-            }
-          }
-
-          if (typeof result.durationMs === 'number' && result.durationMs > 0 && !song.dt) {
-            song.dt = result.durationMs
-          }
-
-          if (result.cover && result.cover.base64 && !song.picUrl) {
-            // 生成新的封面 data URL
-            const coverUrl = `data:${result.cover.mimeType};base64,${result.cover.base64}`
-            song.picUrl = coverUrl
-
-            // 如果当前正在播放这首歌，同步更新播放器当前歌曲封面
-            if (player.currentSong?.id === song.id) {
-              if (player.currentSong) {
-                player.currentSong.cover = coverUrl
-              }
-            }
-          }
-
-          if (result.title) {
-            song.name = result.title
-          }
-
-          if (result.artists && result.artists.length > 0) {
-            if (!song.ar || song.ar.length === 0 || song.ar[0].name === '本地音乐') {
-              song.ar = result.artists.map((n) => ({ name: n }))
-            }
-          }
-
-          if (result.album) {
-            if (!song.al) {
-              song.al = { name: result.album }
-            } else {
-              song.al.name = result.album
-            }
-          }
-
-          if (typeof result.bitrate === 'number' && result.bitrate > 0) {
-            song.bitrate = result.bitrate
-          }
-
-          if (typeof result.sampleRate === 'number' && result.sampleRate > 0) {
-            song.sampleRate = result.sampleRate
-          }
-
-          if (
-            (typeof result.bitrate === 'number' && result.bitrate > 0) ||
-            (typeof result.sampleRate === 'number' && result.sampleRate > 0)
-          ) {
-            song.quality = formatQualityFromMeta(
-              result.bitrate,
-              result.sampleRate
-            )
-          }
-        } catch (error) {
-          console.error('读取歌曲 meta 失败', song.filePath, error)
-        }
-      })
-    )
-  } finally {
-    fillingMeta.value = false
   }
 }
 </script>
@@ -596,6 +437,12 @@ const fillMeta = async (): Promise<void> => {
 
 html[data-theme='dark'] .header {
   background-color: rgba(255, 255, 255, 0);
+}
+
+html[data-theme='dark'] .search-input {
+  --n-color: rgba(255, 255, 255, 0.1) !important;
+  --n-color-focus: rgba(255, 255, 255, 0.15) !important;
+  --n-border: 1px solid rgba(255, 255, 255, 0.1) !important;
 }
 
 .title {

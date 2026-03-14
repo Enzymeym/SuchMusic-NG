@@ -101,13 +101,39 @@ export async function runSnowdropSetActivePlugin(
 export async function runSnowdropGetMusicUrl(
   source: string,
   musicInfo: any,
-  quality: string
+  quality: string,
+  retryCount: number = 3
 ): Promise<{ url: string }> {
-  const result = await window.electron.ipcRenderer.invoke(
-    CHANNEL_SNOWDROP_GET_MUSIC_URL,
-    source,
-    musicInfo,
-    quality
-  )
-  return result as { url: string }
+  let lastError: any
+
+  for (let i = 0; i <= retryCount; i++) {
+    try {
+      if (i > 0) {
+        console.warn(`[Snowdrop] 获取音乐链接失败，正在进行第 ${i}/${retryCount} 次重试...`)
+        // 简单的退避策略：每次重试前等待 1s * 次数
+        await new Promise((resolve) => setTimeout(resolve, 1000 * i))
+      }
+
+      const result = await window.electron.ipcRenderer.invoke(
+        CHANNEL_SNOWDROP_GET_MUSIC_URL,
+        source,
+        musicInfo,
+        quality
+      )
+
+      // 简单验证结果是否包含 url
+      if (result && result.url) {
+        return result as { url: string }
+      }
+      
+      // 如果没有抛出异常但没有 url，也视为失败，抛出错误以触发重试
+      throw new Error('Plugin returned empty URL')
+
+    } catch (error) {
+      console.error(`[Snowdrop] 获取音乐链接出错 (尝试 ${i + 1}/${retryCount + 1}):`, error)
+      lastError = error
+    }
+  }
+
+  throw lastError || new Error('Failed to get music url after retries')
 }

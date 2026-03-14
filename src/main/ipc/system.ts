@@ -1,9 +1,26 @@
 import { ipcMain, app } from 'electron'
+import { promises as fs } from 'fs'
 
 export function registerSystemHandlers(): void {
+  // 检查文件是否存在
+  ipcMain.handle('system:fs-exists', async (_event, filePath: string) => {
+    try {
+      await fs.access(filePath)
+      return true
+    } catch {
+      return false
+    }
+  })
+
   // 获取系统字体列表
   ipcMain.handle('system:get-fonts', async () => {
     try {
+      // 平台检测：非 Windows 不使用 PowerShell
+      if (process.platform !== 'win32') {
+        console.warn('获取系统字体功能暂不支持非 Windows 平台')
+        return []
+      }
+
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { exec } = require('child_process')
       const cmd = `powershell -command "Add-Type -AssemblyName System.Drawing; (New-Object System.Drawing.Text.InstalledFontCollection).Families.Name"`
@@ -37,5 +54,10 @@ export function registerSystemHandlers(): void {
       console.error('获取系统音乐目录异常:', error)
       return ''
     }
+  })
+
+  // 增加检测是否为 Mac 的 handler
+  ipcMain.handle('system:is-mac', () => {
+    return process.platform === 'darwin'
   })
 }

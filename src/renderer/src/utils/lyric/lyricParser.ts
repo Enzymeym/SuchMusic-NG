@@ -4,7 +4,13 @@ import { parseLrc as parseBetterLrc } from './ParseLrc'
 
 export function parseLyricsToCore(content: string): CoreLyricLine[] {
   if (!content) return []
-  const lrc = content.trim()
+  
+  // 确保 content 是字符串
+  let lrc = typeof content === 'string' ? content : String(content)
+  lrc = lrc.trim()
+  
+  if (!lrc) return []
+  
   let lines: any[] = []
 
   try {

@@ -164,7 +164,7 @@ export function registerLocalMusicHandlers(): void {
   ipcMain.handle('local-music:write-meta', async (_event, filePath: string, tags: any) => {
     try {
       const ext = extname(filePath).toLowerCase()
-      
+
       // 如果有封面图片数据，转换为 Buffer
       if (tags.image && typeof tags.image.imageBuffer === 'string') {
         tags.image.imageBuffer = Buffer.from(tags.image.imageBuffer, 'base64')
@@ -174,15 +174,15 @@ export function registerLocalMusicHandlers(): void {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const NodeID3 = require('node-id3')
         const buffer = await fs.readFile(filePath)
-        
+
         // 更新 tags
         // node-id3 的 update 方法返回一个新的 buffer
         const success = NodeID3.update(tags, buffer)
-        
+
         if (!success || success instanceof Error) {
           throw new Error('更新标签失败')
         }
-        
+
         // 写入文件
         await fs.writeFile(filePath, success as Buffer)
         return true
@@ -354,6 +354,52 @@ export function registerLocalMusicHandlers(): void {
     return { success: true }
   })
 
+  /**
+   * 检查在线播放缓存是否存在
+   * @param _event - IPC 事件对象
+   * @param options - 检查选项
+   * @param options.dir - 缓存目录路径，为空则使用默认目录
+   * @param options.key - 缓存键值，用于构造文件名
+   * @returns 缓存文件路径（如果存在且有效），否则返回 null
+   */
+  ipcMain.handle(
+    'online-cache:check',
+    async (_event, options: { dir?: string | null; key: string }) => {
+      const { dir, key } = options || ({} as any)
+
+      if (!key || typeof key !== 'string') {
+        return null
+      }
+
+      const cacheDir = await resolveCacheDir(dir)
+
+      // 构造安全的文件名（与 online-cache:prepare 保持一致）
+      const safeKey = key.replace(/[^\w.-]/g, '_')
+
+      // 查找可能的缓存文件（支持任意扩展名）
+      try {
+        const entries = await fs.readdir(cacheDir)
+        for (const entry of entries) {
+          if (entry.startsWith(safeKey + '.')) {
+            const filePath = join(cacheDir, entry)
+            try {
+              const stat = await fs.stat(filePath)
+              if (stat.isFile() && stat.size > 0) {
+                return filePath
+              }
+            } catch {
+              // 忽略单个文件的错误，继续查找
+            }
+          }
+        }
+      } catch {
+        // 目录不存在或无法读取，返回 null
+      }
+
+      return null
+    }
+  )
+
   // 准备在线播放缓存：如果已缓存则直接返回本地路径，否则下载后返回本地路径
   ipcMain.handle(
     'online-cache:prepare',
@@ -425,7 +471,7 @@ export function registerLocalMusicHandlers(): void {
       if (!Array.isArray(filePaths)) {
         throw new Error('Invalid input: filePaths must be an array')
       }
-      
+
       const results = await Promise.allSettled(filePaths.map(async (fp) => {
         try {
           await fs.unlink(fp)
@@ -438,14 +484,14 @@ export function registerLocalMusicHandlers(): void {
           throw e
         }
       }))
-      
+
       const failed = results.filter(r => r.status === 'rejected')
       if (failed.length > 0) {
         console.error('部分文件删除失败', failed)
         // 可以返回部分失败的信息，或者直接抛出异常
         // 这里简单起见，如果所有都失败才抛错，或者记录日志
       }
-      
+
       return {
         success: true,
         deletedCount: results.filter(r => r.status === 'fulfilled').length,
@@ -579,18 +625,18 @@ async function writeFlacTag(filePath: string, tags: any): Promise<boolean> {
 async function writeWavTag(filePath: string, tags: any): Promise<boolean> {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { WaveFile } = require('wavefile')
-  
+
   const buffer = await fs.readFile(filePath)
   const wav = new WaveFile(buffer)
 
   // Set ID3v2 tags
   // Note: WaveFile might throw if file format is invalid, handle in try/catch block outside
-  
+
   if (tags.title) wav.setTag('TIT2', tags.title)
   if (tags.artist) wav.setTag('TPE1', tags.artist)
   if (tags.album) wav.setTag('TALB', tags.album)
   if (tags.year) wav.setTag('TYER', String(tags.year))
-  
+
   // Image
   if (tags.image && tags.image.imageBuffer) {
     wav.setTag('APIC', {
@@ -600,7 +646,7 @@ async function writeWavTag(filePath: string, tags: any): Promise<boolean> {
       description: tags.image.description || ''
     })
   }
-  
+
   // Write back
   const newBuffer = wav.toBuffer()
   await fs.writeFile(filePath, newBuffer)

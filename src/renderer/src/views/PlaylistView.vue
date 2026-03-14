@@ -14,6 +14,7 @@
             style="padding: 0 16px; font-size: 15px;"
             size="large"
             round
+            type="primary"
             @click="createEmptyPlaylist"
           >
             <template #icon>
@@ -22,28 +23,6 @@
               </n-icon>
             </template>
             新建歌单
-          </n-button>
-          <n-button
-            type="primary"
-            style="padding: 0 16px; font-size: 15px;"
-            size="large"
-            secondary
-            round
-            @click="playAll"
-          >
-            <template #icon>
-              <n-icon size="14">
-                <i class="mgc_play_fill"></i>
-              </n-icon>
-            </template>
-            播放
-          </n-button>
-          <n-button secondary circle size="large" @click="createPlaylistFromCurrentQueue">
-            <template #icon>
-              <n-icon size="20">
-                <i class="mgc_playlist_add_line"></i>
-              </n-icon>
-            </template>
           </n-button>
           <n-button secondary strong circle size="large" @click="refreshPlaylist">
             <template #icon>
@@ -59,6 +38,7 @@
           clearable
           size="large"
           round
+          class="search-input"
           style="width: 200px"
         >
           <template #prefix>
@@ -150,11 +130,6 @@ onMounted(() => {
   }
 })
 
-const currentPlaylist = computed<UserPlaylist | null>(() => {
-  if (!selectedId.value) return playlists.value[0] || null
-  return playlists.value.find((pl) => pl.id === selectedId.value) || null
-})
-
 const handleSelect = (id: string) => {
   selectedId.value = id
   router.push(`/playlist/${id}`)
@@ -185,19 +160,6 @@ const handlePlayPlaylist = (id: string) => {
   }
 }
 
-const playAll = (): void => {
-  if (!playlists.value.length) {
-    message.info('当前没有歌单')
-    return
-  }
-  const pl = currentPlaylist.value || playlists.value[0]
-  if (!pl || !pl.tracks.length) {
-    message.info('该歌单中没有歌曲')
-    return
-  }
-  handlePlayPlaylist(pl.id)
-}
-
 const refreshPlaylist = (): void => {
   playlistStore.loadFromStorage()
   message.success('歌单已从本地存储重新加载')
@@ -206,18 +168,6 @@ const refreshPlaylist = (): void => {
 const createEmptyPlaylist = (): void => {
   const base = '新建歌单'
   createMode.value = 'empty'
-  newPlaylistName.value = `${base} (${new Date().toLocaleString()})`
-  showCreateModal.value = true
-}
-
-const createPlaylistFromCurrentQueue = (): void => {
-  if (!player.playlist.length) {
-    message.info('当前播放队列为空')
-    return
-  }
-
-  const base = '播放列表歌单'
-  createMode.value = 'queue'
   newPlaylistName.value = `${base} (${new Date().toLocaleString()})`
   showCreateModal.value = true
 }
@@ -283,6 +233,12 @@ const handleConfirmCreate = (): void => {
 
 html[data-theme='dark'] .header {
   background-color: rgba(255, 255, 255, 0);
+}
+
+html[data-theme='dark'] .search-input {
+  --n-color: rgba(255, 255, 255, 0.1) !important;
+  --n-color-focus: rgba(255, 255, 255, 0.15) !important;
+  --n-border: 1px solid rgba(255, 255, 255, 0.1) !important;
 }
 
 .title {

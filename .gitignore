@@ -9,3 +9,7 @@ symphonia-napi-decoder
 
 tests
 native
+.env.local
+src/renderer/src/utils/supabase.ts
+.figma
+.vscode

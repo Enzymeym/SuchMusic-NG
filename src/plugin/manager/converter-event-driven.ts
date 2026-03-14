@@ -203,7 +203,15 @@ function initializePlugin() {
         handleUpdateAlert(data, suchmusic);
       }
     },
-    request: request,
+    request: (url, options, callback) => {
+      if (typeof options === 'function') {
+        callback = options;
+        options = {};
+      }
+      return request(url, options, callback ? (err, resp) => {
+        callback(err, resp, resp ? resp.body : undefined);
+      } : undefined);
+    },
     utils: {
       buffer: utils.buffer,
       crypto: {

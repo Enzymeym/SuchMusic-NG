@@ -60,7 +60,17 @@ async function processPluginFile(filePath: string): Promise<ProcessPluginFileRes
      // 我们需要手动提取 meta 和 sources
     const host = new SuchMusicPluginHost(originalCode)
     const info = host.getPluginInfo()
-    const sources = host.getSupportedSources()
+    const rawSources = host.getSupportedSources()
+
+    let sources: any[] = []
+    if (Array.isArray(rawSources)) {
+      sources = rawSources
+    } else if (typeof rawSources === 'object' && rawSources !== null) {
+      sources = Object.entries(rawSources).map(([k, v]: [string, any]) => ({
+        id: k,
+        ...v
+      }))
+    }
 
     single = {
       transformedCode: originalCode,

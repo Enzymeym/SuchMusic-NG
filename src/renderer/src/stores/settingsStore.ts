@@ -11,6 +11,7 @@ export interface GeneralSettings {
   orpheusProtocol: boolean
   autoCheckUpdate: boolean
   updateChannel: 'stable' | 'beta'
+  searchResultOrder: string[]
 }
 
 export interface AppearanceSettings {
@@ -22,6 +23,7 @@ export interface AppearanceSettings {
   themeColorPreset: string
   customThemeColor: string
   playlistLayoutStyle: 'classic' | 'modern'
+  songListStyle: 'card' | 'plain'
 }
 
 export interface PlaybackSettings {
@@ -66,7 +68,8 @@ export const useSettingsStore = defineStore('settings', () => {
     taskbarProgress: true,
     orpheusProtocol: true,
     autoCheckUpdate: true,
-    updateChannel: 'stable'
+    updateChannel: 'stable',
+    searchResultOrder: ['tx', 'kg', 'wy', 'kw', 'bilibili', 'mg']
   })
 
   const appearance = ref<AppearanceSettings>({
@@ -77,7 +80,8 @@ export const useSettingsStore = defineStore('settings', () => {
     themeMode: 'system',
     themeColorPreset: 'default',
     customThemeColor: '#2C8EFD',
-    playlistLayoutStyle: 'classic'
+    playlistLayoutStyle: 'classic',
+    songListStyle: 'card'
   })
 
   const playback = ref<PlaybackSettings>({

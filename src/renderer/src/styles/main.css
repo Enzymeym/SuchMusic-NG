@@ -3,6 +3,11 @@
 /* 引入 highlight.js 默认代码高亮主题样式 */
 @import 'highlight.js/styles/github.css';
 
+@font-face {
+  font-family: 'SHSC';
+  src: url('../assets/SourceHanSerifCN-Bold-2.otf');
+}
+
 [class^='mgc_']::before,
 [class*=' mgc_']::before {
   color: inherit !important;

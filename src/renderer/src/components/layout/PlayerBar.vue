@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch, onMounted } from 'vue'
-import { NSlider, NIcon, NText, NButton, NPopover, useThemeVars, NDrawer, NDrawerContent, NEmpty, NDropdown } from 'naive-ui'
+import { NSlider, NIcon, NText, NButton, NPopover, useThemeVars, NDrawer, NDrawerContent, NEmpty, NDropdown, useMessage } from 'naive-ui'
 import { usePlayerStore, type PlayerSong } from '../../stores/playerStore'
+import { usePlaylistStore } from '../../stores/playlistStore'
 import defaultCover from '@renderer/assets/icon.png'
 import { webAudioEngine } from '../../audio/audio-engine'
 import PlayerPage from './PlayerPage.vue'
@@ -9,9 +10,11 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useDesktopLyric } from '../../composables/useDesktopLyric'
 import { useTaskbarLyric } from '../../composables/useTaskbarLyric'
 import { runSnowdropGetMusicUrl } from '../../apis/snowdrop-transform'
-import { cloudSearch } from '../../apis/netease/search'
+import { fetchGMALyric } from '../../apis/gma'
+import { AudioPlayerManager } from '../../utils/audioPlayerManager'
 
 const themeVars = useThemeVars()
+const message = useMessage()
 
 // 简单混合两个十六进制颜色，用于活跃列表项背景过渡
 const mixHexColor = (color1: string, color2: string, weight: number): string => {
@@ -40,6 +43,7 @@ const mixHexColor = (color1: string, color2: string, weight: number): string => 
 
 // 获取全局播放器 store
 const player = usePlayerStore()
+const playlistStore = usePlaylistStore()
 // 获取全局设置 store
 const settingsStore = useSettingsStore()
 
@@ -51,224 +55,525 @@ onMounted(() => {
   initTaskbarLyric()
 })
 
+// 歌词重试获取函数
+const fetchLyricWithRetry = async (id: string, source: string): Promise<string> => {
+  const { fetchNewLyric } = await import('../../apis/netease/lyric')
+  
+  let attempt = 0
+  while (true) {
+    // 检查当前播放歌曲是否改变，如果改变则停止重试
+    const currentId = player.currentSong?.sourceSongId ?? player.currentSong?.id
+    if (String(currentId) !== String(id)) {
+      return ''
+    }
+
+    try {
+      // 如果是网易云，使用 fetchNewLyric (支持 yrc)
+      if (source === 'wy' || source === 'netease') {
+        const lyricRes = await fetchNewLyric(Number(id))
+        if (lyricRes && lyricRes.code === 200) {
+          const lrc =
+            lyricRes.yrc?.lyric ||
+            lyricRes.lrc?.lyric ||
+            lyricRes.klyric?.lyric ||
+            lyricRes.tlyric?.lyric ||
+            lyricRes.romalrc?.lyric ||
+            ''
+          if (lrc) return lrc
+        }
+      } else {
+        // 其他平台继续使用 fetchGMALyric
+        const lrc = await fetchGMALyric(id, source)
+        if (lrc) return lrc
+      }
+    } catch (e) {
+      console.warn(`[PlayerBar] 获取歌词失败，第 ${attempt + 1} 次重试:`, e)
+    }
+    
+    attempt++
+    // 指数退避策略，最大延迟 5 秒
+    const delay = Math.min(500 + attempt * 500, 5000)
+    await new Promise((resolve) => setTimeout(resolve, delay))
+  }
+}
+
+// 加载并播放歌曲的核心逻辑
+const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => {
+  // 决定是否播放：如果是强制播放，则为 true；否则读取 store 中的 shouldAutoPlay
+  // 注意：如果是 watch 触发（forcePlay=false），我们需要消费并重置 shouldAutoPlay
+  let shouldPlay = forcePlay
+  if (!forcePlay) {
+    shouldPlay = player.shouldAutoPlay
+    player.shouldAutoPlay = true
+  }
+
+  // 优化切歌体验：
+  // 1. 立即重置进度条显示，给用户“已切换”的反馈
+  // 如果是不自动播放（恢复状态），则保留进度
+  if (shouldPlay) {
+    player.setPosition(0)
+  }
+
+  const currentProcessId = song.id
+
+  if ((song as any).filePath && window.electron && window.electron.ipcRenderer) {
+    // 先检查文件是否存在
+    const exists = await window.electron.ipcRenderer.invoke('system:fs-exists', (song as any).filePath)
+    
+    if (player.currentSong?.id !== currentProcessId) return
+
+    if (exists) {
+      // 尝试加载本地歌词（如果缺失）
+      if (!song.lyrics) {
+        window.electron.ipcRenderer.invoke('local-music:get-meta', (song as any).filePath).then((meta: any) => {
+          if (meta && meta.lyrics && player.currentSong?.id === song.id) {
+            player.setLyrics(meta.lyrics)
+          }
+        }).catch(err => {
+          console.warn('Failed to load local lyrics:', err)
+        })
+      }
+
+      try {
+        if (shouldPlay) {
+          await AudioPlayerManager.play({
+            filePath: (song as any).filePath,
+            volume: player.volume
+          })
+        } else {
+          await AudioPlayerManager.load({
+            filePath: (song as any).filePath,
+            volume: player.volume
+          })
+          // 恢复进度
+          if (player.positionMs > 0) {
+            webAudioEngine.seek(player.positionMs)
+          }
+        }
+        
+        if (player.currentSong?.id !== currentProcessId) {
+           webAudioEngine.stop() // 如果播放后发现切歌了，立即停止
+           return
+        }
+        if (shouldPlay) {
+          player.setPlaying(true)
+        }
+        return
+      } catch (e) {
+        console.error('Failed to play song from bar (file)', e)
+      }
+    } else {
+      console.warn('[PlayerBar] Local file not found, falling back to online:', (song as any).filePath);
+      // 关键修正：文件不存在时，清除 filePath，以便后续逻辑能进入在线/搜索流程
+      (song as any).filePath = undefined;
+    }
+  }
+
+  if (!((song as any).filePath)) {
+    try {
+      const songId = song.sourceSongId ?? song.id
+      const musicInfo = {
+        id: String(songId),
+        name: song.title,
+        singer: song.artist || '未知歌手',
+        albumName: song.album || '未知专辑',
+        pic: song.cover || '',
+        songmid: String(songId),
+        mediaId: String(songId)
+      }
+
+      // 确定源平台：
+      // 1. 如果歌曲自身带有 source 属性，优先使用它（映射到插件所需的源标识）
+      // 2. 否则使用设置中的首选平台
+      let source = 'wy' // 默认为网易云 (wy)
+      if (song.source) {
+         // 映射 source 到插件支持的标识
+         // 假设插件支持的标识: wy, tx, kg, kw, mg, bilibili 等
+         switch (song.source) {
+           case 'netease': source = 'wy'; break;
+           case 'qq': source = 'tx'; break;
+           case 'kugou': source = 'kg'; break;
+           case 'kuwo': source = 'kw'; break;
+           case 'migu': source = 'mg'; break;
+           default: source = song.source; break;
+         }
+      } else if (settingsStore.source.preferredPlatform && settingsStore.source.preferredPlatform !== 'all') {
+         const pref = settingsStore.source.preferredPlatform
+         if (pref === 'netease') source = 'wy'
+         else if (pref === 'qq') source = 'tx'
+         else if (pref === 'kugou') source = 'kg'
+         else if (pref === 'kuwo') source = 'kw'
+         else if (pref === 'migu') source = 'mg'
+         else source = pref
+      }
+
+      const quality = settingsStore.source.preferredQuality || '128k'
+      const cacheKey = `${source}:${songId}:${quality}`
+
+      // 尝试在获取在线 URL 之前，先检查本地缓存
+      let cacheFilePath: string | null = null
+      if (window.electron && window.electron.ipcRenderer) {
+        try {
+          const cachePath = await window.electron.ipcRenderer.invoke('online-cache:check', {
+            dir: settingsStore.local.cacheDir || null,
+            key: cacheKey
+          })
+          
+          if (player.currentSong?.id !== currentProcessId) return
+
+          if (cachePath) {
+            console.log('[PlayerBar] 主动检测到缓存文件存在，跳过在线获取', cachePath)
+            cacheFilePath = cachePath
+          }
+        } catch (e) {
+          console.warn('[PlayerBar] 主动检测缓存失败:', e)
+        }
+      }
+
+      // 如果检测到缓存，直接播放缓存，跳过 fetchGMALyric 和 runSnowdropGetMusicUrl
+      // 但为了保证歌词显示，如果本地没有歌词，还是需要尝试获取歌词
+      if (cacheFilePath) {
+        // 尝试获取歌词（如果当前歌曲没有歌词）
+        if (!song.lyrics) {
+           fetchLyricWithRetry(String(songId), source).then(lyric => {
+             if (lyric && player.currentSong?.id === song.id) {
+               player.setLyrics(lyric)
+             }
+           }).catch(e => console.error('Failed to fetch lyric in PlayerBar:', e))
+        }
+
+        try {
+          if (shouldPlay) {
+            await AudioPlayerManager.play({
+              filePath: cacheFilePath,
+              volume: player.volume
+            })
+          } else {
+            await AudioPlayerManager.load({
+              filePath: cacheFilePath,
+              volume: player.volume
+            })
+            // 恢复进度
+            if (player.positionMs > 0) {
+              webAudioEngine.seek(player.positionMs)
+            }
+          }
+          
+          if (player.currentSong?.id !== currentProcessId) {
+             webAudioEngine.stop()
+             return
+          }
+
+          // 更新当前歌曲的 filePath，以便后续使用
+          const updatedSong: PlayerSong = {
+            ...song,
+            filePath: cacheFilePath,
+            source: song.source,
+            sourceSongId: song.sourceSongId
+          }
+          player.setCurrentSong(updatedSong)
+          if (shouldPlay) {
+            player.setPlaying(true)
+          }
+          return // 成功播放缓存，直接返回，不再执行后续在线获取逻辑
+        } catch (e) {
+          console.error('[PlayerBar] 播放缓存文件失败，回退到在线流程:', e)
+          // 播放失败，继续走下面的在线获取流程
+          cacheFilePath = null 
+        }
+      }
+
+      // 尝试获取歌词（如果当前歌曲没有歌词）
+      if (!song.lyrics) {
+         // 使用重试机制获取歌词
+         fetchLyricWithRetry(String(songId), source).then(lyric => {
+           console.log('[PlayerBar] Fetched lyric with retry:', lyric ? 'Success' : 'Empty')
+           if (lyric && player.currentSong?.id === song.id) {
+             player.setLyrics(lyric)
+           }
+         }).catch(e => console.error('Failed to fetch lyric in PlayerBar:', e))
+      }
+
+      const { url } = await runSnowdropGetMusicUrl(source, musicInfo, quality)
+      if (player.currentSong?.id !== currentProcessId) return
+
+      if (!url) {
+        throw new Error('未获取到播放链接')
+      }
+
+      // const cacheKey = ... (上面已定义)
+      let finalUrl = url
+      // let cacheFilePath = null (上面已定义)
+
+      if (window.electron && window.electron.ipcRenderer) {
+        try {
+          const cacheResult = (await window.electron.ipcRenderer.invoke(
+            'online-cache:prepare',
+            {
+              dir: settingsStore.local.cacheDir || null,
+              key: cacheKey,
+              url
+            }
+          )) as { usedCache: boolean; filePath: string | null; url: string }
+          
+          if (player.currentSong?.id !== currentProcessId) return
+
+          if (cacheResult.filePath) {
+            cacheFilePath = cacheResult.filePath
+            finalUrl = cacheResult.url || url
+            console.log('[PlayerBar][OnlineCache] 使用缓存文件播放', {
+              cacheKey,
+              filePath: cacheFilePath,
+              usedCache: cacheResult.usedCache,
+              url: cacheResult.url
+            })
+          }
+        } catch (e) {
+          console.error('[PlayerBar] 准备在线播放缓存失败:', e)
+        }
+      }
+
+      if (cacheFilePath && window.electron && window.electron.ipcRenderer) {
+        try {
+          if (shouldPlay) {
+            await AudioPlayerManager.play({
+              filePath: cacheFilePath,
+              volume: player.volume
+            })
+          } else {
+            await AudioPlayerManager.load({
+              filePath: cacheFilePath,
+              volume: player.volume
+            })
+            // 恢复进度
+            if (player.positionMs > 0) {
+              webAudioEngine.seek(player.positionMs)
+            }
+          }
+        } catch (e) {
+          console.error('[PlayerBar] 从缓存文件播放失败，回退到在线播放:', e)
+          if (player.currentSong?.id !== currentProcessId) {
+            webAudioEngine.stop()
+            return
+          }
+          if (shouldPlay) {
+            await AudioPlayerManager.play({
+              url: finalUrl,
+              volume: player.volume
+            })
+          } else {
+            await AudioPlayerManager.load({
+              url: finalUrl,
+              volume: player.volume
+            })
+            // 恢复进度
+            if (player.positionMs > 0) {
+              webAudioEngine.seek(player.positionMs)
+            }
+          }
+        }
+      } else {
+        if (shouldPlay) {
+          await AudioPlayerManager.play({
+            url: finalUrl,
+            volume: player.volume
+          })
+        } else {
+          await AudioPlayerManager.load({
+            url: finalUrl,
+            volume: player.volume
+          })
+          // 恢复进度
+          if (player.positionMs > 0) {
+            webAudioEngine.seek(player.positionMs)
+          }
+        }
+      }
+      
+      if (player.currentSong?.id !== currentProcessId) {
+         webAudioEngine.stop()
+         return
+      }
+
+      const updatedSong: PlayerSong = {
+        id: song.id,
+        title: song.title,
+        artist: song.artist,
+        album: song.album,
+        cover: song.cover,
+        durationMs: song.durationMs,
+        filePath: cacheFilePath || undefined,
+        source: song.source,
+        sourceSongId: song.sourceSongId,
+        // 保留已有的歌词，防止被覆盖为空
+        lyrics: song.lyrics || player.currentSong?.lyrics
+      }
+      player.setCurrentSong(updatedSong)
+      if (shouldPlay) {
+        player.setPlaying(true)
+      }
+    } catch (e) {
+      console.error('[PlayerBar] 获取并播放在线歌曲失败:', e)
+    }
+  }
+
+  if (!((song as any).filePath) && !song.source && !song.sourceSongId) {
+    try {
+      const platform = settingsStore.source.preferredPlatform
+      // 仅当首选平台为网易云或所有平台时，才使用网易云搜索回退
+      if (platform !== 'wy' && platform !== 'netease' && platform !== 'all') {
+        return
+      }
+
+      const name = song.title || ''
+      const artist = (song as any).artist || ''
+      const keyword = name
+
+      const { cloudSearch } = await import('../../apis/netease/search/cloudsearch')
+      const res = await cloudSearch(keyword, 1, 10, 0)
+      
+      if (player.currentSong?.id !== currentProcessId) return
+
+      const songs = res?.result?.songs || []
+
+      const norm = (s: string) => s.toLowerCase().trim()
+      const target = songs.find((s: any) => {
+        const sName = norm(s.name || '')
+        const sArtist = norm((s.ar || []).map((a: any) => a.name).join(' / ') || '')
+        const tName = norm(name)
+        const tArtist = norm(artist)
+        return sName === tName && (!tArtist || sArtist === tArtist)
+      }) || songs[0]
+
+      if (!target) {
+        return
+      }
+
+      const neteaseId = target.id
+
+      const musicInfo = {
+        id: String(neteaseId),
+        name: target.name,
+        singer: (target.ar || []).map((a: any) => a.name).join(' / ') || '未知歌手',
+        albumName: target.al?.name || '未知专辑',
+        pic: target.al?.picUrl || '',
+        songmid: String(neteaseId),
+        mediaId: String(neteaseId)
+      }
+
+      // 这里使用的是网易云搜索结果，所以 source 固定为 wy
+      const source = 'wy'
+      const quality = settingsStore.source.preferredQuality || '128k'
+
+      const { url } = await runSnowdropGetMusicUrl(source, musicInfo, quality)
+      if (player.currentSong?.id !== currentProcessId) return
+      if (!url) {
+        throw new Error('未获取到播放链接')
+      }
+
+      const cacheKey = `wy:${neteaseId}:${quality}`
+      let finalUrl = url
+      let cacheFilePath: string | null = null
+
+      if (window.electron && window.electron.ipcRenderer) {
+        try {
+          const cacheResult = (await window.electron.ipcRenderer.invoke(
+            'online-cache:prepare',
+            {
+              dir: settingsStore.local.cacheDir || null,
+              key: cacheKey,
+              url
+            }
+          )) as { usedCache: boolean; filePath: string | null; url: string }
+
+          if (player.currentSong?.id !== currentProcessId) return
+
+          if (cacheResult.filePath) {
+            cacheFilePath = cacheResult.filePath
+            finalUrl = cacheResult.url || url
+            console.log('[PlayerBar][SearchFallback][OnlineCache] 使用缓存文件播放', {
+              cacheKey,
+              filePath: cacheFilePath,
+              usedCache: cacheResult.usedCache,
+              url: cacheResult.url
+            })
+          }
+        } catch (e) {
+          console.error('[PlayerBar][SearchFallback] 准备在线播放缓存失败:', e)
+        }
+      }
+
+      if (cacheFilePath && window.electron && window.electron.ipcRenderer) {
+        try {
+          const data = (await window.electron.ipcRenderer.invoke(
+            'audio:load-file',
+            cacheFilePath
+          )) as ArrayBuffer
+          
+          if (player.currentSong?.id !== currentProcessId) return
+
+          webAudioEngine.setVolume(player.volume)
+          if (shouldPlay) {
+            await webAudioEngine.playFromFileData(data)
+          } else {
+            await webAudioEngine.loadFromFileData(data)
+            if (player.positionMs > 0) webAudioEngine.seek(player.positionMs)
+          }
+        } catch (e) {
+          console.error('[PlayerBar][SearchFallback] 从缓存文件播放失败，回退到在线播放:', e)
+          if (player.currentSong?.id !== currentProcessId) {
+             webAudioEngine.stop()
+             return
+          }
+          if (shouldPlay) {
+            await webAudioEngine.playFromUrl(finalUrl)
+          } else {
+            await webAudioEngine.loadFromUrl(finalUrl)
+            if (player.positionMs > 0) webAudioEngine.seek(player.positionMs)
+          }
+        }
+      } else {
+        if (shouldPlay) {
+          await webAudioEngine.playFromUrl(finalUrl)
+        } else {
+          await webAudioEngine.loadFromUrl(finalUrl)
+          if (player.positionMs > 0) webAudioEngine.seek(player.positionMs)
+        }
+      }
+
+      if (player.currentSong?.id !== currentProcessId) {
+         webAudioEngine.stop()
+         return
+      }
+
+      const updatedSong: PlayerSong = {
+        id: song.id,
+        title: song.title || target.name,
+        artist: song.artist || (target.ar || []).map((a: any) => a.name).join(' / ') || '未知歌手',
+        album: song.album || target.al?.name || '未知专辑',
+        cover: song.cover || target.al?.picUrl || '',
+        durationMs: song.durationMs || target.dt || 0,
+        filePath: cacheFilePath || undefined,
+        source: 'netease',
+        sourceSongId: neteaseId,
+        // 保留已有的歌词，防止被覆盖为空
+        lyrics: song.lyrics || player.currentSong?.lyrics
+      }
+      player.setCurrentSong(updatedSong)
+      if (shouldPlay) {
+        player.setPlaying(true)
+      }
+    } catch (e) {
+      console.error('[PlayerBar][SearchFallback] 搜索并播放歌曲失败:', e)
+    }
+  }
+}
+
 // 监听 currentSong 变化，触发播放
 // 注意：LocalMusicView 中也有播放逻辑，这里主要是响应上一首/下一首的切换
 watch(() => player.currentSong, async (newSong, oldSong) => {
   if (newSong && newSong.id !== oldSong?.id) {
-     if ((newSong as any).filePath && window.electron && window.electron.ipcRenderer) {
-        try {
-          const data = (await window.electron.ipcRenderer.invoke(
-            'audio:load-file',
-            (newSong as any).filePath
-          )) as ArrayBuffer
-          webAudioEngine.setVolume(player.volume)
-          await webAudioEngine.playFromFileData(data)
-          player.setPlaying(true)
-          return
-        } catch (e) {
-          console.error('Failed to play song from bar (file)', e)
-        }
-     }
-
-     if (!((newSong as any).filePath) && newSong.source === 'netease') {
-       try {
-         const neteaseId = newSong.sourceSongId ?? newSong.id
-         const musicInfo = {
-           id: String(neteaseId),
-           name: newSong.title,
-           singer: newSong.artist || '未知歌手',
-           albumName: newSong.album || '未知专辑',
-           pic: newSong.cover || '',
-           songmid: String(neteaseId),
-           mediaId: String(neteaseId)
-         }
-
-         const source =
-           settingsStore.source.preferredPlatform === 'all'
-             ? 'wy'
-             : settingsStore.source.preferredPlatform
-         const quality = settingsStore.source.preferredQuality || '128k'
-
-         const { url } = await runSnowdropGetMusicUrl(source, musicInfo, quality)
-         if (!url) {
-           throw new Error('未获取到播放链接')
-         }
-
-         const cacheKey = `netease:${neteaseId}:${quality}`
-         let finalUrl = url
-         let cacheFilePath: string | null = null
-
-         if (window.electron && window.electron.ipcRenderer) {
-           try {
-             const cacheResult = (await window.electron.ipcRenderer.invoke(
-               'online-cache:prepare',
-               {
-                 dir: settingsStore.local.cacheDir || null,
-                 key: cacheKey,
-                 url
-               }
-             )) as { usedCache: boolean; filePath: string | null; url: string }
-             if (cacheResult.filePath) {
-               cacheFilePath = cacheResult.filePath
-               finalUrl = cacheResult.url || url
-               console.log('[PlayerBar][OnlineCache] 使用缓存文件播放', {
-                 cacheKey,
-                 filePath: cacheFilePath,
-                 usedCache: cacheResult.usedCache,
-                 url: cacheResult.url
-               })
-             }
-           } catch (e) {
-             console.error('[PlayerBar] 准备在线播放缓存失败:', e)
-           }
-         }
-
-         if (cacheFilePath && window.electron && window.electron.ipcRenderer) {
-           try {
-             const data = (await window.electron.ipcRenderer.invoke(
-               'audio:load-file',
-               cacheFilePath
-             )) as ArrayBuffer
-             webAudioEngine.setVolume(player.volume)
-             await webAudioEngine.playFromFileData(data)
-           } catch (e) {
-             console.error('[PlayerBar] 从缓存文件播放失败，回退到在线播放:', e)
-             await webAudioEngine.playFromUrl(finalUrl)
-           }
-         } else {
-           await webAudioEngine.playFromUrl(finalUrl)
-         }
-
-         const updatedSong: PlayerSong = {
-           id: newSong.id,
-           title: newSong.title,
-           artist: newSong.artist,
-           album: newSong.album,
-           cover: newSong.cover,
-           durationMs: newSong.durationMs,
-           filePath: cacheFilePath || undefined,
-           source: newSong.source,
-           sourceSongId: newSong.sourceSongId
-         }
-         player.setCurrentSong(updatedSong)
-         player.setPlaying(true)
-       } catch (e) {
-         console.error('[PlayerBar] 获取并播放在线歌曲失败:', e)
-       }
-     }
-
-     if (!((newSong as any).filePath) && !newSong.source && !newSong.sourceSongId) {
-       try {
-         const platform = settingsStore.source.preferredPlatform
-         if (platform !== 'netease' && platform !== 'all') {
-           return
-         }
-
-         const name = newSong.title || ''
-         const artist = (newSong as any).artist || ''
-         const keyword = name
-
-         const res = await cloudSearch(keyword, 1, 10, 0)
-         const songs = res?.result?.songs || []
-
-         const norm = (s: string) => s.toLowerCase().trim()
-         const target = songs.find((s: any) => {
-           const sName = norm(s.name || '')
-           const sArtist = norm((s.ar || []).map((a: any) => a.name).join(' / ') || '')
-           const tName = norm(name)
-           const tArtist = norm(artist)
-           return sName === tName && (!tArtist || sArtist === tArtist)
-         }) || songs[0]
-
-         if (!target) {
-           return
-         }
-
-         const neteaseId = target.id
-
-         const musicInfo = {
-           id: String(neteaseId),
-           name: target.name,
-           singer: (target.ar || []).map((a: any) => a.name).join(' / ') || '未知歌手',
-           albumName: target.al?.name || '未知专辑',
-           pic: target.al?.picUrl || '',
-           songmid: String(neteaseId),
-           mediaId: String(neteaseId)
-         }
-
-         const source =
-           settingsStore.source.preferredPlatform === 'all'
-             ? 'wy'
-             : settingsStore.source.preferredPlatform
-         const quality = settingsStore.source.preferredQuality || '128k'
-
-         const { url } = await runSnowdropGetMusicUrl(source, musicInfo, quality)
-         if (!url) {
-           throw new Error('未获取到播放链接')
-         }
-
-         const cacheKey = `netease:${neteaseId}:${quality}`
-         let finalUrl = url
-         let cacheFilePath: string | null = null
-
-         if (window.electron && window.electron.ipcRenderer) {
-           try {
-             const cacheResult = (await window.electron.ipcRenderer.invoke(
-               'online-cache:prepare',
-               {
-                 dir: settingsStore.local.cacheDir || null,
-                 key: cacheKey,
-                 url
-               }
-             )) as { usedCache: boolean; filePath: string | null; url: string }
-             if (cacheResult.filePath) {
-               cacheFilePath = cacheResult.filePath
-               finalUrl = cacheResult.url || url
-               console.log('[PlayerBar][SearchFallback][OnlineCache] 使用缓存文件播放', {
-                 cacheKey,
-                 filePath: cacheFilePath,
-                 usedCache: cacheResult.usedCache,
-                 url: cacheResult.url
-               })
-             }
-           } catch (e) {
-             console.error('[PlayerBar][SearchFallback] 准备在线播放缓存失败:', e)
-           }
-         }
-
-         if (cacheFilePath && window.electron && window.electron.ipcRenderer) {
-           try {
-             const data = (await window.electron.ipcRenderer.invoke(
-               'audio:load-file',
-               cacheFilePath
-             )) as ArrayBuffer
-             webAudioEngine.setVolume(player.volume)
-             await webAudioEngine.playFromFileData(data)
-           } catch (e) {
-             console.error('[PlayerBar][SearchFallback] 从缓存文件播放失败，回退到在线播放:', e)
-             await webAudioEngine.playFromUrl(finalUrl)
-           }
-         } else {
-           await webAudioEngine.playFromUrl(finalUrl)
-         }
-
-         const updatedSong: PlayerSong = {
-           id: newSong.id,
-           title: newSong.title || target.name,
-           artist: newSong.artist || (target.ar || []).map((a: any) => a.name).join(' / ') || '未知歌手',
-           album: newSong.album || target.al?.name || '未知专辑',
-           cover: newSong.cover || target.al?.picUrl || '',
-           durationMs: newSong.durationMs || target.dt || 0,
-           filePath: cacheFilePath || undefined,
-           source: 'netease',
-           sourceSongId: neteaseId
-         }
-         player.setCurrentSong(updatedSong)
-         player.setPlaying(true)
-       } catch (e) {
-         console.error('[PlayerBar][SearchFallback] 搜索并播放歌曲失败:', e)
-       }
-     }
+     await loadAndPlaySong(newSong)
   }
 })
 
@@ -282,11 +587,17 @@ const togglePlay = async () => {
     updateMediaPositionState()
   } else {
     if (player.currentSong) {
-      await webAudioEngine.resume()
-      player.setPlaying(true)
-      // 主动更新 SMTC 播放状态
-      updateMediaPlaybackState()
-      updateMediaPositionState()
+      const success = await webAudioEngine.play()
+      if (success) {
+        player.setPlaying(true)
+        // 主动更新 SMTC 播放状态
+        updateMediaPlaybackState()
+        updateMediaPositionState()
+      } else {
+        // 播放失败（如未加载），尝试重新加载并播放
+        console.log('[PlayerBar] Play failed, reloading song...')
+        await loadAndPlaySong(player.currentSong, true)
+      }
     }
   }
 }
@@ -535,7 +846,7 @@ const ensureMediaSessionHandlers = () => {
   // 播放
   mediaSession.setActionHandler('play', async () => {
     if (!player.isPlaying) {
-      await webAudioEngine.resume()
+      await webAudioEngine.play()
       player.setPlaying(true)
       updateMediaPlaybackState()
       updateMediaPositionState()
@@ -556,6 +867,7 @@ const ensureMediaSessionHandlers = () => {
   mediaSession.setActionHandler('previoustrack', () => {
     player.playPrev()
   })
+
 
   // 下一首
   mediaSession.setActionHandler('nexttrack', () => {
@@ -677,9 +989,40 @@ const playlistSourceLabel = computed(() => {
   }
 })
 
-const handlePlaylistSourceSelect = (key: 'search' | 'recent' | 'local') => {
-  player.switchPlaylistSource(key)
+const handlePlaylistSourceSelect = (key: string | number) => {
+  player.playlistSource = key as any
 }
+
+const toggleFavorite = () => {
+  if (!player.currentSong) return
+  const isAdded = playlistStore.toggleFavorite({
+    id: player.currentSong.id,
+    title: player.currentSong.title,
+    artist: player.currentSong.artist,
+    album: player.currentSong.album,
+    cover: player.currentSong.cover,
+    filePath: (player.currentSong as any).filePath,
+    durationMs: player.currentSong.durationMs,
+    source: player.currentSong.source,
+    sourceSongId: player.currentSong.sourceSongId
+  })
+  if (isAdded) {
+    message.success('已添加到我喜爱的音乐')
+  } else {
+    message.success('已取消收藏')
+  }
+}
+
+const isCurrentFavorite = computed(() => {
+  if (!player.currentSong) return false
+  return playlistStore.isFavorite({
+    id: player.currentSong.id,
+    title: player.currentSong.title,
+    artist: player.currentSong.artist,
+    source: player.currentSong.source,
+    sourceSongId: player.currentSong.sourceSongId
+  })
+})
 
 const handleRemove = (song: PlayerSong) => {
   if (song.id) {
@@ -735,7 +1078,11 @@ watch(showPlaylist, (val) => {
             <n-text strong class="song-title">
               {{ player.currentSong?.title || '未选择歌曲' }}
             </n-text>
-            <n-icon size="18" class="icon-btn"><i class="mgc_heart_line"></i></n-icon>
+            <n-button text @click="toggleFavorite">
+              <n-icon size="18" :color="isCurrentFavorite ? '#d03050' : undefined">
+                <i :class="isCurrentFavorite ? 'mgc_heart_fill' : 'mgc_heart_line'"></i>
+              </n-icon>
+            </n-button>
           </div>
           <n-text depth="3" class="song-artist">
             {{ player.currentSong?.artist || '未知歌手' }}
@@ -761,9 +1108,11 @@ watch(showPlaylist, (val) => {
         <n-button strong circle quaternary class="control-btn" @click="handleNext"
           ><n-icon style="margin: 3px" size="22"><i class="mgc_skip_forward_fill"></i></n-icon
         ></n-button>
-        <n-button strong circle quaternary class="control-btn"
-          ><n-icon size="20"><i class="mgc_heart_line"></i></n-icon
-        ></n-button>
+        <n-button strong circle quaternary class="control-btn" @click="toggleFavorite">
+          <n-icon size="20" :color="isCurrentFavorite ? '#d03050' : undefined">
+            <i :class="isCurrentFavorite ? 'mgc_heart_fill' : 'mgc_heart_line'"></i>
+          </n-icon>
+        </n-button>
       </div>
     </div>
 

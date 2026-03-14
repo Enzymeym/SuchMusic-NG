@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
-import { NButton, NDivider, NTag, NSpin, NModal, NCode, NDropdown, NInput, NCard, NSelect } from 'naive-ui'
+import { NButton, NDivider, NTag, NSpin, NModal, NCode, NDropdown, NInput, NCard, NSelect, useMessage } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
+import { usePluginStore } from '../../../stores/pluginStore'
+import { PluginInitModal } from '../PluginInitModal'
+import type { Plugin } from '../../../types/plugin'
 import {
   runSnowdropTransformFromFile,
   runSnowdropLoadAllPlugins,
@@ -18,20 +21,34 @@ const props = defineProps<{
   highlightKey?: string | null
 }>()
 
+const message = useMessage()
+const settingsStore = useSettingsStore()
+const pluginStore = usePluginStore()
+
+// ============ 落雪插件相关状态 ============
 // 当前是否在解析或加载音源插件
 const loading = ref(false)
 // 已加载的音源插件列表
 const plugins = ref<SnowdropTransformTestResult[]>([])
 // 当前被选中的插件文件路径（一次只能选一个）
 const activeFilePath = ref<string | null>(null)
-// 导入方式下拉选项
-const importOptions = [
-  { key: 'file', label: '从本地文件导入' },
-  { key: 'url', label: '从在线 URL 导入' }
+// 导入方式下拉选项（支持选择落雪或 Such 插件）
+const importOptions: any[] = [
+  {
+    key: 'snowdrop-file',
+    label: '落雪插件 - 本地文件',
+    icon: 'mgc_snow_line'
+  },
+  {
+    key: 'snowdrop-url',
+    label: '落雪插件 - 在线 URL',
+    icon: 'mgc_link_line'
+  }
 ]
 // URL 导入对话框状态
 const showImportUrlModal = ref(false)
 const importUrl = ref('')
+const importUrlType = ref<'snowdrop' | 'such'>('snowdrop')
 // 最近一次操作的错误信息
 const errorMessage = ref<string | null>(null)
 // 日志对话框显示状态
@@ -39,7 +56,15 @@ const showLogsModal = ref(false)
 // 当前查看日志的插件结果
 const currentLogResult = ref<SnowdropTransformTestResult | null>(null)
 
-const settingsStore = useSettingsStore()
+// ============ Such 插件相关状态 ============
+// Such 插件列表
+const suchPlugins = ref<Plugin[]>([])
+// 当前激活的 Such 插件ID
+const activeSuchPluginId = ref<string | null>(null)
+// 插件初始化弹窗显示状态
+const showPluginInitModal = ref(false)
+// 当前要初始化的插件ID
+const currentInitPluginId = ref<string | undefined>(undefined)
 
 const qualityLabelMap: Record<string, string> = {
   '128k': '标准音质 (128k)',
@@ -87,7 +112,7 @@ const qualityOptions = computed(() => {
 
   // 排序优先级
   const priority = ['128k', '320k', 'flac', 'flac24bit', 'hires', 'master', 'atmos']
-  
+
   return Array.from(availableQualities)
     .sort((a, b) => {
       const idxA = priority.indexOf(a)
@@ -121,11 +146,12 @@ const platformOptions = computed(() => {
   const options = [
     { label: '所有平台 (默认)', value: 'all' }
   ]
-  
+
   // 遍历所有已加载的插件，提取 sources
   plugins.value.forEach(plugin => {
     if (plugin.sources && Array.isArray(plugin.sources)) {
       plugin.sources.forEach(src => {
+        if (src.id === 'bilibili' || src.id === 'mg' || src.id === 'migu') return
         options.push({
           label: src.name || src.id,
           value: src.id
@@ -133,7 +159,7 @@ const platformOptions = computed(() => {
       })
     }
   })
-  
+
   // 去重
   const uniqueOptions: {label: string, value: string}[] = []
   const map = new Map()
@@ -149,6 +175,7 @@ const platformOptions = computed(() => {
 // 初始化时从主进程加载已保存的音源插件
 onMounted(async () => {
   await loadAllPlugins()
+  await loadSuchPlugins()
 })
 
 // 从主进程加载所有音源插件，并同步当前激活的插件
@@ -237,16 +264,6 @@ const handleImportPluginFromUrl = async (): Promise<void> => {
   }
 }
 
-// 处理导入方式选择
-const handleImportSelect = async (key: 'file' | 'url'): Promise<void> => {
-  if (key === 'file') {
-    await handleImportPlugin()
-  } else if (key === 'url') {
-    showImportUrlModal.value = true
-    importUrl.value = ''
-  }
-}
-
 // 打开指定插件的日志视图
 const handleOpenPluginLogs = (result: SnowdropTransformTestResult): void => {
   currentLogResult.value = result
@@ -295,6 +312,152 @@ const handleSetActivePlugin = async (
     errorMessage.value = err instanceof Error ? err.message : String(err)
   } finally {
     loading.value = false
+  }
+}
+
+// ============ Such 插件相关方法 ============
+
+/**
+ * 加载所有 Such 插件
+ */
+const loadSuchPlugins = async (): Promise<void> => {
+  try {
+    await pluginStore.loadAllPlugins()
+    suchPlugins.value = pluginStore.installedPlugins
+    activeSuchPluginId.value = pluginStore.activePluginId
+  } catch (err: unknown) {
+    console.error('加载 Such 插件失败:', err)
+  }
+}
+
+/**
+ * 导入 Such 插件 - 本地文件
+ */
+const handleImportSuchPluginFromFile = async (): Promise<void> => {
+  loading.value = true
+  errorMessage.value = null
+
+  try {
+    const result = await pluginStore.importPluginFromFile()
+
+    if (result.canceled) {
+      loading.value = false
+      return
+    }
+
+    if (result.error) {
+      errorMessage.value = result.error
+      loading.value = false
+      return
+    }
+
+    if (result.plugin) {
+      // 检查是否需要初始化（有配置项）
+      if (result.plugin.configUI && result.plugin.configUI.length > 0) {
+        // 打开初始化弹窗
+        currentInitPluginId.value = result.plugin.id
+        showPluginInitModal.value = true
+      } else {
+        // 直接激活
+        await pluginStore.activatePlugin(result.plugin.id)
+        message.success(`插件 "${result.plugin.info.name}" 导入并激活成功！`)
+      }
+
+      // 刷新列表
+      await loadSuchPlugins()
+    }
+  } catch (err: unknown) {
+    errorMessage.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    loading.value = false
+  }
+}
+
+/**
+ * 导入 Such 插件 - URL
+ */
+const handleImportSuchPluginFromUrl = async (): Promise<void> => {
+  const url = importUrl.value.trim()
+  if (!url) {
+    errorMessage.value = '请输入有效的 URL 地址'
+    return
+  }
+
+  loading.value = true
+  errorMessage.value = null
+
+  try {
+    const result = await pluginStore.importPluginFromUrl(url)
+
+    if (result.error) {
+      errorMessage.value = result.error
+      loading.value = false
+      return
+    }
+
+    if (result.plugin) {
+      // 检查是否需要初始化
+      if (result.plugin.configUI && result.plugin.configUI.length > 0) {
+        currentInitPluginId.value = result.plugin.id
+        showPluginInitModal.value = true
+      } else {
+        await pluginStore.activatePlugin(result.plugin.id)
+        message.success(`插件 "${result.plugin.info.name}" 导入并激活成功！`)
+      }
+
+      await loadSuchPlugins()
+      showImportUrlModal.value = false
+      importUrl.value = ''
+    }
+  } catch (err: unknown) {
+    errorMessage.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    loading.value = false
+  }
+}
+
+// @ts-nocheck - unused such plugin code
+
+/**
+ * 处理插件初始化完成
+ */
+const handlePluginInitialized = async (_pluginId: string): Promise<void> => {
+  await loadSuchPlugins()
+  message.success('插件初始化完成！')
+}
+
+/**
+ * 处理导入方式选择
+ */
+const handleImportSelect = async (key: string): Promise<void> => {
+  switch (key) {
+    case 'snowdrop-file':
+      await handleImportPlugin()
+      break
+    case 'snowdrop-url':
+      importUrlType.value = 'snowdrop'
+      showImportUrlModal.value = true
+      importUrl.value = ''
+      break
+    case 'such-file':
+      await handleImportSuchPluginFromFile()
+      break
+    case 'such-url':
+      importUrlType.value = 'such'
+      showImportUrlModal.value = true
+      importUrl.value = ''
+      break
+  }
+}
+
+/**
+ * 处理 URL 导入确认
+ */
+const handleImportUrlConfirm = async (): Promise<void> => {
+  if (importUrlType.value === 'snowdrop') {
+    await handleImportPluginFromUrl()
+  } else {
+    await handleImportSuchPluginFromUrl()
   }
 }
 </script>
@@ -351,7 +514,7 @@ const handleSetActivePlugin = async (
       </div>
     </n-card>
 
-    <div class="section-group-title" style="margin-top: 24px;">音源与插件</div>
+    <div class="section-group-title" style="margin-top: 24px;">落雪音源插件</div>
 
     <div
       data-setting-key="source.plugins"
@@ -362,11 +525,14 @@ const handleSetActivePlugin = async (
         <div class="source-settings-actions">
           <n-dropdown trigger="click" :options="importOptions" @select="handleImportSelect">
             <n-button type="primary" :loading="loading">
-              导入音源插件
+              导入插件
+              <template #icon>
+                <i class="mgc_arrow_down_line" style="margin-left: 4px;"></i>
+              </template>
             </n-button>
           </n-dropdown>
           <n-button secondary :loading="loading" @click="loadAllPlugins">
-            重新加载已保存插件
+            重新加载落雪插件
           </n-button>
         </div>
 
@@ -396,7 +562,7 @@ const handleSetActivePlugin = async (
                     <div class="plugin-title-row">
                       <span class="plugin-name">{{ result.meta.name }}</span>
                       <n-tag size="small" type="default" round> v{{ result.meta.version }} </n-tag>
-                      <n-tag size="small" type="info" round> 已加载 </n-tag>
+                      <n-tag size="small" type="info" round> 落雪 </n-tag>
                       <n-tag
                         v-if="result.filePath === activeFilePath"
                         size="small"
@@ -433,7 +599,7 @@ const handleSetActivePlugin = async (
                       :disabled="result.filePath === activeFilePath"
                       @click="handleSetActivePlugin(result)"
                     >
-                      设为当前插件
+                      设为当前
                     </n-button>
                     <n-button
                       size="small"
@@ -462,10 +628,156 @@ const handleSetActivePlugin = async (
         </template>
 
         <template v-else>
-          <div class="snowdrop-meta">尚未导入音源插件，请先点击上方按钮选择文件。</div>
+          <div class="snowdrop-meta">尚未导入落雪音源插件。</div>
         </template>
       </div>
     </div>
+
+    <!-- Such 插件区域已隐藏 -->
+    <!--
+    <div class="section-group-title" style="margin-top: 32px;">Such 插件</div>
+
+    <div class="source-settings">
+      <div class="source-settings-actions">
+        <n-button secondary :loading="loading" @click="loadSuchPlugins">
+          重新加载 Such 插件
+        </n-button>
+      </div>
+
+      <n-divider />
+
+      <template v-if="suchPlugins.length">
+        <div class="plugin-list">
+          <div
+            v-for="plugin in suchPlugins"
+            :key="plugin.id"
+            class="setting-item"
+          >
+            <div
+              class="plugin-card"
+              :class="{
+                'plugin-card--active': plugin.id === activeSuchPluginId,
+                'plugin-card--uninitialized': plugin.status === 'uninitialized'
+              }"
+            >
+              <div class="plugin-card-main">
+                <div class="plugin-card-left">
+                  <div class="plugin-title-row">
+                    <span class="plugin-name">{{ plugin.info.name }}</span>
+                    <n-tag size="small" type="default" round> v{{ plugin.info.version }} </n-tag>
+                    <n-tag size="small" type="warning" round> Such </n-tag>
+                    <n-tag
+                      v-if="plugin.id === activeSuchPluginId"
+                      size="small"
+                      type="success"
+                      round
+                    >
+                      当前使用
+                    </n-tag>
+                    <n-tag
+                      v-else-if="plugin.status === 'uninitialized'"
+                      size="small"
+                      type="warning"
+                      round
+                    >
+                      待初始化
+                    </n-tag>
+                    <n-tag
+                      v-else-if="plugin.status === 'inactive'"
+                      size="small"
+                      type="default"
+                      round
+                    >
+                      已停用
+                    </n-tag>
+                  </div>
+                  <div class="plugin-line">作者：{{ plugin.info.author }}</div>
+                  <div v-if="plugin.info.description" class="plugin-line">
+                    {{ plugin.info.description }}
+                  </div>
+                  <div class="plugin-line">支持的音源：</div>
+                  <div v-if="plugin.sources && plugin.sources.length" class="plugin-sources">
+                    <n-tag
+                      v-for="src in plugin.sources"
+                      :key="src.id"
+                      type="info"
+                      size="small"
+                      round
+                      class="plugin-source-tag"
+                    >
+                      {{ src.name || src.id }}
+                    </n-tag>
+                  </div>
+                  <div v-else class="plugin-line">暂无音源信息</div>
+                </div>
+                <div class="plugin-card-right">
+                  <template v-if="plugin.status === 'uninitialized'">
+                    <n-button
+                      size="small"
+                      type="warning"
+                      tertiary
+                      @click="handleConfigureSuchPlugin(plugin)"
+                    >
+                      初始化
+                    </n-button>
+                  </template>
+                  <template v-else-if="plugin.status === 'active'">
+                    <n-button
+                      size="small"
+                      type="primary"
+                      tertiary
+                      :disabled="plugin.id === activeSuchPluginId"
+                      @click="handleSetSuchPluginActive(plugin)"
+                    >
+                      设为当前
+                    </n-button>
+                    <n-button
+                      size="small"
+                      tertiary
+                      @click="handleDeactivateSuchPlugin(plugin)"
+                    >
+                      停用
+                    </n-button>
+                  </template>
+                  <template v-else>
+                    <n-button
+                      size="small"
+                      type="primary"
+                      tertiary
+                      @click="handleSetSuchPluginActive(plugin)"
+                    >
+                      激活
+                    </n-button>
+                  </template>
+                  <n-button
+                    v-if="plugin.configUI && plugin.configUI.length > 0 && plugin.status !== 'uninitialized'"
+                    size="small"
+                    tertiary
+                    @click="handleConfigureSuchPlugin(plugin)"
+                  >
+                    配置
+                  </n-button>
+                  <n-button
+                    size="small"
+                    type="error"
+                    tertiary
+                    class="plugin-uninstall-btn"
+                    @click="handleUninstallSuchPlugin(plugin)"
+                  >
+                    卸载
+                  </n-button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <template v-else>
+        <div class="snowdrop-meta">尚未导入 Such 插件。</div>
+      </template>
+    </div>
+    -->
 
     <n-modal v-model:show="showLogsModal" preset="card" title="插件日志" style="width: 860px">
       <div v-if="currentLogResult" class="plugin-logs-dialog">
@@ -494,24 +806,36 @@ const handleSetActivePlugin = async (
     <n-modal
       v-model:show="showImportUrlModal"
       preset="dialog"
-      title="从在线 URL 导入音源插件"
+      :title="importUrlType === 'snowdrop' ? '从在线 URL 导入落雪插件' : '从在线 URL 导入 Such 插件'"
       style="width: 520px"
     >
       <div class="import-url-body">
-        <div class="plugin-line">请输入落雪音源插件 JS 文件的网络地址：</div>
+        <div class="plugin-line">
+          请输入{{ importUrlType === 'snowdrop' ? '落雪' : 'Such' }}音源插件 JS 文件的网络地址：
+        </div>
         <n-input
           v-model:value="importUrl"
           type="text"
-          placeholder="例如：https://example.com/my-snowdrop-plugin.js"
+          :placeholder="importUrlType === 'snowdrop'
+            ? '例如：https://example.com/my-snowdrop-plugin.js'
+            : '例如：https://example.com/my-such-plugin.js'"
         />
       </div>
       <template #action>
         <n-button @click="showImportUrlModal = false">取消</n-button>
-        <n-button type="primary" :loading="loading" @click="handleImportPluginFromUrl">
+        <n-button type="primary" :loading="loading" @click="handleImportUrlConfirm">
           确认导入
         </n-button>
       </template>
     </n-modal>
+
+    <!-- Such 插件初始化弹窗 -->
+    <plugin-init-modal
+      v-model:show="showPluginInitModal"
+      :plugin-id="currentInitPluginId"
+      @initialized="handlePluginInitialized"
+      @cancel="() => { currentInitPluginId = undefined }"
+    />
   </div>
 </template>
 
@@ -567,6 +891,12 @@ const handleSetActivePlugin = async (
 .plugin-card--active {
   /* 当前使用的插件高亮边框 */
   border-color: var(--n-primary-color);
+}
+
+.plugin-card--uninitialized {
+  /* 待初始化的插件边框 */
+  border-color: var(--n-warning-color);
+  background-color: var(--n-warning-color-hover);
 }
 
 .plugin-card-main {

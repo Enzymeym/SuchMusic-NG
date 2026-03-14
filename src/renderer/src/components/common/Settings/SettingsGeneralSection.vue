@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NCard, NSwitch, NSelect } from 'naive-ui'
+import { NCard, NSwitch, NSelect, NList, NListItem, NButton } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 
 // 使用设置仓库，驱动常规设置选项
@@ -16,6 +16,34 @@ const updateChannelOptions = [
   { label: '正式版', value: 'stable' },
   { label: '测试版', value: 'beta' }
 ]
+
+const getPlatformName = (key: string) => {
+  const map: Record<string, string> = {
+    tx: 'QQ音乐',
+    kg: '酷狗音乐',
+    wy: '网易云音乐',
+    kw: '酷我音乐',
+    bilibili: '哔哩哔哩',
+    mg: '咪咕音乐'
+  }
+  return map[key] || key
+}
+
+const moveUp = (index: number) => {
+  if (index <= 0) return
+  const list = settingsStore.general.searchResultOrder
+  const temp = list[index]
+  list[index] = list[index - 1]
+  list[index - 1] = temp
+}
+
+const moveDown = (index: number) => {
+  const list = settingsStore.general.searchResultOrder
+  if (index >= list.length - 1) return
+  const temp = list[index]
+  list[index] = list[index + 1]
+  list[index + 1] = temp
+}
 
 defineProps<{
   settingItemBgColor: string
@@ -155,6 +183,28 @@ defineProps<{
           style="width: 120px"
         />
       </div>
+    </n-card>
+    <div class="section-group-title" style="margin-top: 24px;">搜索结果排序</div>
+
+    <n-card
+      class="setting-item"
+      :class="{ 'setting-item--highlight': highlightKey === 'general.searchResultOrder' }"
+      data-setting-key="general.searchResultOrder"
+      :bordered="true"
+      size="small"
+      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
+    >
+      <n-list hoverable clickable>
+        <n-list-item v-for="(item, index) in settingsStore.general.searchResultOrder" :key="item">
+          <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 0;">
+            <span>{{ getPlatformName(item) }}</span>
+            <div style="display: flex; gap: 8px;">
+              <n-button size="tiny" @click="moveUp(index)" :disabled="index === 0">上移</n-button>
+              <n-button size="tiny" @click="moveDown(index)" :disabled="index === settingsStore.general.searchResultOrder.length - 1">下移</n-button>
+            </div>
+          </div>
+        </n-list-item>
+      </n-list>
     </n-card>
   </div>
 </template>

@@ -21,6 +21,7 @@ import LyricPlayer from '../common/PlayerLyrics/LyricPlayer.vue'
 import BackgroundRender from '../common/AMLL/BackgroundRender.vue'
 import { extractImageColors } from '../../utils/imageColors'
 import { fetchNewComments, type CommentItem } from '../../apis/netease/comment'
+import { fetchNewLyric } from '../../apis/netease/lyric'
 
 const player = usePlayerStore()
 const settingsStore = useSettingsStore()
@@ -163,8 +164,11 @@ watch([isControlsVisible, autoHideCursorEnabled], () => {
   applyCursorVisibility()
 })
 
-// 是否为网易云歌曲
-const isNeteaseSong = computed(() => player.currentSong?.source === 'netease')
+// 是否为网易云歌曲（兼容 netease 和 wy 标识）
+const isNeteaseSong = computed(() => {
+  const s = player.currentSong?.source
+  return s === 'netease' || s === 'wy'
+})
 
 // 当前网易云歌曲的原始 ID（优先使用 sourceSongId）
 const neteaseSongId = computed(() => player.currentSong?.sourceSongId ?? player.currentSong?.id)
@@ -453,6 +457,43 @@ const togglePlay = async (): Promise<void> => {
 const handlePrev = (): void => player.playPrev()
 const handleNext = (): void => player.playNext()
 
+const isFavorite = computed(() => {
+  if (!player.currentSong) return false
+  const track = {
+    id: player.currentSong.id,
+    title: player.currentSong.title,
+    artist: player.currentSong.artist,
+    album: player.currentSong.album,
+    cover: player.currentSong.cover,
+    filePath: player.currentSong.filePath,
+    durationMs: player.currentSong.durationMs,
+    source: player.currentSong.source,
+    sourceSongId: player.currentSong.sourceSongId
+  }
+  return playlistStore.isFavorite(track)
+})
+
+const toggleFavorite = () => {
+  if (!player.currentSong) return
+  const track = {
+    id: player.currentSong.id,
+    title: player.currentSong.title,
+    artist: player.currentSong.artist,
+    album: player.currentSong.album,
+    cover: player.currentSong.cover,
+    filePath: player.currentSong.filePath,
+    durationMs: player.currentSong.durationMs,
+    source: player.currentSong.source,
+    sourceSongId: player.currentSong.sourceSongId
+  }
+  const added = playlistStore.toggleFavorite(track)
+  if (added) {
+    message.success('已添加到我喜爱的音乐')
+  } else {
+    message.success('已取消收藏')
+  }
+}
+
 // Mode icon
 const modeIcon = computed(() => {
   switch (player.playMode) {
@@ -591,6 +632,72 @@ watch(
     }
   }
 )
+
+// 歌词重试获取函数
+const fetchLyricWithRetry = async (id: string, source: string): Promise<string> => {
+  let attempt = 0
+  while (true) {
+    // 检查当前播放歌曲是否改变，如果改变则停止重试
+    const currentId = player.currentSong?.sourceSongId ?? player.currentSong?.id
+    if (String(currentId) !== String(id)) {
+      return ''
+    }
+
+    try {
+      if (source === 'wy' || source === 'netease') {
+        const lyricRes = await fetchNewLyric(Number(id))
+        if (lyricRes && lyricRes.code === 200) {
+          const lrc =
+            lyricRes.yrc?.lyric ||
+            lyricRes.lrc?.lyric ||
+            lyricRes.klyric?.lyric ||
+            lyricRes.tlyric?.lyric ||
+            lyricRes.romalrc?.lyric ||
+            ''
+          if (lrc) return lrc
+        }
+      } else {
+        // 动态导入 fetchGMALyric 避免顶部导入
+        const { fetchGMALyric } = await import('../../apis/gma')
+        const lrc = await fetchGMALyric(id, source)
+        if (lrc) return lrc
+      }
+    } catch (e) {
+      console.warn(`[PlayerPage] 获取歌词失败，第 ${attempt + 1} 次重试:`, e)
+    }
+    
+    attempt++
+    // 指数退避策略，最大延迟 5 秒
+    const delay = Math.min(500 + attempt * 500, 5000)
+    await new Promise((resolve) => setTimeout(resolve, delay))
+  }
+}
+
+// 监听当前歌曲变化，如果无歌词则尝试重试获取
+watch(
+  () => player.currentSong?.id,
+  async (newId) => {
+    if (!newId || !player.currentSong) return
+    
+    // 如果已有歌词，则不需要重试
+    if (player.currentSong.lyrics && player.currentSong.lyrics.length > 0) return
+
+    // 获取 source
+    const source = player.currentSong.source || 'wy'
+    const neteaseId = player.currentSong.sourceSongId ?? player.currentSong.id
+    if (!neteaseId) return
+
+    console.log('[PlayerPage] 当前歌曲无歌词，尝试后台重试获取...', neteaseId)
+    const lyrics = await fetchLyricWithRetry(String(neteaseId), source)
+    
+    // 如果获取到了歌词，且当前播放的歌曲未变，则更新 store
+    if (lyrics && player.currentSong?.id === newId) {
+      console.log('[PlayerPage] 重试获取歌词成功，更新 store')
+      player.setLyrics(lyrics)
+    }
+  },
+  { immediate: true }
+)
 </script>
 
 <template>
@@ -713,11 +820,6 @@ watch(
                 ><i class="mgc_down_line"></i
               ></n-icon>
             </n-button>
-            <n-button quaternary class="action-btn">
-              <n-icon size="24" style="transform: translateX(-5px) translateY(1px)"
-                ><i class="mgc_heart_line"></i
-              ></n-icon>
-            </n-button>
             <n-dropdown
               trigger="click"
               :options="addToPlaylistDropdownOptions"
@@ -758,8 +860,10 @@ watch(
               <n-button quaternary circle @click="handleNext">
                 <n-icon size="24"><i class="mgc_skip_forward_fill"></i></n-icon>
               </n-button>
-              <n-button quaternary circle>
-                <n-icon size="20"><i class="mgc_repeat_line"></i></n-icon>
+              <n-button text circle @click="toggleFavorite">
+                <n-icon size="20" :color="isFavorite ? '#ef5350' : undefined">
+                  <i :class="isFavorite ? 'mgc_heart_fill' : 'mgc_heart_line'"></i>
+                </n-icon>
               </n-button>
             </div>
 

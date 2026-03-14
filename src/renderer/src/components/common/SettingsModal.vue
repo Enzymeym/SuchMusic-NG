@@ -12,6 +12,7 @@ import SettingsAboutSection from './Settings/SettingsAboutSection.vue'
 
 const themeVars = useThemeVars()
 const { isDark } = useAutoNaiveTheme()
+const isMac = ref(false)
 
 const props = defineProps<{
   show: boolean
@@ -317,6 +318,9 @@ const renderSearchLabel = (rawOption: any) => {
 
 onMounted(async () => {
   if (window.electron && window.electron.ipcRenderer) {
+    // 检测平台
+    isMac.value = await window.electron.ipcRenderer.invoke('system:is-mac')
+
     try {
       const fonts = await window.electron.ipcRenderer.invoke('system:get-fonts')
       const systemFonts = (fonts as string[])
@@ -465,6 +469,7 @@ watch(
                   :setting-item-bg-color="settingItemBgColor"
                   :setting-item-border-color="settingItemBorderColor"
                   :highlight-key="highlightedKey"
+                  :is-mac="isMac"
                 />
 
                 <settings-playback-section

@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { NGrid, NGridItem, NIcon, NScrollbar, NButton } from 'naive-ui'
+import { onMounted, onUnmounted, ref } from 'vue'
+import { NGrid, NGridItem, NIcon, NScrollbar, NButton, NSpin } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import defaultCover from '@renderer/assets/icon.png'
 import { fetchToplists, type ToplistItem } from '../apis/netease/playlist/toplist'
 
 const router = useRouter()
-const toplists = ref<
+const allToplists = ref<ToplistItem[]>([])
+const displayToplists = ref<
   Array<{
     id: number
     name: string
@@ -15,6 +16,12 @@ const toplists = ref<
     updateFrequency: string
   }>
 >([])
+const offset = ref(0)
+const limit = 20
+const hasMore = ref(true)
+const loading = ref(false)
+const loadTrigger = ref<HTMLElement | null>(null)
+let observer: IntersectionObserver | null = null
 
 const goBack = () => router.back()
 
@@ -25,15 +32,52 @@ const formatPlayCount = (count: number): string => {
   return String(count)
 }
 
-onMounted(async () => {
-  const list = await fetchToplists()
-  toplists.value = list.map((item: ToplistItem) => ({
+const loadMore = () => {
+  if (!hasMore.value) return
+  
+  const nextBatch = allToplists.value.slice(offset.value, offset.value + limit)
+  if (nextBatch.length === 0) {
+    hasMore.value = false
+    return
+  }
+  
+  const formatted = nextBatch.map((item: ToplistItem) => ({
     id: item.id,
     name: item.name,
     cover: item.coverImgUrl || defaultCover,
     playCount: formatPlayCount(item.playCount),
     updateFrequency: item.updateFrequency ?? ''
   }))
+  
+  displayToplists.value.push(...formatted)
+  offset.value += nextBatch.length
+  
+  if (offset.value >= allToplists.value.length) {
+    hasMore.value = false
+  }
+}
+
+onMounted(async () => {
+  loading.value = true
+  const list = await fetchToplists()
+  allToplists.value = list
+  loading.value = false
+  
+  loadMore()
+  
+  observer = new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting && hasMore.value) {
+      loadMore()
+    }
+  }, { rootMargin: '200px' })
+  
+  if (loadTrigger.value) {
+    observer.observe(loadTrigger.value)
+  }
+})
+
+onUnmounted(() => {
+  if (observer) observer.disconnect()
 })
 </script>
 
@@ -50,25 +94,35 @@ onMounted(async () => {
     </div>
     
     <n-scrollbar content-style="padding: 0 24px 24px;">
-      <n-grid x-gap="16" y-gap="24" cols="2 s:3 m:4 l:5 xl:6 2xl:8" responsive="screen">
-        <n-grid-item v-for="item in toplists" :key="item.id">
-          <div class="playlist-card">
-            <div class="cover-wrapper">
-              <img :src="item.cover" class="playlist-cover" />
-              <div class="play-count">
-                <n-icon><i class="mgc_play_line"></i></n-icon> {{ item.playCount }}
+      <div v-if="loading" class="loading-container">
+        <n-spin size="large" />
+      </div>
+      <div v-else>
+        <n-grid x-gap="16" y-gap="24" cols="2 s:3 m:4 l:5 xl:6 2xl:8" responsive="screen">
+          <n-grid-item v-for="item in displayToplists" :key="item.id">
+            <div class="playlist-card">
+              <div class="cover-wrapper">
+                <img :src="item.cover" class="playlist-cover" />
+                <div class="play-count">
+                  <n-icon><i class="mgc_play_line"></i></n-icon> {{ item.playCount }}
+                </div>
+                <div class="play-overlay">
+                  <n-icon size="40" color="white"><i class="mgc_play_circle_line"></i></n-icon>
+                </div>
               </div>
-              <div class="play-overlay">
-                <n-icon size="40" color="white"><i class="mgc_play_circle_line"></i></n-icon>
+              <div class="playlist-title">{{ item.name }}</div>
+              <div v-if="item.updateFrequency" class="toplist-sub">
+                {{ item.updateFrequency }}
               </div>
             </div>
-            <div class="playlist-title">{{ item.name }}</div>
-            <div v-if="item.updateFrequency" class="toplist-sub">
-              {{ item.updateFrequency }}
-            </div>
-          </div>
-        </n-grid-item>
-      </n-grid>
+          </n-grid-item>
+        </n-grid>
+        
+        <div ref="loadTrigger" class="load-trigger">
+          <span v-if="hasMore" style="opacity: 0.5;">加载中...</span>
+          <span v-else class="no-more">没有更多了</span>
+        </div>
+      </div>
     </n-scrollbar>
   </div>
 </template>
@@ -89,6 +143,23 @@ onMounted(async () => {
   margin: 0;
   font-size: 24px;
   font-weight: bold;
+}
+
+.loading-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 200px;
+}
+
+.load-trigger {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 60px;
+  color: #888;
+  font-size: 13px;
+  margin-top: 16px;
 }
 
 /* Reuse styles from HomeView */

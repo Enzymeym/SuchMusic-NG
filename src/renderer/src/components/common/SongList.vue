@@ -56,13 +56,31 @@
 
     <!-- Loading State -->
     <div v-if="loading && !loadMore" class="skeleton-container">
-      <n-skeleton
-        v-for="i in skeletonCount"
-        :key="i"
-        text
-        :repeat="1"
-        style="height: 60px; margin-bottom: 10px"
-      />
+      <div v-for="i in skeletonCount" :key="i" class="song-item skeleton-item" :class="itemVariantClass">
+        <div style="display: flex; align-items: center; gap: 8px; flex: 1">
+          <!-- Index -->
+          <div class="index-cell">
+            <n-skeleton text style="width: 14px" />
+          </div>
+          <!-- Cover -->
+          <n-skeleton style="width: 48px; height: 48px; border-radius: 6px; flex-shrink: 0" />
+          <!-- Song Info -->
+          <div class="song-info" style="flex: 1">
+            <n-skeleton text style="width: 40%; height: 20px; margin-bottom: 4px" />
+            <n-skeleton text style="width: 25%; height: 14px" />
+          </div>
+        </div>
+
+        <!-- Album & Duration -->
+        <div class="song-meta">
+          <div class="album-info">
+            <n-skeleton text style="width: 60%" />
+          </div>
+          <div v-if="!hideDuration" class="duration-info">
+            <n-skeleton text style="width: 36px" />
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Song List -->
@@ -88,6 +106,7 @@
                   class="song-cover"
                   :src="song.picUrl || song.al?.picUrl || defaultCover"
                   alt=""
+                  referrerpolicy="no-referrer"
                 />
                 <!-- Song Info -->
                 <div class="song-info">
@@ -105,23 +124,38 @@
                     </div>
 
                     <!-- Tags -->
-                    <n-tag v-if="song.isOriginal" type="success" size="small" round>原唱</n-tag>
-                    <n-tag v-if="song.mv" type="warning" size="small" round style="cursor: pointer"
+                    <n-tag v-if="song.isOriginal" type="success" size="small" round :bordered="false" style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;">原唱</n-tag>
+                    <n-tag v-if="song.mv" type="warning" size="small" round style="cursor: pointer; transform: scale(0.8); margin-right: 2px; flex-shrink: 0;" :bordered="false"
                       >MV</n-tag
                     >
+                  </div>
+                  <!-- Artists & Quality Tag -->
+                  <div style="display: flex; align-items: center; max-width: 200px; transform: translateX(-4px);">
+                    <!-- Source Tag -->
+                    <n-tag
+                      v-if="song.source"
+                      :type="getSourceType(song.source)"
+                      size="small"
+                      round
+                      :bordered="false"
+                      style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;"
+                    >
+                      {{ getSourceLabel(song.source) }}
+                    </n-tag>
                     <n-tag
                       v-if="song.quality"
                       :type="getQualityTag(song.quality).type"
                       size="small"
                       round
+                      :bordered="false"
+                      style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;"
                     >
                       {{ getQualityTag(song.quality).label }}
                     </n-tag>
+                    <n-ellipsis style="font-size: 14px; color: #818181; flex: 1;">
+                      {{ getArtistsFormatted(song) }}
+                    </n-ellipsis>
                   </div>
-                  <!-- Artists -->
-                  <n-ellipsis style="font-size: 14px; color: #818181; max-width: 200px">
-                    {{ getArtistsFormatted(song) }}
-                  </n-ellipsis>
                 </div>
               </div>
 
@@ -176,6 +210,7 @@ import {
   useMessage
 } from 'naive-ui'
 import { usePlaylistStore } from '../../stores/playlistStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 import defaultCover from '../../assets/default-cover.png'
 
 // Define interfaces
@@ -236,7 +271,6 @@ const props = withDefaults(defineProps<Props>(), {
   themeColor: '#3d889b',
   itemHeight: 82,
   hideDuration: false,
-  itemVariant: 'card',
   menuOptions: undefined,
   transparentHeader: false,
   draggable: false
@@ -254,11 +288,13 @@ const emit = defineEmits<{
 
 const themeVars = useThemeVars()
 const playlistStore = usePlaylistStore()
+const settingsStore = useSettingsStore()
 const message = useMessage()
 const isDarkMode = ref(document.documentElement.getAttribute('data-theme') === 'dark')
-const itemVariantClass = computed(() =>
-  props.itemVariant === 'plain' ? 'song-item--plain' : 'song-item--card'
-)
+const itemVariantClass = computed(() => {
+  const variant = props.itemVariant ?? settingsStore.appearance.songListStyle ?? 'card'
+  return variant === 'plain' ? 'song-item--plain' : 'song-item--card'
+})
 const draggableEnabled = computed(() => props.draggable)
 
 const handleThemeChange = () => {
@@ -489,6 +525,34 @@ function getQualityTag(quality: string): { label: string; type: TagType } {
   }
 }
 
+/* 辅助函数：根据 source 返回对应的标签类型 */
+function getSourceType(source?: string) {
+  if (!source) return 'default'
+  switch (source) {
+    case 'netease': return 'error'
+    case 'qq': return 'success'
+    case 'kugou': return 'info'
+    case 'kuwo': return 'warning'
+    case 'bilibili': return 'primary'
+    default: return 'default'
+  }
+}
+
+/* 辅助函数：根据 source 返回对应的显示文本 */
+function getSourceLabel(source?: string) {
+  if (!source) return '未知'
+  switch (source) {
+    case 'netease': return '网易'
+    case 'qq': return 'QQ'
+    case 'kugou': return '酷狗'
+    case 'kuwo': return '酷我'
+    case 'bilibili': return 'B站'
+    case 'migu': return '咪咕'
+    case 'local': return '本地'
+    default: return source
+  }
+}
+
 function formatDuration(dt?: number): string {
   if (!dt) return '--:--'
   const totalSeconds = Math.floor(dt / 1000)
@@ -635,7 +699,11 @@ function processSongTitle(title: string): { mainTitle: string; subTitle: string 
   padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+}
+
+.skeleton-item {
+  cursor: default !important;
+  pointer-events: none;
 }
 
 /* Dark mode overrides */
