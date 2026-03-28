@@ -1,0 +1,11 @@
+.n-menu .n-menu-item-content {
+    padding-left: 24px !important;
+}
+
+.n-modal-mask {
+    backdrop-filter: blur(10px);
+}
+
+.n-drawer-mask {
+    backdrop-filter: blur(10px);
+}

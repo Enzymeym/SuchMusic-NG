@@ -1,0 +1,283 @@
+/* 根卡片用于定位右上角关闭按钮 */
+.settings-root-card {
+  position: relative; /* 作为关闭按钮定位的参照容器 */
+}
+
+.n-color-picker-trigger .n-color-picker-trigger__fill {
+  div {
+    border-radius: 7px;
+  }
+}
+
+.n-color-picker-pallete {
+  div {
+    border-radius: 7px;
+  }
+}
+
+/* 侧边栏标题区域布局 */
+.sider-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px 12px;
+}
+
+/* 设置搜索框整体外边距 */
+.settings-search {
+  padding: 0 12px 4px;
+}
+
+/* 命令面板搜索选项整体布局 */
+.settings-search-option {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0; /* 内部轻微间距，主要间距交给外层选项 */
+  max-width: 100%;
+}
+
+/* 放大 Naive UI 自动完成下拉选项的整体内边距 */
+.settings-search .n-base-select-option {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+/* 上副标题：所属分类（原括号中的内容） */
+.settings-search-option__top {
+  font-size: 11px;
+  color: var(--settings-subtext-color);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 主标题：设置名称 */
+.settings-search-option__label {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 下副标题：设置描述，文本省略 */
+.settings-search-option__desc {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--settings-subtext-color);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 侧边栏标题文字样式 */
+.sider-title {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+/* 顶部关闭按钮栏，绝对定位在右上角 */
+.modal-topbar {
+  position: absolute; /* 悬浮在内容之上 */
+  top: 12px;          /* 距离顶部偏移 */
+  right: 16px;        /* 距离右侧偏移 */
+  display: flex;      /* 包裹关闭按钮 */
+  z-index: 10;        /* 确保在内容之上 */
+}
+
+/* Scrollbar 内容区域留出内边距，避免贴边 */
+.settings-content {
+  padding-right: 4px;
+  padding-top: 6px;
+  width: 100%;
+}
+
+/* 分类标题样式，左侧带主色条 */
+.section-group-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  border-left: 3px solid var(--settings-section-primary-color);
+  padding-left: 8px;
+  line-height: 1.2;
+  margin-top: 8px;
+}
+
+/* 单个设置卡片基础样式 */
+.setting-item {
+  margin-bottom: 12px;
+  border-radius: 10px;
+}
+
+/* 设置项高亮状态样式 */
+.setting-item--highlight {
+  box-shadow: 0 0 0 2px var(--settings-section-primary-color);
+}
+
+/* 设置项主内容横向排列 */
+.setting-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+
+/* 标签区域占据剩余空间 */
+.setting-label {
+  flex: 1;
+  padding-right: 16px;
+}
+
+/* 设置名称样式 */
+.main-label {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* 设置描述文本样式 */
+.sub-label {
+  font-size: 12px;
+  color: var(--settings-subtext-color);
+}
+
+/* 通用关闭按钮样式 */
+.close-btn {
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s;
+}
+
+/* 关闭按钮图标颜色 */
+.close-btn i {
+  color: var(--settings-close-icon-color);
+}
+
+/* 悬停时关闭按钮背景色 */
+.close-btn:hover {
+  background-color: var(--settings-close-hover-bg);
+}
+
+/* 关于区域整体布局 */
+.about-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 20px;
+}
+
+/* 关于区域图标 */
+.about-logo {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 12px;
+}
+
+/* 关于区域标题 */
+.about-title {
+  font-size: 20px;
+  font-weight: bold;
+}
+
+/* 版本文本样式 */
+.about-version {
+  font-size: 14px;
+  margin-bottom: 24px;
+}
+
+/* 关于区域底部信息行 */
+.version-info {
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+}
+
+/* 关于区域图标左侧间距 */
+.about-icon {
+  margin-right: 6px;
+}
+
+/* 右侧内容区域整体淡入淡出过渡 */
+.settings-section-fade-enter-active,
+.settings-section-fade-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.settings-section-fade-enter-from,
+.settings-section-fade-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.settings-section-fade-enter-to,
+.settings-section-fade-leave-from {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 设置项逐个上浮动画 */
+@keyframes settings-item-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 基础动画：所有设置卡片从下往上淡入 */
+.settings-content .n-card.setting-item {
+  opacity: 0;
+  transform: translateY(8px);
+  animation: settings-item-fade-up 0.28s ease forwards;
+}
+
+/* 简单的级联延迟，让设置项逐个上浮 */
+.settings-content .n-card.setting-item:nth-of-type(1) {
+  animation-delay: 0.02s;
+}
+
+.settings-content .n-card.setting-item:nth-of-type(2) {
+  animation-delay: 0.06s;
+}
+
+.settings-content .n-card.setting-item:nth-of-type(3) {
+  animation-delay: 0.1s;
+}
+
+.settings-content .n-card.setting-item:nth-of-type(4) {
+  animation-delay: 0.14s;
+}
+
+.settings-content .n-card.setting-item:nth-of-type(5) {
+  animation-delay: 0.18s;
+}
+
+.settings-content .n-card.setting-item:nth-of-type(6) {
+  animation-delay: 0.22s;
+}
+
+.settings-content .n-card.setting-item:nth-of-type(7) {
+  animation-delay: 0.26s;
+}
+
+.settings-content .n-card.setting-item:nth-of-type(8) {
+  animation-delay: 0.3s;
+}
+
+.settings-content .n-card.setting-item:nth-of-type(9) {
+  animation-delay: 0.34s;
+}
+
+.settings-content .n-card.setting-item:nth-of-type(10) {
+  animation-delay: 0.38s;
+}

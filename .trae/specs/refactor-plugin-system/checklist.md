@@ -1,0 +1,8 @@
+- [x] 插件宿主能正确加载 `window.source` 格式插件
+- [x] 插件宿主 `search` 方法能返回数据
+- [x] 插件宿主 `checkUpdate` 方法能被调用
+- [x] 插件能通过 `window.notify` 发送通知
+- [x] IPC `plugin:search` 和 `plugin:checkUpdate` 工作正常
+- [x] 前端 `pluginStore` 能正确调用搜索和更新检查
+- [x] `SearchView` 能显示插件搜索结果
+- [x] 插件提供的歌曲能正常播放

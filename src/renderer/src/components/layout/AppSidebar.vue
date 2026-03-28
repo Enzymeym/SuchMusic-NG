@@ -1,0 +1,407 @@
+<script setup lang="ts">
+import { h, ref, watch, computed } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import { MenuOption, NTag, NTooltip, useThemeVars } from 'naive-ui'
+import SidebarNavigation from '../common/SidebarNavigation.vue'
+
+const props = defineProps<{ collapsed: boolean }>()
+const emit = defineEmits<{ (e: 'update:collapsed', value: boolean): void }>()
+
+const router = useRouter()
+const route = useRoute()
+const themeVars = useThemeVars()
+
+// 将十六进制主色转换为带透明度的 rgba，用于选中态背景
+const activeBgColor = computed(() => {
+  let hex = themeVars.value.primaryColor || '#2C8EFD'
+  hex = hex.replace('#', '')
+  if (hex.length === 3) {
+    hex = hex.split('').map(c => c + c).join('')
+  }
+  const r = parseInt(hex.substring(0, 2), 16)
+  const g = parseInt(hex.substring(2, 4), 16)
+  const b = parseInt(hex.substring(4, 6), 16)
+  return `rgba(${r}, ${g}, ${b}, 0.15)`
+})
+
+const activeBgColorDark = computed(() => {
+  let hex = themeVars.value.primaryColor || '#2C8EFD'
+  hex = hex.replace('#', '')
+  if (hex.length === 3) {
+    hex = hex.split('').map(c => c + c).join('')
+  }
+  const r = parseInt(hex.substring(0, 2), 16)
+  const g = parseInt(hex.substring(2, 4), 16)
+  const b = parseInt(hex.substring(4, 6), 16)
+  return `rgba(${r}, ${g}, ${b}, 0.25)`
+})
+
+const toggleCollapse = () => {
+  emit('update:collapsed', !props.collapsed)
+}
+
+// Helper to render icon
+const renderIcon = (iconClass: string) => {
+  return () => h('i', { class: iconClass, style: 'font-size: 18px;' })
+}
+
+const activeKey = ref<string>('discover')
+
+// Sync activeKey with route
+watch(
+  () => route.path,
+  (newPath) => {
+    if (newPath === '/') activeKey.value = 'discover'
+    else if (newPath === '/playlist') activeKey.value = 'favorites'
+    else if (newPath === '/local') activeKey.value = 'local'
+    else if (newPath === '/recent') activeKey.value = 'recent'
+  },
+  { immediate: true }
+)
+
+// Handle menu selection
+watch(activeKey, (newKey) => {
+  if (newKey === 'discover') router.push('/')
+  else if (newKey === 'favorites') router.push('/playlist')
+  else if (newKey === 'local') router.push('/local')
+  else if (newKey === 'recent') router.push('/recent')
+})
+
+const menuOptions: MenuOption[] = [
+  {
+    label: '首页',
+    key: 'discover',
+    icon: renderIcon('mgc_music_2_line')
+  },
+  {
+    label: '歌单',
+    key: 'favorites',
+    icon: renderIcon('mgc_star_line')
+  },
+  {
+    label: '本地',
+    key: 'local',
+    icon: renderIcon('mgc_folder_2_line')
+  },
+  {
+    label: '最近',
+    key: 'recent',
+    icon: renderIcon('mgc_history_line')
+  }
+]
+
+</script>
+
+<template>
+  <div class="sidebar-container" :class="{ 'is-collapsed': collapsed }">
+    <template v-if="!collapsed">
+      <!-- Logo Area -->
+      <div class="logo-area">
+        <img src="../../assets/icon.png" alt="Logo" class="logo-img" />
+        <span class="logo-text">
+          Such
+          <n-tag type="info" size="small" round>
+            Next Gen
+          </n-tag>
+        </span>
+      </div>
+
+      <!-- Main Navigation -->
+      <div class="nav-scroll">
+        <SidebarNavigation :options="menuOptions" v-model:value="activeKey" />
+      </div>
+
+      <!-- Float Collapse Button -->
+      <div class="float-collapse-btn" @click="toggleCollapse">
+        <i class="mgc_left_line"></i>
+      </div>
+    </template>
+    
+    <template v-else>
+      <!-- Collapsed Capsule Tab -->
+      <div class="capsule-wrapper">
+        <div class="drag-area">
+          <transition name="fade">
+            <div class="mini-logo" v-if="collapsed">
+              <img src="../../assets/icon.png" alt="Logo" class="mini-logo-img" />
+            </div>
+          </transition>
+        </div>
+        <div class="capsule-container">
+          <div class="capsule-tab">
+            <!-- Expand Button -->
+            <div class="capsule-item" @click="toggleCollapse">
+              <i class="mgc_menu_line" style="font-size: 20px;"></i>
+            </div>
+            <div class="capsule-divider"></div>
+            <!-- Menu Items -->
+            <n-tooltip v-for="item in menuOptions" :key="item.key" placement="right">
+              <template #trigger>
+                <div 
+                  class="capsule-item" 
+                  :class="{ active: activeKey === item.key }"
+                  @click="activeKey = item.key as string"
+                >
+                  <component :is="item.icon" />
+                </div>
+              </template>
+              {{ item.label }}
+            </n-tooltip>
+          </div>
+        </div>
+      </div>
+    </template>
+  </div>
+</template>
+
+<style scoped>
+.sidebar-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  position: relative; /* For float collapse button positioning */
+}
+
+.logo-area {
+  padding: 21px 22px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  -webkit-app-region: drag;
+  /* Make draggable */
+}
+
+.logo-img {
+  width: 32px;
+  height: 32px;
+}
+
+.logo-text {
+  font-size: 20px;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.collapse-btn {
+  -webkit-app-region: no-drag;
+}
+
+.nav-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 3px;
+}
+
+/* Float Collapse Button */
+.float-collapse-btn {
+  position: fixed; /* 使用 fixed 定位脱离侧边栏局部流，直接相对视口定位 */
+  top: calc(50vh - 40px); /* 屏幕正中央，减去底部播放器一半的高度以达到视觉居中 */
+  left: 240px; /* 展开状态下侧边栏的宽度 */
+  /* transform: translateY(-50%) 会使其基于自身高度居中 */
+  transform: translate(-50%, -50%);
+  width: 24px;
+  height: 48px;
+  background-color: var(--n-color);
+  border: 1px solid var(--n-border-color);
+  border-radius: 12px; /* 修改为小胶囊形状 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--n-text-color-3);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  transition: all 0.2s;
+  z-index: 1000; /* 提高层级确保不被遮挡 */
+  -webkit-app-region: no-drag;
+}
+
+.float-collapse-btn:hover {
+  background-color: var(--n-action-color-hover);
+  color: var(--n-primary-color);
+  transform: translate(-50%, -50%) scale(1.05);
+}
+
+html[data-theme='dark'] .float-collapse-btn {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+/* Capsule Tab Styles */
+.capsule-wrapper {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 80px;
+  height: 100vh;
+  z-index: 100;
+  pointer-events: none;
+}
+
+.capsule-container {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  pointer-events: auto;
+}
+
+.drag-area {
+  position: absolute;
+  top: 11px;
+  left: -1;
+  width: 100%;
+  height: 60px; /* 匹配 header 的高度 */
+  -webkit-app-region: drag;
+  z-index: 10;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mini-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.mini-logo-img {
+  width: 32px;
+  height: 32px;
+  opacity: 0.9;
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.capsule-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background-color: var(--n-color);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: 32px;
+  padding: 8px 0;
+  gap: 12px;
+  box-shadow: 4px 4px 12px rgba(0, 0, 0, 0.05);
+  width: 56px;
+  border: 1px solid var(--n-border-color);
+  z-index: 1;
+  pointer-events: auto;
+  /* 调整偏移，使其在视觉上居中。默认状态只露出右边一点点 */
+  transform: translateY(-40px) translateX(-40px);
+  transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.3s ease;
+  opacity: 0.4;
+}
+
+.capsule-wrapper:hover .capsule-tab {
+  transform: translateY(-40px) translateX(0);
+  opacity: 1;
+}
+
+html[data-theme='dark'] .capsule-tab {
+  background-color: var(--n-color);
+  border: 1px solid var(--n-border-color);
+  box-shadow: 4px 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.capsule-item {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--n-text-color-3);
+  transition: all 0.2s;
+  -webkit-app-region: no-drag;
+}
+
+.capsule-item:hover {
+  background-color: var(--n-action-color-hover);
+  color: var(--n-text-color-1);
+}
+
+.capsule-item.active {
+  background-color: v-bind('activeBgColor');
+  color: v-bind('themeVars.primaryColor');
+  box-shadow: none; /* 移除额外阴影，保持扁平 */
+}
+
+html[data-theme='dark'] .capsule-item.active {
+  background-color: v-bind('activeBgColorDark');
+  color: v-bind('themeVars.primaryColor');
+  box-shadow: none;
+}
+
+.capsule-divider {
+  width: 32px;
+  height: 1px;
+  background-color: var(--n-border-color);
+  margin: 0;
+}
+
+.playlists-section {
+  margin-top: 12px;
+  padding: 0 12px;
+}
+
+.playlist-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background-color 0.2s;
+}
+
+.playlist-item:hover {
+  background-color: rgba(0, 0, 0, 0.05);
+}
+
+.playlist-item.active {
+  background-color: #e0e0e0;
+  font-weight: 500;
+}
+
+.playlist-cover {
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.playlist-name {
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Custom scrollbar for webkit */
+.nav-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.nav-scroll::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.1);
+  border-radius: 2px;
+}
+</style>

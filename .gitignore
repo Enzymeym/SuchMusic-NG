@@ -1,0 +1,15 @@
+node_modules
+dist
+out
+.DS_Store
+.eslintcache
+*.log*
+symphonia-napi-decoder
+.VSCodeCounter
+
+tests
+native
+.env.local
+src/renderer/src/utils/supabase.ts
+.figma
+.vscode
