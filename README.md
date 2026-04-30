@@ -1,4 +1,4 @@
-<img src="https://aethel-1314366757.cos.ap-hongkong.myqcloud.com/readme-image.png" alt="logo">
+<img src="https://aethel-1314366757.cos.ap-hongkong.myqcloud.com/readme-image%403x.png" alt="logo">
 
 # Such Music for Windows
 
