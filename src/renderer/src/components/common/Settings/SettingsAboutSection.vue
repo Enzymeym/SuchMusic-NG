@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { NCard, NIcon, useThemeVars, NAlert, NSpin, NButton } from 'naive-ui'
+import { NCard, NIcon, useThemeVars, NAlert, NSpin, NButton, NProgress, useMessage } from 'naive-ui'
 import MarkdownIt from 'markdown-it'
 import { full as emoji } from 'markdown-it-emoji'
 import markdownItGitHubAlerts from 'markdown-it-github-alerts'
@@ -8,9 +8,31 @@ import 'markdown-it-github-alerts/styles/github-colors-light.css';
 import 'markdown-it-github-alerts/styles/github-colors-dark-class.css';
 import 'markdown-it-github-alerts/styles/github-base.css';
 import axios, { type AxiosError } from 'axios'
+import { useUpdater } from '../../../composables/useUpdater'
+import { useSettingsStore } from '../../../stores/settingsStore'
 
 // 主题变量，用于控制关于页颜色与玻璃卡片样式
 const themeVars = useThemeVars()
+const message = useMessage()
+const settingsStore = useSettingsStore()
+
+// 使用更新系统 composable
+const {
+  updateInfo,
+  currentVersion,
+  downloadProgress,
+  error,
+  isChecking,
+  isUpdateAvailable,
+  isDownloading,
+  isDownloaded,
+  hasError,
+  checkUpdate,
+  downloadUpdate,
+  installUpdate,
+  formatBytes,
+  formatSpeed
+} = useUpdater()
 
 // GitHub Release 数据类型定义
 interface GitHubRelease {
@@ -49,7 +71,7 @@ try {
 
 // 应用名称与版本信息
 const appName = computed(() => 'Such Music')
-const appVersion = computed(() => '0.2.0')
+const appVersion = computed(() => currentVersion.value || '0.2.0')
 
 // 更新日志相关
 const showChangelog = ref(false)
@@ -66,6 +88,37 @@ onMounted(() => {
   fetchChangelog()
   fetchDeveloperInfo()
 })
+
+/**
+ * 处理检查更新按钮点击
+ */
+const handleCheckUpdate = async () => {
+  const result = await checkUpdate(settingsStore.general.updateChannel)
+  if (result?.hasUpdate) {
+    message.info(`发现新版本: v${result.latestVersion}`)
+  } else if (result && !result.hasUpdate) {
+    message.success('当前已是最新版本')
+  } else if (result?.error) {
+    message.error(result.error)
+  }
+}
+
+/**
+ * 处理下载更新按钮点击
+ */
+const handleDownloadUpdate = async () => {
+  const success = await downloadUpdate()
+  if (success) {
+    message.success('下载完成')
+  }
+}
+
+/**
+ * 处理安装更新按钮点击
+ */
+const handleInstallUpdate = async () => {
+  await installUpdate()
+}
 
 // 获取开发者信息
 const fetchDeveloperInfo = async () => {
@@ -193,6 +246,56 @@ const renderedChangelog = computed(() => {
             <i class="mgc_github_line" />
           </n-icon>
         </button>
+      </div>
+
+      <!-- 更新状态卡片 -->
+      <div class="update-status-card" v-if="isUpdateAvailable || isDownloading || isDownloaded || hasError">
+        <div v-if="isChecking" class="update-status-item">
+          <n-spin size="small" />
+          <span>正在检查更新...</span>
+        </div>
+        <div v-else-if="hasError" class="update-status-item update-status-error">
+          <i class="mgc_close_circle_line" />
+          <span>{{ error || '检查更新失败' }}</span>
+          <n-button size="tiny" @click="handleCheckUpdate">重试</n-button>
+        </div>
+        <div v-else-if="isUpdateAvailable && !isDownloading && !isDownloaded" class="update-status-item">
+          <i class="mgc_alert_line" />
+          <span>发现新版本: v{{ updateInfo?.latestVersion }}</span>
+          <n-button size="tiny" type="primary" @click="handleDownloadUpdate">立即下载</n-button>
+        </div>
+        <div v-else-if="isDownloading" class="update-status-item update-status-downloading">
+          <i class="mgc_download_3_line" />
+          <div class="update-download-info">
+            <span>正在下载更新... {{ downloadProgress.percent }}%</span>
+            <n-progress
+              type="line"
+              :percentage="downloadProgress.percent"
+              :show-indicator="false"
+              :height="4"
+              :border-radius="2"
+              style="width: 120px;"
+            />
+            <span class="update-download-detail">
+              {{ formatBytes(downloadProgress.downloaded) }} / {{ formatBytes(downloadProgress.total) }}
+              <span v-if="downloadProgress.speed > 0">({{ formatSpeed(downloadProgress.speed) }})</span>
+            </span>
+          </div>
+        </div>
+        <div v-else-if="isDownloaded" class="update-status-item">
+          <i class="mgc_check_circle_line" />
+          <span>下载完成，准备安装</span>
+          <n-button size="tiny" type="success" @click="handleInstallUpdate">立即安装</n-button>
+        </div>
+      </div>
+
+      <div v-else class="update-check-row">
+        <n-button size="small" secondary @click="handleCheckUpdate">
+          <template #icon>
+            <i class="mgc_refresh_1_line" />
+          </template>
+          检查更新
+        </n-button>
       </div>
     </div>
 
@@ -530,5 +633,49 @@ const renderedChangelog = computed(() => {
 
 .developer-link:hover {
   text-decoration: underline;
+}
+
+/* 更新状态卡片 */
+.update-status-card {
+  margin-top: 16px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background-color: rgba(127, 127, 127, 0.08);
+  backdrop-filter: blur(10px);
+}
+
+.update-status-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  justify-content: center;
+}
+
+.update-status-error {
+  color: #d03050;
+}
+
+.update-status-downloading {
+  flex-direction: column;
+  gap: 6px;
+}
+
+.update-download-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.update-download-detail {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.update-check-row {
+  margin-top: 16px;
+  display: flex;
+  justify-content: center;
 }
 </style>

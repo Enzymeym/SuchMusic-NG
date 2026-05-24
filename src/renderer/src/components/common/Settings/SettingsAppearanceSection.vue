@@ -2,7 +2,6 @@
 import { computed, h } from 'vue'
 import { NCard, NSelect, NColorPicker, NSwitch } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
-import { setPrimaryColor } from '../../../themes'
 
 // 使用设置仓库，驱动外观设置选项
 const settingsStore = useSettingsStore()
@@ -64,8 +63,6 @@ const handlePresetChange = (presetValue: string) => {
   const preset = themeColorPresets.find((p) => p.value === presetValue)
   if (preset) {
     settingsStore.appearance.customThemeColor = preset.color
-    // 立即更新全局主题主色
-    setPrimaryColor(preset.color)
   }
 }
 
@@ -74,8 +71,6 @@ const handleCustomColorChange = (color: string | null) => {
   if (!color) return
   settingsStore.appearance.customThemeColor = color
   settingsStore.appearance.themeColorPreset = 'custom'
-  // 立即更新全局主题主色
-  setPrimaryColor(color)
 }
 </script>
 
@@ -228,6 +223,23 @@ const handleCustomColorChange = (color: string | null) => {
 
     <n-card
       class="setting-item"
+      :class="{ 'setting-item--highlight': props.highlightKey === 'appearance.themeColorFollowsCover' }"
+      data-setting-key="appearance.themeColorFollowsCover"
+      :bordered="true"
+      size="small"
+      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">主题色跟随封面</div>
+          <div class="sub-label">开启后全局主题主色将根据当前播放歌曲的封面自动提取并改变</div>
+        </div>
+        <n-switch v-model:value="settingsStore.appearance.themeColorFollowsCover" />
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
       :class="{ 'setting-item--highlight': props.highlightKey === 'appearance.themeMode' }"
       data-setting-key="appearance.themeMode"
       :bordered="true"
@@ -258,12 +270,13 @@ const handleCustomColorChange = (color: string | null) => {
     >
       <div class="setting-row">
         <div class="setting-label">
-          <div class="main-label">主题颜色预设</div>
-          <div class="sub-label">选择一个预设主题主色或使用自定义</div>
+          <div class="main-label" :style="settingsStore.appearance.themeColorFollowsCover ? { color: 'var(--n-text-color-disabled)' } : {}">主题颜色预设</div>
+          <div class="sub-label" :style="settingsStore.appearance.themeColorFollowsCover ? { color: 'var(--n-text-color-disabled)' } : {}">选择一个预设主题主色或使用自定义</div>
         </div>
         <n-select
           v-model:value="settingsStore.appearance.themeColorPreset"
           :options="themePresetOptions"
+          :disabled="settingsStore.appearance.themeColorFollowsCover"
           style="width: 200px"
           @update:value="handlePresetChange"
         />
@@ -281,8 +294,8 @@ const handleCustomColorChange = (color: string | null) => {
     >
       <div class="setting-row" style="align-items: flex-start;">
         <div class="setting-label">
-          <div class="main-label">自定义主题色</div>
-          <div class="sub-label">设置自定义主题色</div>
+          <div class="main-label" :style="settingsStore.appearance.themeColorFollowsCover ? { color: 'var(--n-text-color-disabled)' } : {}">自定义主题色</div>
+          <div class="sub-label" :style="settingsStore.appearance.themeColorFollowsCover ? { color: 'var(--n-text-color-disabled)' } : {}">设置自定义主题色</div>
         </div>
         <div
           style="
@@ -297,6 +310,7 @@ const handleCustomColorChange = (color: string | null) => {
             :value="currentThemeColor"
             :modes="['hex']"
             size="small"
+            :disabled="settingsStore.appearance.themeColorFollowsCover"
             :show-alpha="false"
             @update:value="handleCustomColorChange"
           />

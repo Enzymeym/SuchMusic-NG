@@ -23,7 +23,6 @@ const getPlatformName = (key: string) => {
     kg: '酷狗音乐',
     wy: '网易云音乐',
     kw: '酷我音乐',
-    bilibili: '哔哩哔哩',
     mg: '咪咕音乐'
   }
   return map[key] || key

@@ -1,16 +1,19 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import HomeView from '../views/HomeView.vue'
-import LocalMusicView from '../views/LocalMusicView.vue'
-import PlaylistView from '../views/PlaylistView.vue'
-import PlaylistDetailView from '../views/PlaylistDetailView.vue'
-import NeteasePlaylistDetailView from '../views/NeteasePlaylistDetailView.vue'
-import RecentPlayView from '../views/RecentPlayView.vue'
-import PlaylistSquareView from '../views/PlaylistSquareView.vue'
-import ToplistView from '../views/ToplistView.vue'
-import SearchView from '../views/SearchView.vue'
-import DesktopLyricView from '../views/DesktopLyricView.vue'
-import TaskbarLyricView from '../views/TaskbarLyricView.vue'
 import MainLayout from '../layout/MainLayout.vue'
+
+// 路由懒加载
+const HomeView = () => import('../views/HomeView.vue')
+const LocalMusicView = () => import('../views/LocalMusicView.vue')
+const PlaylistView = () => import('../views/PlaylistView.vue')
+const PlaylistDetailView = () => import('../views/PlaylistDetailView.vue')
+const NeteasePlaylistDetailView = () => import('../views/NeteasePlaylistDetailView.vue')
+const RecentPlayView = () => import('../views/RecentPlayView.vue')
+const PlaylistSquareView = () => import('../views/PlaylistSquareView.vue')
+const ToplistView = () => import('../views/ToplistView.vue')
+const SearchView = () => import('../views/SearchView.vue')
+const StatisticsView = () => import('../views/StatisticsView.vue')
+const DesktopLyricView = () => import('../views/DesktopLyricView.vue')
+const TaskbarLyricView = () => import('../views/TaskbarLyricView.vue')
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -63,6 +66,11 @@ const router = createRouter({
           path: 'search',
           name: 'search',
           component: SearchView
+        },
+        {
+          path: 'statistics',
+          name: 'statistics',
+          component: StatisticsView
         }
       ]
     },

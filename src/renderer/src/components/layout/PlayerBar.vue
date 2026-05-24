@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch, onMounted } from 'vue'
-import { NSlider, NIcon, NText, NButton, NPopover, useThemeVars, NDrawer, NDrawerContent, NEmpty, NDropdown, useMessage } from 'naive-ui'
+import { NSlider, NIcon, NText, NButton, NPopover, useThemeVars, NDrawer, NDrawerContent, NEmpty, useMessage, NBadge } from 'naive-ui'
 import { usePlayerStore, type PlayerSong } from '../../stores/playerStore'
 import { usePlaylistStore } from '../../stores/playlistStore'
 import defaultCover from '@renderer/assets/icon.png'
@@ -10,9 +10,10 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useDesktopLyric } from '../../composables/useDesktopLyric'
 import { useTaskbarLyric } from '../../composables/useTaskbarLyric'
 import { runSnowdropGetMusicUrl } from '../../apis/snowdrop-transform'
-import { fetchGMALyric } from '../../apis/gma'
 import { AudioPlayerManager } from '../../utils/audioPlayerManager'
+import { searchMusic, fetchGMALyric } from '../../apis/gma'
 import { useDownloadMusic } from '../../composables/useDownloadMusic'
+import SoundEffectsModal from '../common/SoundEffectsModal.vue'
 
 const themeVars = useThemeVars()
 const message = useMessage()
@@ -53,15 +54,28 @@ const settingsStore = useSettingsStore()
 const { isDesktopLyricOpen, toggleDesktopLyric } = useDesktopLyric()
 const { isOpen: isTaskbarLyricOpen, toggle: toggleTaskbarLyric, init: initTaskbarLyric } = useTaskbarLyric()
 
-// 初始化任务栏歌词
+// 音效调节弹窗
+const showSoundEffectsModal = ref(false)
+
+// 初始化任务栏歌词和AudioContext
 onMounted(() => {
   initTaskbarLyric()
+  // 提前初始化AudioContext，避免拖动滑块时的初始化开销
+  webAudioEngine.ensureContext()
+
+  // 设置音频播放结束回调
+  webAudioEngine.setOnEndedCallback(() => {
+    player.handleSongEnd()
+  })
+})
+
+// 清理音频播放结束回调
+onBeforeUnmount(() => {
+  webAudioEngine.removeOnEndedCallback()
 })
 
 // 歌词重试获取函数
 const fetchLyricWithRetry = async (id: string, source: string): Promise<string> => {
-  const { fetchNewLyric } = await import('../../apis/netease/lyric')
-  
   let attempt = 0
   while (true) {
     // 检查当前播放歌曲是否改变，如果改变则停止重试
@@ -71,28 +85,12 @@ const fetchLyricWithRetry = async (id: string, source: string): Promise<string> 
     }
 
     try {
-      // 如果是网易云，使用 fetchNewLyric (支持 yrc)
-      if (source === 'wy' || source === 'netease') {
-        const lyricRes = await fetchNewLyric(Number(id))
-        if (lyricRes && lyricRes.code === 200) {
-          const lrc =
-            lyricRes.yrc?.lyric ||
-            lyricRes.lrc?.lyric ||
-            lyricRes.klyric?.lyric ||
-            lyricRes.tlyric?.lyric ||
-            lyricRes.romalrc?.lyric ||
-            ''
-          if (lrc) return lrc
-        }
-      } else {
-        // 其他平台继续使用 fetchGMALyric
-        const lrc = await fetchGMALyric(id, source)
-        if (lrc) return lrc
-      }
+      const lyricText = await fetchGMALyric(String(id), source)
+      if (lyricText) return lyricText
     } catch (e) {
       console.warn(`[PlayerBar] 获取歌词失败，第 ${attempt + 1} 次重试:`, e)
     }
-    
+
     attempt++
     // 指数退避策略，最大延迟 5 秒
     const delay = Math.min(500 + attempt * 500, 5000)
@@ -100,8 +98,27 @@ const fetchLyricWithRetry = async (id: string, source: string): Promise<string> 
   }
 }
 
+// 播放锁，防止并发播放
+let isLoadingSong = false
+
 // 加载并播放歌曲的核心逻辑
 const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => {
+  // 防止并发播放
+  if (isLoadingSong) {
+    console.log('[PlayerBar] 正在加载歌曲，跳过重复请求')
+    return
+  }
+  isLoadingSong = true
+
+  try {
+    await doLoadAndPlaySong(song, forcePlay)
+  } finally {
+    isLoadingSong = false
+  }
+}
+
+// 实际加载并播放歌曲的逻辑
+const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => {
   // 决定是否播放：如果是强制播放，则为 true；否则读取 store 中的 shouldAutoPlay
   // 注意：如果是 watch 触发（forcePlay=false），我们需要消费并重置 shouldAutoPlay
   let shouldPlay = forcePlay
@@ -122,7 +139,7 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
   if ((song as any).filePath && window.electron && window.electron.ipcRenderer) {
     // 先检查文件是否存在
     const exists = await window.electron.ipcRenderer.invoke('system:fs-exists', (song as any).filePath)
-    
+
     if (player.currentSong?.id !== currentProcessId) return
 
     if (exists) {
@@ -153,7 +170,7 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
             webAudioEngine.seek(player.positionMs)
           }
         }
-        
+
         if (player.currentSong?.id !== currentProcessId) {
            webAudioEngine.stop() // 如果播放后发现切歌了，立即停止
            return
@@ -191,7 +208,7 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
       let source = 'wy' // 默认为网易云 (wy)
       if (song.source) {
          // 映射 source 到插件支持的标识
-         // 假设插件支持的标识: wy, tx, kg, kw, mg, bilibili 等
+         // 假设插件支持的标识: wy, tx, kg, kw, mg 等
          switch (song.source) {
            case 'netease': source = 'wy'; break;
            case 'qq': source = 'tx'; break;
@@ -221,7 +238,7 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
             dir: settingsStore.local.cacheDir || null,
             key: cacheKey
           })
-          
+
           if (player.currentSong?.id !== currentProcessId) return
 
           if (cachePath) {
@@ -261,7 +278,7 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
               webAudioEngine.seek(player.positionMs)
             }
           }
-          
+
           if (player.currentSong?.id !== currentProcessId) {
              webAudioEngine.stop()
              return
@@ -282,7 +299,7 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
         } catch (e) {
           console.error('[PlayerBar] 播放缓存文件失败，回退到在线流程:', e)
           // 播放失败，继续走下面的在线获取流程
-          cacheFilePath = null 
+          cacheFilePath = null
         }
       }
 
@@ -318,7 +335,7 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
               url
             }
           )) as { usedCache: boolean; filePath: string | null; url: string }
-          
+
           if (player.currentSong?.id !== currentProcessId) return
 
           if (cacheResult.filePath) {
@@ -392,7 +409,7 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
           }
         }
       }
-      
+
       if (player.currentSong?.id !== currentProcessId) {
          webAudioEngine.stop()
          return
@@ -432,40 +449,43 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
       const artist = (song as any).artist || ''
       const keyword = name
 
-      const { cloudSearch } = await import('../../apis/netease/search/cloudsearch')
-      const res = await cloudSearch(keyword, 1, 10, 0)
+      // 使用 GMA API 进行搜索
+      const result = await searchMusic(keyword, 1, 10)
       
       if (player.currentSong?.id !== currentProcessId) return
 
-      const songs = res?.result?.songs || []
+      const allSongs = result.songs || []
+      
+      if (allSongs.length === 0) {
+        return
+      }
 
+      // 尝试精确匹配
       const norm = (s: string) => s.toLowerCase().trim()
-      const target = songs.find((s: any) => {
+      const target = allSongs.find((s: any) => {
         const sName = norm(s.name || '')
-        const sArtist = norm((s.ar || []).map((a: any) => a.name).join(' / ') || '')
+        const sArtist = norm(s.artist || '')
         const tName = norm(name)
         const tArtist = norm(artist)
         return sName === tName && (!tArtist || sArtist === tArtist)
-      }) || songs[0]
+      }) || allSongs[0]
 
       if (!target) {
         return
       }
 
-      const neteaseId = target.id
-
       const musicInfo = {
-        id: String(neteaseId),
+        id: String(target.id),
         name: target.name,
-        singer: (target.ar || []).map((a: any) => a.name).join(' / ') || '未知歌手',
-        albumName: target.al?.name || '未知专辑',
-        pic: target.al?.picUrl || '',
-        songmid: String(neteaseId),
-        mediaId: String(neteaseId)
+        singer: target.artist || '未知歌手',
+        albumName: target.album || '未知专辑',
+        pic: target.cover || '',
+        songmid: String(target.id),
+        mediaId: String(target.id)
       }
 
-      // 这里使用的是网易云搜索结果，所以 source 固定为 wy
-      const source = 'wy'
+      // 使用搜索结果的source
+      const source = target.source
       const quality = settingsStore.source.preferredQuality || '128k'
 
       const { url } = await runSnowdropGetMusicUrl(source, musicInfo, quality)
@@ -512,7 +532,7 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
             'audio:load-file',
             cacheFilePath
           )) as ArrayBuffer
-          
+
           if (player.currentSong?.id !== currentProcessId) return
 
           webAudioEngine.setVolume(player.volume)
@@ -552,13 +572,13 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
       const updatedSong: PlayerSong = {
         id: song.id,
         title: song.title || target.name,
-        artist: song.artist || (target.ar || []).map((a: any) => a.name).join(' / ') || '未知歌手',
-        album: song.album || target.al?.name || '未知专辑',
-        cover: song.cover || target.al?.picUrl || '',
-        durationMs: song.durationMs || target.dt || 0,
+        artist: song.artist || target.artist || '未知歌手',
+        album: song.album || target.album || '未知专辑',
+        cover: song.cover || target.cover || '',
+        durationMs: song.durationMs || (target.duration ? target.duration * 1000 : 0),
         filePath: cacheFilePath || undefined,
-        source: 'netease',
-        sourceSongId: neteaseId,
+        source: source,
+        sourceSongId: target.id,
         // 保留已有的歌词，防止被覆盖为空
         lyrics: song.lyrics || player.currentSong?.lyrics
       }
@@ -627,10 +647,18 @@ const modeIcon = computed(() => {
   }
 })
 
-// 播放列表抽屉
+// 显示播放列表抽屉
 const showPlaylist = ref(false)
+
+// 显示音量控制
+const showVolumePopover = ref(false)
+
 const togglePlaylist = () => {
   showPlaylist.value = !showPlaylist.value
+}
+
+const toggleVolumePopover = () => {
+  showVolumePopover.value = !showVolumePopover.value
 }
 
 // 从播放页打开发送播放列表时使用（只负责打开，不切换）
@@ -674,7 +702,7 @@ const startDrag = () => {
   } else {
     dragValue.value = 0
   }
-  
+
   isDraggingProgress.value = true
   window.addEventListener('mouseup', endDrag)
   window.addEventListener('touchend', endDrag)
@@ -682,68 +710,49 @@ const startDrag = () => {
 
 const endDrag = () => {
   if (!isDraggingProgress.value) return
-  
+
   isDraggingProgress.value = false
   window.removeEventListener('mouseup', endDrag)
   window.removeEventListener('touchend', endDrag)
-  
+
   if (!player.currentSong || player.currentSong.durationMs <= 0) return
 
   const ratio = Math.min(Math.max(dragValue.value, 0), 100) / 100
   const targetMs = player.currentSong.durationMs * ratio
-  
+
   webAudioEngine.seek(targetMs)
 }
+
+// 节流函数
+const throttle = (func: Function, delay: number) => {
+  let lastCall = 0
+  return (...args: any[]) => {
+    const now = Date.now()
+    if (now - lastCall >= delay) {
+      lastCall = now
+      return func(...args)
+    }
+  }
+}
+
+// 节流处理的音量更新函数
+const updateVolume = throttle((volume: number) => {
+  const v = volume / 100
+  // 先更新本地状态，避免UI卡顿
+  player.setVolume(v)
+  // 直接调用webAudioEngine.setVolume，避免双重requestAnimationFrame
+  webAudioEngine.setVolume(v)
+}, 30) // 减少节流间隔到30ms，提高响应速度
 
 // 音量使用 0-100 的滑块值
 const volumePercent = computed({
   get: () => Math.round(player.volume * 100),
   set: (val: number) => {
-    const v = val / 100
-    player.setVolume(v)
-    webAudioEngine.setVolume(v)
+    updateVolume(val)
   }
 })
 
-const volumeSliderRef = ref<HTMLElement | null>(null)
-const isDraggingVolume = ref(false)
 
-const updateVolumeFromClientY = (clientY: number) => {
-  const el = volumeSliderRef.value
-  if (!el) return
-  const rect = el.getBoundingClientRect()
-  const ratio = 1 - (clientY - rect.top) / rect.height
-  const clamped = Math.min(Math.max(ratio, 0), 1)
-  volumePercent.value = Math.round(clamped * 100)
-}
-
-const handleVolumeSliderMouseDown = (e: MouseEvent) => {
-  isDraggingVolume.value = true
-  updateVolumeFromClientY(e.clientY)
-  window.addEventListener('mousemove', handleVolumeSliderMouseMove)
-  window.addEventListener('mouseup', handleVolumeSliderMouseUp)
-}
-
-const handleVolumeSliderMouseMove = (e: MouseEvent) => {
-  if (!isDraggingVolume.value) return
-  updateVolumeFromClientY(e.clientY)
-}
-
-const handleVolumeSliderMouseUp = () => {
-  if (!isDraggingVolume.value) return
-  isDraggingVolume.value = false
-  window.removeEventListener('mousemove', handleVolumeSliderMouseMove)
-  window.removeEventListener('mouseup', handleVolumeSliderMouseUp)
-}
-
-const handleVolumeSliderClick = (e: MouseEvent) => {
-  updateVolumeFromClientY(e.clientY)
-}
-
-onBeforeUnmount(() => {
-  window.removeEventListener('mousemove', handleVolumeSliderMouseMove)
-  window.removeEventListener('mouseup', handleVolumeSliderMouseUp)
-})
 
 // 已播放时间（秒），用于显示为分钟:秒
 const playedSeconds = computed(() => Math.floor(player.positionMs / 1000))
@@ -817,9 +826,13 @@ const updateMediaPositionState = () => {
   const song = player.currentSong
   if (!song || !song.durationMs || song.durationMs <= 0) return
 
+  // 确保 position 值不超过 duration 值，避免 setPositionState 抛出错误
+  const duration = song.durationMs / 1000
+  const position = Math.min(player.positionMs / 1000, duration)
+
   mediaSession.setPositionState({
-    duration: song.durationMs / 1000,
-    position: player.positionMs / 1000,
+    duration: duration,
+    position: position,
     playbackRate: 1
   })
 }
@@ -973,29 +986,6 @@ watch(
 
 const playlistContainerRef = ref<HTMLElement | null>(null)
 
-// 播放列表来源下拉配置
-const playlistSourceOptions = [
-  { label: '搜索结果', key: 'search' },
-  { label: '最近播放', key: 'recent' },
-  { label: '本地音乐', key: 'local' }
-]
-
-const playlistSourceLabel = computed(() => {
-  switch (player.playlistSource) {
-    case 'local':
-      return '本地音乐'
-    case 'recent':
-      return '最近播放'
-    case 'search':
-    default:
-      return '搜索结果'
-  }
-})
-
-const handlePlaylistSourceSelect = (key: string | number) => {
-  player.playlistSource = key as any
-}
-
 const toggleFavorite = () => {
   if (!player.currentSong) return
   const isAdded = playlistStore.toggleFavorite({
@@ -1039,7 +1029,7 @@ const handleClear = () => {
 
 const scrollToCurrent = () => {
   if (!player.currentSong?.id || !playlistContainerRef.value) return
-  
+
   const el = playlistContainerRef.value.querySelector(`#song-${player.currentSong.id}`)
   if (el) {
     el.scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -1051,6 +1041,21 @@ watch(showPlaylist, (val) => {
     setTimeout(scrollToCurrent, 100)
   }
 })
+
+import { nextTick } from 'vue'
+const drawerTarget = ref('body')
+watch(() => player.isPlayerPageShown, async (val) => {
+  if (val) {
+    await nextTick()
+    // Wait an extra tick to ensure Transition has started and element is fully inserted
+    setTimeout(() => {
+      drawerTarget.value = '#player-page-container'
+    }, 50)
+  } else {
+    drawerTarget.value = 'body'
+  }
+}, { immediate: true })
+
 </script>
 
 <template>
@@ -1062,6 +1067,7 @@ watch(showPlaylist, (val) => {
         :value="progressPercent"
         :tooltip="false"
         class="main-progress"
+        style="width: 100%"
         @update:value="handleProgressUpdate"
         @update:value-end="endDrag"
       />
@@ -1081,7 +1087,7 @@ watch(showPlaylist, (val) => {
             <n-text strong class="song-title">
               {{ player.currentSong?.title || '未选择歌曲' }}
             </n-text>
-            <n-button text @click="toggleFavorite">
+            <n-button text style="display: none;" @click="toggleFavorite">
               <n-icon size="18" :color="isCurrentFavorite ? '#d03050' : undefined">
                 <i :class="isCurrentFavorite ? 'mgc_heart_fill' : 'mgc_heart_line'"></i>
               </n-icon>
@@ -1124,16 +1130,16 @@ watch(showPlaylist, (val) => {
       <span class="time-text">
         {{ formatTime(playedSeconds) }} / {{ formatTime(totalSeconds) }}
       </span>
-      <n-button 
-        quaternary 
-        class="action-btn" 
+      <n-button
+        quaternary
+        class="action-btn"
         :type="isDesktopLyricOpen ? 'primary' : 'default'"
         @click="toggleDesktopLyric"
       >
         <n-icon size="22" style="margin-left: -5px"><i class="mgc_text_line"></i></n-icon>
       </n-button>
-      <n-button 
-        quaternary 
+      <n-button
+        quaternary
         class="action-btn"
         style="display: none;"
         :type="isTaskbarLyricOpen ? 'primary' : 'default'"
@@ -1142,29 +1148,31 @@ watch(showPlaylist, (val) => {
       >
         <n-icon size="22" style="margin-left: -5px"><i class="mgc_text_line"></i></n-icon>
       </n-button>
+      <n-button quaternary class="action-btn" @click="showSoundEffectsModal = true" title="音效调节">
+        <n-icon size="22" style="margin-left: -5px"><i class="mgc_audio_line"></i></n-icon>
+      </n-button>
       <n-button quaternary class="action-btn"
         ><n-icon size="22" style="margin-left: -5px"><i class="mgc_settings_2_line"></i></n-icon
       ></n-button>
 
       <div class="volume-control">
-        <n-popover trigger="hover"> 
+        <n-popover v-model:show="showVolumePopover" trigger="manual" :show-arrow="false" overlay-class="player-bar-volume-popover" :placement="'top'" :to="drawerTarget">
           <template #trigger>
-            <n-button style="width: 40px; height: 40px" quaternary class="action-btn">
+            <n-button style="width: 40px; height: 40px" quaternary class="action-btn" @click="toggleVolumePopover">
               <n-icon size="22" style="margin-left: -4px"><i class="mgc_volume_line"></i></n-icon
             ></n-button>
           </template>
-          <div class="volume-slider-pop">
-            <div
-              ref="volumeSliderRef"
-              class="volume-slider-vertical"
-              @mousedown.prevent="handleVolumeSliderMouseDown"
-              @click.stop="handleVolumeSliderClick"
-            >
-              <div class="volume-slider-track">
-                <div class="volume-slider-fill" :style="{ height: `${volumePercent}%` }" />
-                <div class="volume-slider-thumb" :style="{ bottom: `${volumePercent}%` }" />
-              </div>
-            </div>
+          <div class="volume-slider-container">
+            <div class="volume-value">{{ volumePercent }}%</div>
+            <n-slider
+              v-model:value="volumePercent"
+              :vertical="true"
+              :min="0"
+              :max="100"
+              :tooltip="false"
+              class="volume-slider"
+              style="width: 4px; height: 100px; min-height: 100px; flex-shrink: 0;"
+            />
           </div>
         </n-popover>
       </div>
@@ -1175,38 +1183,30 @@ watch(showPlaylist, (val) => {
       </n-badge>
     </div>
 
-    <n-drawer v-model:show="showPlaylist" :width="400" placement="right" :to="player.isPlayerPageShown ? '#player-page-container' : 'body'">
+    <n-drawer
+      v-model:show="showPlaylist"
+      :width="400"
+      placement="right"
+      :trap-focus="false"
+      :block-scroll="false"
+      :to="drawerTarget"
+      :z-index="10000"
+    >
       <n-drawer-content :native-scrollbar="false" body-content-style="padding: 0;">
         <template #header>
           <div class="playlist-header">
             <div class="playlist-title">播放队列</div>
             <div class="playlist-header-right">
-              <n-dropdown
-                trigger="click"
-                :options="playlistSourceOptions"
-                @select="handlePlaylistSourceSelect"
-                :to="player.isPlayerPageShown ? '#player-page-container' : 'body'"
-              >
-                <n-button text size="small" class="playlist-source-btn">
-                  <n-icon size="16" style="margin-right: 4px">
-                    <i class="mgc_list_check_2_line" />
-                  </n-icon>
-                  <span>{{ playlistSourceLabel }}</span>
-                  <n-icon size="14" style="margin-left: 2px">
-                    <i class="mgc_down_small_line" />
-                  </n-icon>
-                </n-button>
-              </n-dropdown>
               <div class="playlist-count">{{ player.playlist.length }} 首歌曲</div>
             </div>
           </div>
         </template>
-        
+
         <div ref="playlistContainerRef" style="padding: 12px;">
            <n-empty v-if="player.playlist.length === 0" description="暂无歌曲" style="margin-top: 40px;" />
-           <div 
+           <div
              v-else
-             v-for="(song, index) in player.playlist" 
+             v-for="(song, index) in player.playlist"
              :key="song.id || index"
              class="playlist-item"
              :class="{ active: player.currentSong?.id === song.id }"
@@ -1246,6 +1246,9 @@ watch(showPlaylist, (val) => {
         </template>
       </n-drawer-content>
     </n-drawer>
+
+    <!-- 音效调节弹窗 -->
+    <sound-effects-modal v-model:show="showSoundEffectsModal" />
   </div>
 </template>
 
@@ -1256,8 +1259,11 @@ watch(showPlaylist, (val) => {
   justify-content: space-between;
   align-items: center;
   height: 100%;
-  padding: 12px 13px 13px;
+  padding: 12px 16px 13px;
   background-color: #fff;
+  gap: 16px;
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 
 html[data-theme='dark'] .player-bar {
@@ -1266,14 +1272,19 @@ html[data-theme='dark'] .player-bar {
 
 .progress-wrapper {
   position: absolute;
-  top: -3px; /* Pull it up to overlap the border */
+  top: -5px; /* Pull it up to overlap the border */
   left: 0;
   width: 100%;
-  height: 4px; /* Interaction area */
-  z-index: 10;
+  height: 12px; /* Increased height to accommodate handle */
+  z-index: 1000;
   display: flex;
   align-items: center;
   cursor: pointer;
+}
+
+/* Ensure the slider wrapper spans the full width of the absolute container */
+.progress-wrapper :deep(.n-slider) {
+  width: 100% !important;
 }
 
 .action-btn {
@@ -1284,10 +1295,6 @@ html[data-theme='dark'] .player-bar {
   justify-content: center;
 }
 
-:deep(.n-slider .n-slider-rail) {
-  height: 2px;
-}
-
 :deep(.n-badge .n-badge-sup) {
   font-size: 10px;
   /* 使用主题前景色作为文字颜色，保证深浅色模式下都有良好对比度 */
@@ -1296,29 +1303,49 @@ html[data-theme='dark'] .player-bar {
   background-color: v-bind('themeVars.primaryColor');
 }
 
-:deep(.n-slider .n-slider-rail .n-slider-rail__fill) {
-  width: 2px;
+.progress-wrapper :deep(.n-slider .n-slider-rail) {
+  width: 100%;
   height: 2px;
+  background-color: rgba(0, 0, 0, 0.2) !important;
+  border-radius: 1px;
 }
 
-:deep(.n-slider .n-slider-handle) {
+html[data-theme='dark'] .progress-wrapper :deep(.n-slider .n-slider-rail) {
+  background-color: rgba(255, 255, 255, 0.2) !important;
+}
+
+.progress-wrapper :deep(.n-slider .n-slider-rail .n-slider-rail__fill) {
+  height: 2px !important;
+  background-color: v-bind('themeVars.primaryColor') !important;
+  border-radius: 1px;
+}
+
+.progress-wrapper :deep(.n-slider .n-slider-handle) {
   width: 0;
   height: 0;
   transition: all 0.2s;
   opacity: 0;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.2);
+  background-color: v-bind('themeVars.primaryColor');
+  border: none;
 }
 
-:deep(.n-slider:hover .n-slider-handle) {
-  width: 10px;
-  height: 10px;
+.progress-wrapper :deep(.n-slider:hover .n-slider-handle),
+.progress-wrapper :deep(.n-slider--active .n-slider-handle) {
+  width: 12px;
+  height: 12px;
   opacity: 1;
+  background-color: v-bind('themeVars.primaryColor');
+  border: none;
 }
 
 .song-info {
   display: flex;
   align-items: center;
   gap: 11px;
-  width: 300px;
+  min-width: 200px;
+  max-width: 350px;
+  flex: 1;
   overflow: hidden;
 }
 
@@ -1385,12 +1412,14 @@ html[data-theme='dark'] .player-bar {
   display: flex;
   justify-content: center;
   align-items: center;
+  min-width: 200px;
 }
 
 .control-buttons {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  flex-shrink: 0;
 }
 
 .play-pause-btn {
@@ -1412,11 +1441,14 @@ html[data-theme='dark'] .player-bar {
 .player-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-right: 16px;
-  width: auto; /* Allow flexible width */
-  min-width: 300px;
+  gap: 8px;
+  margin-right: 0;
+  width: auto;
+  min-width: 250px;
+  max-width: 350px;
   justify-content: flex-end;
+  flex: 1;
+  flex-shrink: 0;
 }
 
 .time-text {
@@ -1424,6 +1456,9 @@ html[data-theme='dark'] .player-bar {
   color: #666;
   font-variant-numeric: tabular-nums;
   margin-right: 8px;
+  min-width: 80px;
+  text-align: right;
+  flex-shrink: 0;
 }
 
 .playlist-count-badge {
@@ -1432,51 +1467,6 @@ html[data-theme='dark'] .player-bar {
   padding: 2px 6px;
   border-radius: 10px;
   color: #666;
-}
-
-.volume-slider-pop {
-  height: 100px;
-  padding: 8px 0px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.volume-slider-vertical {
-  width: 10px;
-  height: 80px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-}
-
-.volume-slider-track {
-  position: relative;
-  width: 3.5px;
-  height: 100%;
-  border-radius: 999px;
-  background-color: rgba(0, 0, 0, 0.12);
-}
-
-.volume-slider-fill {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  width: 100%;
-  border-radius: inherit;
-  background-color: #2c8efd;
-}
-
-.volume-slider-thumb {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background-color: #ffffff;
-  box-shadow: 0 0 4px rgba(0, 0, 0, 0.685);
 }
 
 .playlist-header {
@@ -1613,5 +1603,74 @@ html[data-theme='dark'] .playlist-item.active {
 
 .download-btn:hover {
   color: v-bind('themeVars.primaryColor');
+}
+</style>
+
+<style lang="scss">
+.player-bar-volume-popover {
+  border-radius: 16px;
+  padding: 0;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  width: 100px;
+  min-height: 150px;
+}
+
+.volume-slider-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  min-height: 120px;
+  padding: 6px 0px;
+}
+
+.volume-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--n-text-color, #333);
+  font-variant-numeric: tabular-nums;
+  transition: none;
+}
+
+.volume-slider {
+  width: 4px;
+  height: 100px;
+  min-height: 100px;
+  flex-shrink: 0;
+}
+
+.volume-slider :deep(.n-slider) {
+  width: 4px;
+  height: 100px;
+  min-height: 100px;
+  flex-shrink: 0;
+}
+
+.volume-slider :deep(.n-slider-rail) {
+  width: 4px;
+  height: 100px;
+  min-height: 100px;
+  background-color: rgba(128, 128, 128, 0.2);
+  border-radius: 999px;
+}
+
+.volume-slider :deep(.n-slider-rail__fill) {
+  width: 4px;
+  background-color: #2c8efd;
+  border-radius: 999px;
+}
+
+.volume-slider :deep(.n-slider-handle) {
+  width: 12px;
+  height: 12px;
+  background-color: #2c8efd;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  border: none;
+  transition: width 0.1s ease, height 0.1s ease;
+}
+
+.volume-slider :deep(.n-slider:hover .n-slider-handle) {
+  width: 14px;
+  height: 14px;
 }
 </style>

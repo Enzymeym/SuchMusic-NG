@@ -67,10 +67,9 @@ import { NButton, NIcon, useMessage, NInput } from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import { usePlayerStore } from '../stores/playerStore'
 import { useSettingsStore } from '../stores/settingsStore'
-import { fetchGMALyric } from '../apis/gma'
 import { runSnowdropGetMusicUrl } from '../apis/snowdrop-transform'
 import { AudioPlayerManager } from '../utils/audioPlayerManager'
-import { fetchNewLyric } from '../apis/netease/lyric'
+import { fetchGMALyric } from '../apis/gma'
 
 interface RecentSong {
   id: string | number
@@ -198,23 +197,8 @@ const handleSongClick = async (song: RecentSong) => {
       filePath: exists ? (song.id as string) : undefined // 如果文件不存在，清除 filePath
     }
     
-    // 构造播放列表（过滤出所有本地歌曲）
-    const localSongs = songs.value
-      .filter(s => typeof s.id === 'string' && (s.id.includes(':\\') || s.id.includes(':/')))
-      .map(s => ({
-        id: s.id,
-        title: s.name,
-        artist: (s.ar || []).map((a) => a.name).join(' / ') || '未知歌手',
-        album: s.al?.name || '未知专辑',
-        cover: s.picUrl || '',
-        durationMs: s.dt || 0,
-        filePath: s.id as string
-      }))
-
-    player.setPlaylistForSource('recent', localSongs)
-    player.currentSong = playerSong
-    player.currentIndex = localSongs.findIndex(s => s.id === song.id)
-    player.isPlaying = true
+    player.setCurrentSong(playerSong)
+    player.setPlaying(true)
     
     // 调用播放引擎
     if (exists && playerSong.filePath) {
@@ -262,22 +246,8 @@ const handleSongClick = async (song: RecentSong) => {
         }
 
         try {
-          if (source === 'wy' || source === 'netease') {
-             const lyricRes = await fetchNewLyric(Number(id))
-             if (lyricRes && lyricRes.code === 200) {
-               const lrc =
-                 lyricRes.yrc?.lyric ||
-                 lyricRes.lrc?.lyric ||
-                 lyricRes.klyric?.lyric ||
-                 lyricRes.tlyric?.lyric ||
-                 lyricRes.romalrc?.lyric ||
-                 ''
-               if (lrc) return lrc
-             }
-          } else {
-             const lrc = await fetchGMALyric(id, source)
-             if (lrc) return lrc
-          }
+          const lyricText = await fetchGMALyric(String(id), source)
+          if (lyricText) return lyricText
         } catch (e) {
           console.warn(`获取歌词失败，第 ${attempt + 1} 次重试:`, e)
         }
@@ -375,29 +345,8 @@ const handleSongClick = async (song: RecentSong) => {
       lyrics
     }
 
-    // 构造播放列表（当前仅包含点击的这一首，或者可以包含整个最近播放列表的在线歌曲）
-    // 为了体验一致性，这里我们将整个最近播放列表中的在线歌曲都加入播放列表
-    const recentOnlineSongs = songs.value
-      .filter(s => !(typeof s.id === 'string' && (s.id.includes(':\\') || s.id.includes(':/'))))
-      .map(s => ({
-        id: s.id,
-        title: s.name,
-        artist: (s.ar || []).map((a) => a.name).join(' / ') || '未知歌手',
-        album: s.al?.name || '未知专辑',
-        cover: s.picUrl || '',
-        durationMs: s.dt || 0,
-        source: s.source || 'netease',
-        sourceSongId: s.id,
-        // 仅当前歌曲填充 url 和 lyrics
-        url: s.id === song.id ? finalUrl : '',
-        lyrics: s.id === song.id ? lyrics : '',
-        filePath: s.id === song.id ? (cacheFilePath || undefined) : undefined
-      }))
-
-    player.setPlaylistForSource('recent', recentOnlineSongs)
-    player.currentSong = playerSong
-    player.currentIndex = recentOnlineSongs.findIndex(s => s.id === song.id)
-    player.isPlaying = true
+    player.setCurrentSong(playerSong)
+    player.setPlaying(true)
 
     // 播放
     try {

@@ -25,6 +25,29 @@ export default defineConfig(({ mode }) => {
         }
       },
       plugins: [vue(), wasm(), topLevelAwait()],
+      build: {
+        cssCodeSplit: true,
+        chunkSizeWarningLimit: 500,
+        rollupOptions: {
+          output: {
+            manualChunks: {
+              'vue-vendor': ['vue', 'vue-router', 'pinia'],
+              'naive-ui': ['naive-ui'],
+              'amll-lyric': ['@applemusic-like-lyrics/lyric', '@applemusic-like-lyrics/vue'],
+              pixi: [
+                '@pixi/app',
+                '@pixi/core',
+                '@pixi/display',
+                '@pixi/sprite',
+                '@pixi/filter-blur',
+                '@pixi/filter-color-matrix'
+              ],
+              highlight: ['highlight.js'],
+              markdown: ['markdown-it']
+            }
+          }
+        }
+      },
       server: {
         proxy: {
           '/api': {

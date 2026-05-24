@@ -70,9 +70,9 @@ function extractMeta(originalCode: string): SnowdropPluginMeta {
 }
 
 // 从转换后的插件代码中提取 sources 概览并收集运行期日志
-function extractSourcesSummary(
+async function extractSourcesSummary(
   transformedCode: string
-): { sources: SnowdropSourceSummary[]; runtimeLogs: string[] } {
+): Promise<{ sources: SnowdropSourceSummary[]; runtimeLogs: string[] }> {
   try {
     const runtimeLogs: string[] = []
 
@@ -227,9 +227,12 @@ function extractSourcesSummary(
             musicInfo: unknown,
             quality: string
           ) => Promise<unknown>
-          // 不等待返回值，仅用于触发同步日志输出
-          // eslint-disable-next-line @typescript-eslint/no-floating-promises
-          invokeMusicUrl(testSource, fakeMusicInfo, '128k')
+          
+          // 等待一定时间以持续捕获异步日志
+          await Promise.race([
+            invokeMusicUrl(testSource, fakeMusicInfo, '128k'),
+            new Promise(resolve => setTimeout(resolve, 500))
+          ])
         }
       }
     } catch {
@@ -309,10 +312,10 @@ module.exports = { pluginInfo, sources, musicUrl };`
 }
 
 // 核心转换入口
-export function transformSnowdropPlugin(
+export async function transformSnowdropPlugin(
   originalCode: string,
   options: SnowdropTransformOptions = {}
-): SnowdropTransformResult {
+): Promise<SnowdropTransformResult> {
   const logs: string[] = []
   const warnings: string[] = []
   const errors: string[] = []
@@ -364,7 +367,7 @@ export function transformSnowdropPlugin(
 
   logs.push(`[SnowdropTransform] 转换耗时约 ${durationMs.toFixed(3)} ms`)
 
-  const { sources, runtimeLogs } = extractSourcesSummary(transformedCode)
+  const { sources, runtimeLogs } = await extractSourcesSummary(transformedCode)
   if (sources.length) {
     logs.push(
       `[SnowdropTransform] 已解析到 ${sources.length} 个音源入口`
@@ -387,15 +390,15 @@ export function transformSnowdropPlugin(
 }
 
 // 简单性能基准
-export function benchmarkSnowdropTransform(
+export async function benchmarkSnowdropTransform(
   sampleCode: string,
   count = 1000
-): SnowdropBenchmarkResult {
+): Promise<SnowdropBenchmarkResult> {
   const start = process.hrtime.bigint()
   let success = 0
 
   for (let i = 0; i < count; i++) {
-    const result = transformSnowdropPlugin(sampleCode)
+    const result = await transformSnowdropPlugin(sampleCode)
     if (result.errors.length === 0) {
       success++
     }

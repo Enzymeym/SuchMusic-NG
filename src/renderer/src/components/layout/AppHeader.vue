@@ -24,6 +24,8 @@ const showSettings = ref(false)
 const settingsSection = ref('general')
 const settingsHighlightKey = ref<string | null>(null)
 
+const headerRef = ref<HTMLElement | null>(null)
+
 // Search Suggestion State
 const showSuggestions = ref(false)
 const suggestions = ref<{
@@ -118,7 +120,6 @@ const handleSuggestionClick = (type: string, item: any) => {
       source: 'local',
       sourceSongId: item.id
     }
-    playerStore.setPlaylistForSource('local', [song])
     playerStore.setCurrentSong(song)
     playerStore.setPlaying(true)
     playerStore.recordPlay(song)
@@ -143,7 +144,6 @@ const handleSuggestionClick = (type: string, item: any) => {
       sourceSongId: item.songId // Simplified
     }
     // Just play it
-    playerStore.setPlaylistForSource('recent', [song]) // Or append?
     playerStore.setCurrentSong(song)
     playerStore.setPlaying(true)
   } else if (type === 'online-song') {
@@ -206,7 +206,7 @@ const handleWindowAction = (type: 'hide' | 'min' | 'max' | 'close') => {
 
       const performClose = () => {
         if (closeAction === 'minimize') {
-          window.electron.ipcRenderer.send('winAction', { type: 'hide' })
+          window.electron.ipcRenderer.send('winAction', { type: 'hide-to-tray' })
         } else {
           window.electron.ipcRenderer.send('winAction', { type: 'close' })
         }
@@ -248,33 +248,14 @@ const isTransparent = computed(() => {
   return route.name === 'playlist-detail'
 })
 
-
-
-onMounted(() => {
-  if (window.electron && window.electron.ipcRenderer) {
-    window.electron.ipcRenderer.on('winSizeChange', (_, type) => {
-      sizeType.value = type.size
-    })
-  }
-
-  const handleOpenSettings = (event: Event) => {
-    const detail = (event as CustomEvent<{ section?: string; settingKey?: string }>).detail || {}
-    settingsSection.value = detail.section || 'general'
-    settingsHighlightKey.value = detail.settingKey ?? null
-    showSettings.value = true
-  }
-
-  window.addEventListener('open-settings', handleOpenSettings as EventListener)
-
-  onBeforeUnmount(() => {
-    window.removeEventListener('open-settings', handleOpenSettings as EventListener)
-  })
-})
-
 </script>
 
 <template>
-  <div ref="headerRef" class="app-header" :class="{ 'is-transparent': isTransparent }">
+  <div
+    ref="headerRef"
+    class="app-header"
+    :class="{ 'is-transparent': isTransparent }"
+  >
     <div class="left-controls">
       <div style="display: flex; align-items: center; gap: 6px">
         <n-button circle strong secondary size="large" @click="goBack" class="nav-btn">
@@ -504,7 +485,7 @@ onMounted(() => {
   -webkit-app-region: drag;
   /* Draggable */
   position: relative;
-  z-index: 1;
+  z-index: 100;
 }
 
 /* 沉浸式模式下，子元素应用毛玻璃样式 */

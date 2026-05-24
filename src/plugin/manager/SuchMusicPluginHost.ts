@@ -14,6 +14,8 @@ import * as fs from 'fs'
 import * as crypto from 'crypto'
 import { pluginLog } from '../logger'
 import { transformSnowdropPlugin } from '../utils/snowdrop-transform'
+import { getMainWindow } from '../../main/windows/mainWindow'
+import { handlePluginUpdate } from './pluginNotifier'
 import {
   PluginInfo,
   PluginSource,
@@ -25,6 +27,28 @@ import {
 // 模拟事件通知
 function sendPluginNotice(data: any, pluginName: string) {
   pluginLog.info(`[PluginNotice] ${pluginName}:`, data)
+  
+  if (data.type === 'update') {
+    // 调用主进程通知服务，支持原生 Toast 及热更新
+    handlePluginUpdate(pluginName, data.data).catch(err => {
+      pluginLog.error('Error handling plugin update notification:', err)
+    })
+    return
+  }
+
+  // 其他类型通知仍然发送给渲染进程
+  try {
+    const win = getMainWindow()
+    if (win) {
+      win.webContents.send('plugin:notice', {
+        pluginName,
+        type: data.type,
+        data: data.data
+      })
+    }
+  } catch (err) {
+    pluginLog.error('Failed to send plugin notice IPC:', err)
+  }
 }
 
 // ==================== 常量定义 ====================
@@ -186,7 +210,7 @@ class SuchMusicPluginHost {
 
       // 兼容旧版直接使用洛雪插件路径的配置
       if (isLxStylePluginCode(code)) {
-        const result = transformSnowdropPlugin(code, { sourceType: 'lx' })
+        const result = await transformSnowdropPlugin(code, { sourceType: 'lx' })
 
         if (result.logs.length) {
           logger.log(`${CONSTANTS.LOG_PREFIX} Snowdrop transform logs:`, ...result.logs)
@@ -212,6 +236,44 @@ class SuchMusicPluginHost {
       return this.plugin!
     } catch (error: any) {
       throw new PluginError(`无法加载插件 ${pluginPath}: ${error.message}`)
+    }
+  }
+
+  /**
+   * 从代码字符串加载插件
+   * @param code 插件代码字符串
+   * @param logger 日志记录器
+   */
+  async loadPluginFromCode(code: string, logger: Logger = console): Promise<SuchMusicPlugin | SuchPluginNew> {
+    try {
+      // 兼容旧版直接使用洛雪插件路径的配置
+      if (isLxStylePluginCode(code)) {
+        const result = await transformSnowdropPlugin(code, { sourceType: 'lx' })
+
+        if (result.logs.length) {
+          logger.log(`${CONSTANTS.LOG_PREFIX} Snowdrop transform logs:`, ...result.logs)
+        }
+        if (result.warnings.length) {
+          logger.warn(
+            `${CONSTANTS.LOG_PREFIX} Snowdrop transform warnings:`,
+            ...result.warnings
+          )
+        }
+        if (result.errors.length) {
+          logger.error(
+            `${CONSTANTS.LOG_PREFIX} Snowdrop transform errors:`,
+            ...result.errors
+          )
+        }
+
+        code = result.transformedCode
+      }
+
+      this.pluginCode = code
+      this._initialize(logger)
+      return this.plugin!
+    } catch (error: any) {
+      throw new PluginError(`无法加载插件代码: ${error.message}`)
     }
   }
 
@@ -262,20 +324,41 @@ class SuchMusicPluginHost {
    */
   async getMusicUrl(source: string, musicInfoOrId: MusicInfo | string, quality: string = '128k'): Promise<string> {
     this._ensurePluginInitialized()
+    
+    const startTime = Date.now()
+    const musicId = typeof musicInfoOrId === 'string' ? musicInfoOrId : musicInfoOrId.id
+    
+    pluginLog.log(`${CONSTANTS.LOG_PREFIX} 开始调用插件的 getMusicUrl 方法...`)
+    pluginLog.log(`${CONSTANTS.LOG_PREFIX} 参数: source=${source}, musicId=${musicId}, quality=${quality}`)
 
-    if (this.isNewStyle) {
-      const plugin = this.plugin as SuchPluginNew
-      const musicId = typeof musicInfoOrId === 'string' ? musicInfoOrId : musicInfoOrId.id
-      return plugin.getMusicUrl(source, String(musicId), quality)
-    } else {
-      // 旧版兼容
-      let musicInfo: MusicInfo
-      if (typeof musicInfoOrId === 'string') {
-        musicInfo = { id: musicInfoOrId } as MusicInfo
+    try {
+      let result: string
+      if (this.isNewStyle) {
+        const plugin = this.plugin as SuchPluginNew
+        result = await plugin.getMusicUrl(source, String(musicId), quality)
       } else {
-        musicInfo = musicInfoOrId
+        // 旧版兼容
+        let musicInfo: MusicInfo
+        if (typeof musicInfoOrId === 'string') {
+          musicInfo = { id: musicInfoOrId } as MusicInfo
+        } else {
+          musicInfo = musicInfoOrId
+        }
+        result = await this._callPluginMethod('musicUrl', source, musicInfo, quality)
       }
-      return this._callPluginMethod('musicUrl', source, musicInfo, quality)
+      
+      const executionTime = Date.now() - startTime
+      pluginLog.log(`${CONSTANTS.LOG_PREFIX} getMusicUrl 方法调用成功`)
+      pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+      pluginLog.log(`${CONSTANTS.LOG_PREFIX} 结果: ${result}`)
+      
+      return result
+    } catch (error: any) {
+      const executionTime = Date.now() - startTime
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} getMusicUrl 方法执行失败:`, error.message)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 错误堆栈:`, error.stack)
+      throw error
     }
   }
 
@@ -289,12 +372,36 @@ class SuchMusicPluginHost {
   async search(source: string, query: string, page: number, limit: number): Promise<any> {
     this._ensurePluginInitialized()
     
-    if (this.isNewStyle) {
-      const plugin = this.plugin as SuchPluginNew
-      return plugin.search(source, query, page, limit)
-    }
+    const startTime = Date.now()
     
-    throw new PluginError('Search not supported in old style plugin.')
+    pluginLog.log(`${CONSTANTS.LOG_PREFIX} 开始调用插件的 search 方法...`)
+    pluginLog.log(`${CONSTANTS.LOG_PREFIX} 参数: source=${source}, query=${query}, page=${page}, limit=${limit}`)
+
+    try {
+      let result: any
+      if (this.isNewStyle) {
+        const plugin = this.plugin as SuchPluginNew
+        result = await plugin.search(source, query, page, limit)
+        
+        const executionTime = Date.now() - startTime
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} search 方法调用成功`)
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 结果类型: ${typeof result}`)
+        if (Array.isArray(result)) {
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} 结果数量: ${result.length}`)
+        }
+      } else {
+        throw new PluginError('Search not supported in old style plugin.')
+      }
+      
+      return result
+    } catch (error: any) {
+      const executionTime = Date.now() - startTime
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} search 方法执行失败:`, error.message)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 错误堆栈:`, error.stack)
+      throw error
+    }
   }
 
   /**
@@ -303,13 +410,39 @@ class SuchMusicPluginHost {
   async checkUpdate(): Promise<any> {
     this._ensurePluginInitialized()
     
-    if (this.isNewStyle) {
-      const plugin = this.plugin as SuchPluginNew
-      if (typeof plugin.checkUpdate === 'function') {
-        return plugin.checkUpdate()
+    const startTime = Date.now()
+    
+    pluginLog.log(`${CONSTANTS.LOG_PREFIX} 开始调用插件的 checkUpdate 方法...`)
+
+    try {
+      let result: any = null
+      if (this.isNewStyle) {
+        const plugin = this.plugin as SuchPluginNew
+        if (typeof plugin.checkUpdate === 'function') {
+          result = await plugin.checkUpdate()
+          const executionTime = Date.now() - startTime
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} checkUpdate 方法调用成功`)
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} 结果:`, result)
+        } else {
+          const executionTime = Date.now() - startTime
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} checkUpdate 方法不存在，跳过执行`)
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+        }
+      } else {
+        const executionTime = Date.now() - startTime
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 旧版插件不支持 checkUpdate 方法`)
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
       }
+      
+      return result
+    } catch (error: any) {
+      const executionTime = Date.now() - startTime
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} checkUpdate 方法执行失败:`, error.message)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 错误堆栈:`, error.stack)
+      throw error
     }
-    return null
   }
 
   /**
@@ -318,14 +451,45 @@ class SuchMusicPluginHost {
    * @param musicInfo 音乐信息
    */
   async getPic(source: string, musicInfo: MusicInfo): Promise<string> {
-    if (this.isNewStyle) {
-      const plugin = this.plugin as SuchPluginNew
-      if (typeof plugin.getPic === 'function') {
-        return plugin.getPic(source, String(musicInfo.id))
+    this._ensurePluginInitialized()
+    
+    const startTime = Date.now()
+    const musicId = musicInfo.id
+    
+    pluginLog.log(`${CONSTANTS.LOG_PREFIX} 开始调用插件的 getPic 方法...`)
+    pluginLog.log(`${CONSTANTS.LOG_PREFIX} 参数: source=${source}, musicId=${musicId}`)
+
+    try {
+      let result: string = ''
+      if (this.isNewStyle) {
+        const plugin = this.plugin as SuchPluginNew
+        if (typeof plugin.getPic === 'function') {
+          result = await plugin.getPic(source, String(musicId))
+          const executionTime = Date.now() - startTime
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} getPic 方法调用成功`)
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} 结果: ${result}`)
+        } else {
+          const executionTime = Date.now() - startTime
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} getPic 方法不存在，返回空字符串`)
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+        }
+      } else {
+        result = await this._callPluginMethod('getPic', source, musicInfo)
+        const executionTime = Date.now() - startTime
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} getPic 方法调用成功`)
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 结果: ${result}`)
       }
-      return ''
+      
+      return result
+    } catch (error: any) {
+      const executionTime = Date.now() - startTime
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} getPic 方法执行失败:`, error.message)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 错误堆栈:`, error.stack)
+      throw error
     }
-    return this._callPluginMethod('getPic', source, musicInfo)
   }
 
   /**
@@ -334,14 +498,45 @@ class SuchMusicPluginHost {
    * @param musicInfo 音乐信息
    */
   async getLyric(source: string, musicInfo: MusicInfo): Promise<string> {
-    if (this.isNewStyle) {
-      const plugin = this.plugin as SuchPluginNew
-      if (typeof plugin.getLyric === 'function') {
-        return plugin.getLyric(source, String(musicInfo.id))
+    this._ensurePluginInitialized()
+    
+    const startTime = Date.now()
+    const musicId = musicInfo.id
+    
+    pluginLog.log(`${CONSTANTS.LOG_PREFIX} 开始调用插件的 getLyric 方法...`)
+    pluginLog.log(`${CONSTANTS.LOG_PREFIX} 参数: source=${source}, musicId=${musicId}`)
+
+    try {
+      let result: string = ''
+      if (this.isNewStyle) {
+        const plugin = this.plugin as SuchPluginNew
+        if (typeof plugin.getLyric === 'function') {
+          result = await plugin.getLyric(source, String(musicId))
+          const executionTime = Date.now() - startTime
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} getLyric 方法调用成功`)
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} 结果长度: ${result.length} 字符`)
+        } else {
+          const executionTime = Date.now() - startTime
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} getLyric 方法不存在，返回空字符串`)
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+        }
+      } else {
+        result = await this._callPluginMethod('getLyric', source, musicInfo)
+        const executionTime = Date.now() - startTime
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} getLyric 方法调用成功`)
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 结果长度: ${result.length} 字符`)
       }
-      return ''
+      
+      return result
+    } catch (error: any) {
+      const executionTime = Date.now() - startTime
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} getLyric 方法执行失败:`, error.message)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 错误堆栈:`, error.stack)
+      throw error
     }
-    return this._callPluginMethod('getLyric', source, musicInfo)
   }
 
   /**
@@ -686,15 +881,22 @@ class SuchMusicPluginHost {
   private async _makeHttpRequest(url: string, options: RequestOptions): Promise<RequestResult> {
     const controller = new AbortController()
     const timeout = options.timeout || CONSTANTS.DEFAULT_TIMEOUT
+    const startTime = Date.now()
+    const method = options.method || 'GET'
+
+    pluginLog.log(`${CONSTANTS.LOG_PREFIX} 发起HTTP请求: ${method} ${url}`)
+    pluginLog.log(`${CONSTANTS.LOG_PREFIX} 请求选项:`, {
+      timeout,
+      headers: options.headers,
+      hasBody: !!options.body
+    })
 
     const timeoutId = setTimeout(() => {
       controller.abort()
-      console.warn(`${CONSTANTS.LOG_PREFIX} 请求超时: ${url}`)
+      pluginLog.warn(`${CONSTANTS.LOG_PREFIX} 请求超时: ${url}`)
     }, timeout)
 
     try {
-      // pluginLog.log(`${CONSTANTS.LOG_PREFIX} 发起请求: ${options.method || 'GET'} ${url}`)
-
       const fetchOptions = {
         method: 'GET',
         ...options,
@@ -703,8 +905,10 @@ class SuchMusicPluginHost {
 
       const response = await fetch(url, fetchOptions)
       clearTimeout(timeoutId)
-
-      // pluginLog.log(`${CONSTANTS.LOG_PREFIX} 请求响应: ${response.status} ${response.statusText}`)
+      
+      const executionTime = Date.now() - startTime
+      pluginLog.log(`${CONSTANTS.LOG_PREFIX} 请求响应: ${response.status} ${response.statusText}`)
+      pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
 
       const body = await this._parseResponseBody(response)
       const headers = this._extractHeaders(response)
@@ -715,23 +919,27 @@ class SuchMusicPluginHost {
         headers
       }
 
-      // pluginLog.log(`${CONSTANTS.LOG_PREFIX} 请求完成:`, {
-      //   url,
-      //   status: response.status,
-      //   bodyType: typeof body
-      // })
+      pluginLog.log(`${CONSTANTS.LOG_PREFIX} 请求完成:`, {
+        url,
+        status: response.status,
+        bodyType: typeof body
+      })
 
       return result
     } catch (error: any) {
       clearTimeout(timeoutId)
+      const executionTime = Date.now() - startTime
 
       const errorMessage =
         error.name === 'AbortError' ? `请求超时: ${url}` : `请求失败: ${error.message}`
 
-      console.error(`${CONSTANTS.LOG_PREFIX} ${errorMessage}`)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} ${errorMessage}`)
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
       if (error.cause) {
-        console.error(`${CONSTANTS.LOG_PREFIX} 错误原因:`, error.cause)
+        pluginLog.error(`${CONSTANTS.LOG_PREFIX} 错误原因:`, error.cause)
       }
+      pluginLog.error(`${CONSTANTS.LOG_PREFIX} 错误堆栈:`, error.stack)
+      
       return this._createErrorResult(error, url)
     }
   }

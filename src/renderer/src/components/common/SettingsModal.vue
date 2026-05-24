@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, h, onMounted, watch, nextTick } from 'vue'
-import { NModal, NLayout, NLayoutSider, NLayoutContent, NMenu, NIcon, NAutoComplete, useThemeVars } from 'naive-ui'
+import { NModal, NLayout, NLayoutSider, NLayoutContent, NMenu, NIcon, NAutoComplete, NCard, useThemeVars } from 'naive-ui'
 import { useAutoNaiveTheme } from '../../themes/autoNaiveTheme'
 import SettingsGeneralSection from './Settings/SettingsGeneralSection.vue'
 import SettingsAppearanceSection from './Settings/SettingsAppearanceSection.vue'
@@ -8,6 +8,7 @@ import SettingsPlaybackSection from './Settings/SettingsPlaybackSection.vue'
 import SettingsLyricsSection from './Settings/SettingsLyricsSection.vue'
 import SettingsLocalSection from './Settings/SettingsLocalSection.vue'
 import SettingsSourceSection from './Settings/SettingsSourceSection.vue'
+import SettingsAccountSection from './Settings/SettingsAccountSection.vue'
 import SettingsAboutSection from './Settings/SettingsAboutSection.vue'
 
 const themeVars = useThemeVars()
@@ -46,6 +47,7 @@ const menuOptions = [
   { label: '歌词设置', key: 'lyrics', icon: renderIcon('mgc_music_line') },
   { label: '本地与缓存', key: 'local', icon: renderIcon('mgc_folder_line') },
   { label: '音源与插件', key: 'source', icon: renderIcon('mgc_music_2_line') },
+  { label: '账户', key: 'account', icon: renderIcon('mgc_user_2_line') },
   { label: '关于', key: 'about', icon: renderIcon('mgc_information_line') }
 ]
 
@@ -223,6 +225,18 @@ const searchOptions = [
     value: 'source.plugins',
     section: 'source',
     desc: '导入洛雪音源插件并查看支持的音源与日志'
+  },
+  {
+    label: '网易云账户登录',
+    value: 'account.login',
+    section: 'account',
+    desc: '登录网易云音乐账户以访问私人歌单和收藏'
+  },
+  {
+    label: '账户信息',
+    value: 'account.info',
+    section: 'account',
+    desc: '查看当前登录的网易云账户信息'
   }
 ]
 
@@ -237,6 +251,7 @@ const autoCompleteOptions = computed(() => {
     lyrics: '歌词',
     local: '本地',
     source: '音源',
+    account: '账户',
     about: '关于'
   }
 
@@ -425,7 +440,7 @@ watch(
       </div>
       <div class="settings-container" style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
         <n-layout has-sider style="height: 540px;">
-          <n-layout-sider bordered width="220" content-style="padding: 16px 0;">
+          <n-layout-sider bordered width="220" content-style="padding: 16px 0; overflow: hidden;">
             <!-- 侧边栏标题 -->
             <div class="sider-header">
               <div class="sider-title">设置</div>
@@ -495,6 +510,13 @@ watch(
 
                 <settings-source-section
                   v-else-if="activeKey === 'source'"
+                  :setting-item-bg-color="settingItemBgColor"
+                  :setting-item-border-color="settingItemBorderColor"
+                  :highlight-key="highlightedKey"
+                />
+
+                <settings-account-section
+                  v-else-if="activeKey === 'account'"
                   :setting-item-bg-color="settingItemBgColor"
                   :setting-item-border-color="settingItemBorderColor"
                   :highlight-key="highlightedKey"

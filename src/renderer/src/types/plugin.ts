@@ -110,7 +110,7 @@ export interface Plugin {
   /** 配置UI定义 */
   configUI: PluginConfigItem[]
   /** 插件状态 */
-  status: 'uninitialized' | 'active' | 'inactive' | 'error'
+  status: 'active' | 'inactive' | 'error'
   /** 插件类型 */
   type?: 'snowdrop' | 'such'
   /** 插件配置 */

@@ -299,25 +299,7 @@ const playSong = async (song: Song): Promise<void> => {
   // 这样可以避免重复触发播放
   // 只需要设置 playlist, currentSong 和 isPlaying 状态
   
-  // 更新播放列表：如果当前播放列表为空或者不包含当前歌曲，或者用户希望重置列表（这里简化处理：如果是点击播放，我们确保歌曲在列表中）
-  // 为了简单起见，如果从本地音乐列表播放，我们将当前显示的列表作为播放列表
-  // 但这样可能会覆盖之前的播放列表。通常用户的期望是：点击播放，这首歌加入播放列表（或替换播放列表），并开始播放。
-  // 我们采用：替换整个播放列表为当前筛选后的列表，并定位到该歌曲。
-  const newPlaylist = filteredSongs.value.map(s => ({
-    id: s.id,
-    title: s.name,
-    artist: getSongArtist(s),
-    cover: getSongCover(s),
-    durationMs: s.dt || 0,
-    album: s.al?.name,
-    filePath: s.filePath,
-    lyrics: s.lyrics,
-    source: 'local',
-    sourceSongId: s.id
-  }))
-  player.setPlaylistForSource('local', newPlaylist, true)
-  
-  // 设置 currentSong 会触发 PlayerBar 的 watch 逻辑进行播放
+  // 简化处理，只将当前歌曲加入播放列表
   player.setCurrentSong(songInfo)
   player.setPlaying(true)
   player.recordPlay(songInfo)

@@ -65,7 +65,7 @@ const pluginService = {
           throw new Error('洛雪插件格式校验失败：代码有可能不是标准的洛雪插件')
         }
         // 使用统一的落雪插件转换器
-        transformResult = transformSnowdropPlugin(pluginCode, { sourceType: 'lx' })
+        transformResult = await transformSnowdropPlugin(pluginCode, { sourceType: 'lx' })
         pluginCode = transformResult.transformedCode
       }
 
@@ -293,7 +293,7 @@ const pluginService = {
           throw new Error('洛雪插件格式校验失败：代码中未找到lx关键字')
         }
         // 使用统一的落雪插件转换器
-        transformResult = transformSnowdropPlugin(pluginCode, { sourceType: 'lx' })
+        transformResult = await transformSnowdropPlugin(pluginCode, { sourceType: 'lx' })
         pluginCode = transformResult.transformedCode
       }
 

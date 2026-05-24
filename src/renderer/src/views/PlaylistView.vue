@@ -52,23 +52,77 @@
 
     <div class="content">
       <n-scrollbar class="playlist-scroll" content-style="padding: 0 4px 16px;">
-        <div class="playlist-grid">
-          <div
-            v-for="pl in filteredPlaylists"
-            :key="pl.id"
-            class="playlist-card"
-            :class="{ active: pl.id === selectedId }"
-            @click="handleSelect(pl.id)"
-            @dblclick="() => handlePlayPlaylist(pl.id)"
-          >
-            <div class="cover-wrapper">
-              <img :src="pl.cover || pl.tracks[0]?.cover || defaultCover" class="playlist-cover" />
-              <div class="play-count">
-                <n-icon size="14"><i class="mgc_music_2_line"></i></n-icon>
-                <span>{{ pl.tracks.length }} 首</span>
+        <!-- 网易云导入歌单 -->
+        <div v-if="userStore.isLoggedIn" class="netease-section">
+          <div class="section-title">
+            <i class="mgc_cloud_line"></i>
+            网易云导入
+          </div>
+          <div class="playlist-grid">
+            <!-- 加载状态 -->
+            <div v-if="neteaseLoading" class="playlist-card loading">
+              <div class="cover-wrapper">
+                <div class="loading-placeholder">
+                  <n-icon size="24"><i class="mgc_loading_line"></i></n-icon>
+                </div>
               </div>
+              <div class="playlist-title">加载中...</div>
             </div>
-            <div class="playlist-title">{{ pl.name }}</div>
+            <!-- 网易云喜欢音乐歌单 -->
+            <div
+              v-else-if="neteasePlaylist"
+              class="playlist-card netease"
+              @click="goToNeteasePlaylist"
+            >
+              <div class="cover-wrapper">
+                <img :src="neteasePlaylist.cover" class="playlist-cover" />
+                <div class="play-count">
+                  <n-icon size="14"><i class="mgc_music_2_line"></i></n-icon>
+                  <span>{{ neteasePlaylist.trackCount }} 首</span>
+                </div>
+                <div class="netease-badge">
+                  <n-icon size="12"><i class="mgc_heart_fill"></i></n-icon>
+                  喜欢
+                </div>
+              </div>
+              <div class="playlist-title">{{ neteasePlaylist.name }}</div>
+            </div>
+            <!-- 未获取到歌单 -->
+            <div v-else class="playlist-card empty">
+              <div class="cover-wrapper">
+                <div class="empty-placeholder">
+                  <n-icon size="24"><i class="mgc_music_line"></i></n-icon>
+                </div>
+              </div>
+              <div class="playlist-title">暂无导入歌单</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 本地歌单 -->
+        <div class="local-section">
+          <div class="section-title">
+            <i class="mgc_folder_line"></i>
+            本地歌单
+          </div>
+          <div class="playlist-grid">
+            <div
+              v-for="pl in filteredPlaylists"
+              :key="pl.id"
+              class="playlist-card"
+              :class="{ active: pl.id === selectedId }"
+              @click="handleSelect(pl.id)"
+              @dblclick="() => handlePlayPlaylist(pl.id)"
+            >
+              <div class="cover-wrapper">
+                <img :src="pl.cover || pl.tracks[0]?.cover || defaultCover" class="playlist-cover" />
+                <div class="play-count">
+                  <n-icon size="14"><i class="mgc_music_2_line"></i></n-icon>
+                  <span>{{ pl.tracks.length }} 首</span>
+                </div>
+              </div>
+              <div class="playlist-title">{{ pl.name }}</div>
+            </div>
           </div>
         </div>
       </n-scrollbar>
@@ -96,11 +150,15 @@ import { useRouter } from 'vue-router'
 import { NButton, NIcon, NInput, NScrollbar, NModal, useMessage } from 'naive-ui'
 import { usePlayerStore } from '../stores/playerStore'
 import { usePlaylistStore, type UserPlaylist } from '../stores/playlistStore'
+import { useUserStore } from '../stores/userStore'
+import { fetchUserPlaylist } from '../apis/netease/user/playlist'
+import { fetchPlaylistDetail } from '../apis/netease/playlist/detail'
 import defaultCover from '@renderer/assets/icon.png'
 
 const router = useRouter()
 const player = usePlayerStore()
 const playlistStore = usePlaylistStore()
+const userStore = useUserStore()
 const message = useMessage()
 
 const searchKeyword = ref('')
@@ -109,6 +167,15 @@ const selectedId = ref<string | null>(null)
 const showCreateModal = ref(false)
 const createMode = ref<'empty' | 'queue'>('empty')
 const newPlaylistName = ref('')
+
+// 网易云导入歌单
+const neteasePlaylist = ref<{
+  id: number
+  name: string
+  cover: string
+  trackCount: number
+} | null>(null)
+const neteaseLoading = ref(false)
 
 const playlists = computed(() => playlistStore.playlists)
 
@@ -121,14 +188,62 @@ const filteredPlaylists = computed<UserPlaylist[]>(() => {
   })
 })
 
-onMounted(() => {
+onMounted(async () => {
   loading.value = true
   try {
     playlistStore.loadFromStorage()
+    
+    // 加载网易云导入歌单
+    if (userStore.isLoggedIn) {
+      await loadNeteasePlaylist()
+    }
   } finally {
     loading.value = false
   }
 })
+
+// 加载网易云喜欢音乐歌单
+const loadNeteasePlaylist = async () => {
+  neteaseLoading.value = true
+  try {
+    console.log('开始加载网易云歌单，用户ID:', userStore.userId)
+
+    // 获取用户歌单列表
+    const userPlaylists = await fetchUserPlaylist(userStore.userId, userStore.getCookieForRequest())
+    console.log('用户歌单列表返回:', userPlaylists)
+
+    if (userPlaylists && userPlaylists.playlist && userPlaylists.playlist.length > 0) {
+      // 查找"我喜欢的音乐"歌单（通常是第一个，或者名字包含"喜欢"）
+      const likedPlaylist = userPlaylists.playlist.find(pl =>
+        pl.name.includes('喜欢') || pl.name.includes('Like')
+      ) || userPlaylists.playlist[0] // 如果没有找到，使用第一个歌单
+
+      console.log('找到喜欢的歌单:', likedPlaylist)
+
+      if (likedPlaylist) {
+        neteasePlaylist.value = {
+          id: likedPlaylist.id,
+          name: likedPlaylist.name,
+          cover: likedPlaylist.coverImgUrl || defaultCover,
+          trackCount: likedPlaylist.trackCount
+        }
+      }
+    } else {
+      console.log('未获取到用户歌单列表')
+    }
+  } catch (error) {
+    console.error('加载网易云歌单失败:', error)
+  } finally {
+    neteaseLoading.value = false
+  }
+}
+
+// 跳转到网易云歌单详情
+const goToNeteasePlaylist = () => {
+  if (neteasePlaylist.value) {
+    router.push({ name: 'netease-playlist-detail', params: { id: neteasePlaylist.value.id } })
+  }
+}
 
 const handleSelect = (id: string) => {
   selectedId.value = id
@@ -242,12 +357,12 @@ html[data-theme='dark'] .search-input {
 }
 
 .title {
-  font-size: 27px;
+  font-size: clamp(20px, 2.5vw, 27px);
   font-weight: bold;
 }
 
 .subtitle {
-  font-size: 14px;
+  font-size: clamp(12px, 1.2vw, 14px);
   color: #999;
   margin-left: 8px;
 }
@@ -316,7 +431,7 @@ html[data-theme='dark'] .search-input {
   right: 8px;
   background-color: rgba(0, 0, 0, 0.5);
   color: white;
-  font-size: 10px;
+  font-size: clamp(8px, 0.9vw, 10px);
   padding: 2px 6px;
   border-radius: 10px;
   display: flex;
@@ -325,12 +440,83 @@ html[data-theme='dark'] .search-input {
 }
 
 .playlist-title {
-  font-size: 14px;
+  font-size: clamp(12px, 1.1vw, 14px);
   line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+
+/* 分区标题 */
+.section-title {
+  font-size: clamp(14px, 1.3vw, 16px);
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+html[data-theme='dark'] .section-title {
+  color: #eee;
+}
+
+.section-title i {
+  font-size: clamp(16px, 1.5vw, 18px);
+  color: #666;
+}
+
+/* 网易云导入区域 */
+.netease-section {
+  margin-bottom: 24px;
+}
+
+.netease-section .playlist-card.netease {
+  border: 2px solid #e60026;
+  border-radius: 14px;
+  padding: 4px;
+}
+
+.netease-badge {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  background-color: #e60026;
+  color: white;
+  font-size: clamp(8px, 0.9vw, 10px);
+  padding: 2px 6px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 加载和空状态 */
+.loading-placeholder,
+.empty-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #f5f5f5;
+  color: #999;
+}
+
+html[data-theme='dark'] .loading-placeholder,
+html[data-theme='dark'] .empty-placeholder {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #666;
+}
+
+/* 本地歌单区域 */
+.local-section {
+  margin-top: 8px;
 }
 </style>

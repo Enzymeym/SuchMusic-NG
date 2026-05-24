@@ -4,13 +4,14 @@ import { useRoute, useRouter } from 'vue-router'
 import { useMessage, NTabs, NTabPane, NPopselect, NIcon, NButton, NScrollbar } from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import { useSettingsStore } from '../stores/settingsStore'
-import { searchMusic, fetchGMALyric, type GMASong } from '../apis/gma'
 import { usePlayerStore } from '../stores/playerStore'
 import { usePluginStore } from '../stores/pluginStore'
 import { webAudioEngine } from '../audio/audio-engine'
 import { AudioPlayerManager } from '../utils/audioPlayerManager'
 import { runSnowdropGetMusicUrl } from '../apis/snowdrop-transform'
+import { throttle } from '../utils/performance'
 import { formatQuality, calculateBitrate } from '../utils/quality'
+import { searchMusic, fetchGMALyric } from '../apis/gma'
 
 const route = useRoute()
 const router = useRouter()
@@ -38,6 +39,112 @@ const platformOptions = [
   { label: '酷我音乐', value: 'kw' }
 ]
 
+// 获取歌曲主标题（去除括号内容），用于合并匹配
+const getSongMainTitle = (name: string): string => {
+  if (!name) return ''
+  return name.replace(/[（(].*?[)）]/g, '').trim()
+}
+
+// 获取歌曲首位歌手名，用于合并匹配
+const getSongFirstArtist = (song: any): string => {
+  if (song.ar && Array.isArray(song.ar) && song.ar.length > 0) {
+    return song.ar[0].name || ''
+  }
+  return ''
+}
+
+// 生成歌曲合并键：主标题 + 首位歌手
+const getSongMergeKey = (song: any): string => {
+  const title = getSongMainTitle(song.name)
+  const artist = getSongFirstArtist(song)
+  return `${title}|||${artist}`.toLowerCase()
+}
+
+// 将单平台歌曲转换为平台信息对象（含显示用字段，供 QQ 音乐优先使用）
+const songToPlatformInfo = (song: any) => ({
+  id: song.id,
+  source: song.source,
+  quality: song.quality,
+  pluginId: song.pluginId,
+  url: song.url || '',
+  is_invalid: song.is_invalid || false,
+  link: song.link || '',
+  // 显示用信息：当此平台被优先显示时，用于覆盖合并后的歌曲展示字段
+  _ar: song.ar,
+  _al: song.al,
+  _dt: song.dt,
+  _picUrl: song.picUrl
+})
+
+// 判断是否为 QQ 音乐平台
+const isQQSource = (source: string): boolean => {
+  return source === 'tx' || source === 'qq'
+}
+
+// 不支持的平台列表
+const blockedSources = ['soda', '5sing', 'bilibili', 'mg', 'migu']
+
+// 合并歌曲列表：将同歌名+同歌手的多平台结果合并为一条
+const mergeSongs = (songs: any[]): any[] => {
+  const map = new Map<string, any>()
+  const order: string[] = []
+
+  // 先过滤掉不支持平台的歌曲
+  const filteredSongs = songs.filter(song => !blockedSources.includes(song.source))
+
+  for (const song of filteredSongs) {
+    const key = getSongMergeKey(song)
+
+    if (map.has(key)) {
+      const existing = map.get(key)
+      // 将已有的首平台也加入 platforms
+      if (!existing.platforms || existing.platforms.length === 0) {
+        existing.platforms = [songToPlatformInfo(existing)]
+      }
+      // 去重：避免同一平台重复添加
+      // 使用标准化的内部标识符进行比较（处理 'tx' 和 'qq' 等相同平台不同标识符的情况）
+      const songSourceInternal = mapSourceToInternal(song.source)
+      const alreadyHas = existing.platforms.some((p: any) =>
+        mapSourceToInternal(p.source) === songSourceInternal
+      )
+      if (!alreadyHas) {
+        existing.platforms.push(songToPlatformInfo(song))
+      }
+      // QQ 音乐信息优先：如果是 QQ 音乐，直接覆盖显示字段
+      if (isQQSource(song.source)) {
+        if (song.ar) existing.ar = song.ar
+        if (song.al) existing.al = song.al
+        if (song.picUrl) existing.picUrl = song.picUrl
+        if (song.dt) existing.dt = song.dt
+      } else if (!isQQSource(existing.source)) {
+        // 非 QQ 音乐之间回退逻辑
+        if (!existing.picUrl && song.picUrl) {
+          existing.picUrl = song.picUrl
+          if (existing.al) existing.al.picUrl = song.picUrl
+        }
+        if (song.dt && (!existing.dt || song.dt > existing.dt)) {
+          existing.dt = song.dt
+        }
+      }
+    } else {
+      map.set(key, { ...song })
+      order.push(key)
+    }
+  }
+
+  // 按原始顺序返回合并结果
+  return order.map(key => map.get(key)!)
+}
+
+// 获取歌曲用于排序的源平台标识
+const getSortSource = (song: any): string => {
+  if (song.platforms && song.platforms.length > 0) {
+    return song.platforms[0].source
+  }
+  return song.source || ''
+}
+
+// 按平台偏好排序
 const sortSongs = (songs: any[]) => {
   const order = settingsStore.general.searchResultOrder || ['tx', 'kg', 'wy', 'kw']
   const getScore = (source: string) => {
@@ -45,7 +152,7 @@ const sortSongs = (songs: any[]) => {
     return index === -1 ? 999 : index
   }
   return songs.sort((a, b) => {
-    return getScore(a.source) - getScore(b.source)
+    return getScore(getSortSource(a)) - getScore(getSortSource(b))
   })
 }
 
@@ -66,7 +173,7 @@ const selectedPlatformLabel = computed(() => {
     if (selectedPlatform.value.length === 4) return '所有平台'
     return `已选 ${selectedPlatform.value.length} 个平台`
   }
-  
+
   if (selectedPlatform.value === 'all') return '所有平台'
 
   const option = platformOptions.find(o => o.value === selectedPlatform.value)
@@ -81,16 +188,16 @@ const handleUpdatePlatform = (value: string | string[]) => {
     } else {
         newValue = [value]
     }
-    
+
     const hasAll = newValue.includes('all')
     const oldHasAll = Array.isArray(selectedPlatform.value) ? selectedPlatform.value.includes('all') : selectedPlatform.value === 'all'
-    
+
     // Logic:
     // 1. If 'all' was just added (it wasn't there before), clear everything else and keep only 'all'.
     // 2. If 'all' was already there and user added something else, remove 'all'.
     // 3. If 'all' is removed (user deselected it), and list is empty, select 'all' back (default).
     // 4. If list becomes empty, select 'all'.
-    
+
     if (hasAll && !oldHasAll) {
          // Case 1: 'all' selected newly
          selectedPlatform.value = ['all']
@@ -103,7 +210,7 @@ const handleUpdatePlatform = (value: string | string[]) => {
     } else {
          selectedPlatform.value = newValue
     }
-    
+
     handleSearch()
 }
 
@@ -112,10 +219,10 @@ onMounted(() => {
   if (route.query.q) {
     keywords.value = String(route.query.q)
   }
-  
-  // Default to 'all' first
-  selectedPlatform.value = ['all']
-  
+
+  // 默认使用 QQ 音乐平台
+  selectedPlatform.value = ['tx']
+
   if (route.query.platform) {
     // Check if platform is array or comma separated string or single string
     const platform = route.query.platform
@@ -130,17 +237,12 @@ onMounted(() => {
     } else if (Array.isArray(platform)) {
          selectedPlatform.value = platform.map(p => String(p))
     }
-  } else if (settingsStore.source.preferredPlatform) {
-    // If settings have a preferred platform, use it (could be 'all' or specific)
-    const pref = settingsStore.source.preferredPlatform
-    if (pref === 'all') {
-        selectedPlatform.value = ['all']
-    } else {
-        selectedPlatform.value = [pref]
-    }
+  } else if (settingsStore.source.preferredPlatform && settingsStore.source.preferredPlatform !== 'all') {
+    // If settings have a preferred platform (not 'all'), use it
+    selectedPlatform.value = [settingsStore.source.preferredPlatform]
   }
-  
-  // Ensure it's always an array for NPopselect multiple mode to work correctly? 
+
+  // Ensure it's always an array for NPopselect multiple mode to work correctly?
   // NPopselect with multiple=true expects an array.
   if (!Array.isArray(selectedPlatform.value)) {
       if (selectedPlatform.value === 'all') {
@@ -149,12 +251,12 @@ onMounted(() => {
           selectedPlatform.value = [selectedPlatform.value]
       }
   }
-  
+
   if (route.query.type) {
     // @ts-ignore
     searchType.value = String(route.query.type)
   }
-  
+
   if (keywords.value) {
       handleSearch()
   }
@@ -167,7 +269,7 @@ const updateRoute = () => {
 
 const handleSearch = async () => {
   if (!keywords.value.trim()) return
-  
+
   loading.value = true
   searchResults.value = []
   playlistResults.value = []
@@ -176,8 +278,7 @@ const handleSearch = async () => {
   updateRoute()
 
   try {
-    // 使用聚合搜索 API
-    // 如果选择了特定平台，传给 API；否则只传允许的平台列表，排除 B站/咪咕
+    // 使用 musicSDK 搜索
     let sources: string[] = []
     if (selectedPlatform.value === 'all' || (Array.isArray(selectedPlatform.value) && selectedPlatform.value.includes('all'))) {
         sources = ['wy', 'tx', 'kg', 'kw']
@@ -186,19 +287,16 @@ const handleSearch = async () => {
     } else {
         sources = [selectedPlatform.value]
     }
-    
-    // 1. GMA 搜索
-    const gmaPromise = searchMusic(keywords.value, 1, limit, sources, searchType.value)
-      .then(res => ({ ...res, type: 'gma' }))
-      .catch(err => {
-        console.error('GMA search failed', err)
-        return { songs: [], playlists: [], type: 'gma' }
-      })
+
+    // 1. musicSDK 搜索
+    const result = await searchMusic(keywords.value, 1, limit, sources, searchType.value === 'playlist' ? 'playlist' : 'song')
 
     // 2. 插件搜索
     const pluginPromises = pluginStore.activePlugins.map(async (plugin) => {
-        // 筛选该插件支持的且用户选中的源
+        // 筛选该插件支持的且用户选中的源，同时排除不支持的平台
         const targetSources = plugin.sources.filter(s => {
+            // 排除不支持的平台
+            if (blockedSources.includes(s.id)) return false
             if (selectedPlatform.value === 'all' || (Array.isArray(selectedPlatform.value) && selectedPlatform.value.includes('all'))) {
                 return true
             }
@@ -209,7 +307,7 @@ const handleSearch = async () => {
         if (targetSources.length === 0) return null
 
         // 对每个匹配的源发起搜索
-        const sourcePromises = targetSources.map(s => 
+        const sourcePromises = targetSources.map(s =>
             pluginStore.searchMusic(plugin.id, s.id, keywords.value, 1, limit)
                 .then(res => ({ ...res, pluginId: plugin.id, sourceId: s.id }))
                 .catch(e => {
@@ -220,21 +318,29 @@ const handleSearch = async () => {
         return Promise.all(sourcePromises)
     })
 
-    const [gmaResult, ...pluginResultsNested] = await Promise.all([gmaPromise, ...pluginPromises])
-    
-    // 处理 GMA 结果
-    let { songs, playlists } = gmaResult as any
-    // 再次过滤，确保不包含 B站/咪咕
-    if (songs) {
-      songs = songs.filter((s: any) => s.source !== 'bilibili' && s.source !== 'mg' && s.source !== 'migu')
-    }
-    if (playlists) {
-      playlists = playlists.filter((s: any) => s.source !== 'bilibili' && s.source !== 'mg' && s.source !== 'migu')
-    }
-    
+    const pluginResultsNested = await Promise.all(pluginPromises)
+
+    // 处理 GMA 搜索结果
+    const songs = (result.songs || []).map((song: any) => ({
+      id: song.id,
+      name: song.name,
+      ar: [{ name: song.artist || '未知歌手' }],
+      al: {
+        name: song.album || '未知专辑',
+        picUrl: song.cover || ''
+      },
+      dt: (song.duration || 0) * 1000,
+      picUrl: song.cover || '',
+      quality: undefined,
+      source: song.source,
+      url: song.url || '',
+      is_invalid: song.is_invalid || false,
+      link: song.link || ''
+    }))
+
     // 处理插件结果
     const pluginSongs: any[] = []
-    
+
     pluginResultsNested.forEach(results => {
         if (!results) return
         results.forEach((res: any) => {
@@ -249,7 +355,7 @@ const handleSearch = async () => {
                           name: item.albumName || item.album || '未知专辑',
                           picUrl: item.pic || item.cover || ''
                         },
-                        dt: (typeof item.interval === 'string' && item.interval.includes(':') 
+                        dt: (typeof item.interval === 'string' && item.interval.includes(':')
                               ? (() => {
                                   const parts = item.interval.split(':').map(Number);
                                   return (parts[0] * 60 + parts[1]) * 1000;
@@ -270,35 +376,20 @@ const handleSearch = async () => {
     })
 
     if (searchType.value === 'song') {
-      const mappedGmaSongs = (songs || []).map((s: GMASong) => ({
-        id: s.id,
-        name: s.name,
-        // 聚合 API 返回的 artist 是字符串，SongList 需要数组结构
-        ar: [{ name: s.artist || '未知歌手' }],
-        al: {
-          name: s.album || '未知专辑',
-          picUrl: s.cover
-        },
-        // 聚合 API 返回的是秒，SongList 需要毫秒
-        dt: (s.duration || 0) * 1000,
-        picUrl: s.cover,
-        quality: s.size && s.duration ? formatQuality(calculateBitrate(s.size, s.duration)) : undefined,
-        // 保留原始信息
-        source: s.source,
-        url: s.url,
-        is_invalid: s.is_invalid,
-        link: s.link
+      const allSongs = [...songs, ...pluginSongs]
+      const merged = mergeSongs(allSongs)
+      sortSongs(merged)
+      searchResults.value = merged
+
+      // hasMore 判定
+      hasMore.value = (result.songs || []).length >= limit
+    } else if (searchType.value === 'playlist') {
+      playlistResults.value = (result.playlists || []).map((pl: any) => ({
+        id: pl.id, name: pl.name, cover: pl.cover, link: pl.link,
+        source: pl.source, author: pl.author, playCount: pl.playCount,
+        trackCount: pl.trackCount
       }))
-      
-      const allSongs = [...mappedGmaSongs, ...pluginSongs]
-      sortSongs(allSongs)
-      searchResults.value = allSongs
-      
-      // 简单的 hasMore 判定
-      hasMore.value = (mappedGmaSongs.length >= limit) || (pluginSongs.length > 0)
-    } else if (searchType.value === 'playlist' && playlists && playlists.length > 0) {
-      playlistResults.value = playlists
-      hasMore.value = false
+      hasMore.value = (result.playlists || []).length >= limit
     } else {
       searchResults.value = []
       playlistResults.value = []
@@ -312,25 +403,35 @@ const handleSearch = async () => {
   }
 }
 
-const handleScroll = (e: Event) => {
+const handleScroll = throttle((e: Event) => {
   const target = e.target as HTMLElement
   // Check if near bottom
+  console.log('Scroll event triggered:', {
+    scrollTop: target.scrollTop,
+    clientHeight: target.clientHeight,
+    scrollHeight: target.scrollHeight,
+    nearBottom: target.scrollTop + target.clientHeight >= target.scrollHeight - 100,
+    loadingMore: loadingMore.value,
+    hasMore: hasMore.value,
+    loading: loading.value
+  })
   if (target.scrollTop + target.clientHeight >= target.scrollHeight - 100) {
     if (!loadingMore.value && hasMore.value && !loading.value) {
+      console.log('Loading more...')
       handleLoadMore()
     }
   }
-}
+}, 100)
 
 const handleLoadMore = async () => {
   if (loadingMore.value || !hasMore.value) return
-  
+
   loadingMore.value = true
   offset.value += limit
   const page = Math.floor(offset.value / limit) + 1
-  
+
   try {
-    // 使用聚合搜索 API 加载更多
+    // 使用 musicSDK 加载更多
     let sources: string[] = []
     if (selectedPlatform.value === 'all' || (Array.isArray(selectedPlatform.value) && selectedPlatform.value.includes('all'))) {
         sources = ['wy', 'tx', 'kg', 'kw']
@@ -339,18 +440,15 @@ const handleLoadMore = async () => {
     } else {
         sources = [selectedPlatform.value]
     }
-    
+
     // 1. GMA Load More
-    const gmaPromise = searchMusic(keywords.value, page, limit, sources, searchType.value)
-      .then(res => ({ ...res, type: 'gma' }))
-      .catch(err => {
-        console.error('GMA load more failed', err)
-        return { songs: [], playlists: [], type: 'gma' }
-      })
+    const result = await searchMusic(keywords.value, page, limit, sources, searchType.value === 'playlist' ? 'playlist' : 'song')
 
     // 2. Plugin Load More
     const pluginPromises = pluginStore.activePlugins.map(async (plugin) => {
+        // 排除不支持的平台
         const targetSources = plugin.sources.filter(s => {
+            if (blockedSources.includes(s.id)) return false
             if (selectedPlatform.value === 'all' || (Array.isArray(selectedPlatform.value) && selectedPlatform.value.includes('all'))) {
                 return true
             }
@@ -360,7 +458,7 @@ const handleLoadMore = async () => {
 
         if (targetSources.length === 0) return null
 
-        const sourcePromises = targetSources.map(s => 
+        const sourcePromises = targetSources.map(s =>
             pluginStore.searchMusic(plugin.id, s.id, keywords.value, page, limit)
                 .then(res => ({ ...res, pluginId: plugin.id, sourceId: s.id }))
                 .catch(e => {
@@ -371,20 +469,28 @@ const handleLoadMore = async () => {
         return Promise.all(sourcePromises)
     })
 
-    const [gmaResult, ...pluginResultsNested] = await Promise.all([gmaPromise, ...pluginPromises])
-    
-    let { songs, playlists } = gmaResult as any
+    const pluginResultsNested = await Promise.all(pluginPromises)
 
-    // 再次过滤，确保不包含 B站/咪咕
-    if (songs) {
-      songs = songs.filter((s: any) => s.source !== 'bilibili' && s.source !== 'mg' && s.source !== 'migu')
-    }
-    if (playlists) {
-      playlists = playlists.filter((s: any) => s.source !== 'bilibili' && s.source !== 'mg' && s.source !== 'migu')
-    }
+    // 处理 GMA 结果
+    const songs = (result.songs || []).map((song: any) => ({
+      id: song.id,
+      name: song.name,
+      ar: [{ name: song.artist || '未知歌手' }],
+      al: {
+        name: song.album || '未知专辑',
+        picUrl: song.cover || ''
+      },
+      dt: (song.duration || 0) * 1000,
+      picUrl: song.cover || '',
+      quality: undefined,
+      source: song.source,
+      url: song.url || '',
+      is_invalid: song.is_invalid || false,
+      link: song.link || ''
+    }))
 
     const pluginSongs: any[] = []
-    
+
     pluginResultsNested.forEach(results => {
         if (!results) return
         results.forEach((res: any) => {
@@ -399,7 +505,7 @@ const handleLoadMore = async () => {
                           name: item.albumName || item.album || '未知专辑',
                           picUrl: item.pic || item.cover || ''
                         },
-                        dt: (typeof item.interval === 'string' && item.interval.includes(':') 
+                        dt: (typeof item.interval === 'string' && item.interval.includes(':')
                               ? (() => {
                                   const parts = item.interval.split(':').map(Number);
                                   return (parts[0] * 60 + parts[1]) * 1000;
@@ -420,31 +526,78 @@ const handleLoadMore = async () => {
     })
 
     if (searchType.value === 'song') {
-      const newGmaSongs = (songs || []).map((s: GMASong) => ({
-        id: s.id,
-        name: s.name,
-        ar: [{ name: s.artist || '未知歌手' }],
-        al: {
-          name: s.album || '未知专辑',
-          picUrl: s.cover
-        },
-        dt: (s.duration || 0) * 1000,
-        picUrl: s.cover,
-        quality: s.size && s.duration ? formatQuality(calculateBitrate(s.size, s.duration)) : undefined,
-        source: s.source,
-        url: s.url,
-        is_invalid: s.is_invalid,
-        link: s.link
+      const allNewSongs = [...songs, ...pluginSongs]
+
+      if (allNewSongs.length > 0) {
+        // 增量更新已有歌曲的 platforms，追加新歌曲，避免全量替换数组导致序号错乱
+        const existingKeyIndex = new Map<string, number>()
+        searchResults.value.forEach((s, i) => {
+          existingKeyIndex.set(getSongMergeKey(s), i)
+        })
+
+        const addedKeys = new Set<string>()
+        const newSongsToAppend: any[] = []
+
+        for (const song of allNewSongs) {
+          // 跳过不支持的平台
+          if (blockedSources.includes(song.source)) continue
+
+          const key = getSongMergeKey(song)
+
+          if (existingKeyIndex.has(key)) {
+            // 已有歌曲：原地更新 platforms
+            const idx = existingKeyIndex.get(key)!
+            const target = searchResults.value[idx]
+            if (!target.platforms || target.platforms.length === 0) {
+              target.platforms = [songToPlatformInfo(target)]
+            }
+            // 使用标准化的内部标识符进行比较（处理 'tx' 和 'qq' 等相同平台不同标识符的情况）
+            const songSourceInternal = mapSourceToInternal(song.source)
+            const alreadyHas = target.platforms.some((p: any) =>
+              mapSourceToInternal(p.source) === songSourceInternal
+            )
+            if (!alreadyHas) {
+              target.platforms.push(songToPlatformInfo(song))
+            }
+            // QQ 音乐信息优先覆盖显示字段
+            if (isQQSource(song.source)) {
+              if (song.ar) target.ar = song.ar
+              if (song.al) target.al = song.al
+              if (song.picUrl) target.picUrl = song.picUrl
+              if (song.dt) target.dt = song.dt
+            } else if (!isQQSource(target.source)) {
+              // 非 QQ 音乐之间回退逻辑
+              if (!target.picUrl && song.picUrl) {
+                target.picUrl = song.picUrl
+                if (target.al) target.al.picUrl = song.picUrl
+              }
+              if (song.dt && (!target.dt || song.dt > target.dt)) {
+                target.dt = song.dt
+              }
+            }
+          } else if (!addedKeys.has(key)) {
+            // 新歌曲：加入待追加列表
+            addedKeys.add(key)
+            newSongsToAppend.push(song)
+          }
+        }
+
+        if (newSongsToAppend.length > 0) {
+          sortSongs(newSongsToAppend)
+          searchResults.value.push(...newSongsToAppend)
+        }
+        hasMore.value = (result.songs || []).length >= limit
+      }
+    } else if (searchType.value === 'playlist') {
+      const newPlaylists = (result.playlists || []).map((pl: any) => ({
+        id: pl.id, name: pl.name, cover: pl.cover, link: pl.link,
+        source: pl.source, author: pl.author, playCount: pl.playCount,
+        trackCount: pl.trackCount
       }))
-      
-      const allNewSongs = [...newGmaSongs, ...pluginSongs]
-      sortSongs(allNewSongs)
-      searchResults.value.push(...allNewSongs)
-      
-      hasMore.value = (newGmaSongs.length >= limit) || (pluginSongs.length > 0)
-    } else if (searchType.value === 'playlist' && playlists && playlists.length > 0) {
-      playlistResults.value.push(...playlists)
-      hasMore.value = playlists.length >= limit
+      const existingPlIds = new Set(playlistResults.value.map(p => p.id))
+      const uniquePl = newPlaylists.filter(pl => !existingPlIds.has(pl.id))
+      playlistResults.value.push(...uniquePl)
+      hasMore.value = (result.playlists || []).length >= limit
     } else {
       hasMore.value = false
     }
@@ -455,177 +608,257 @@ const handleLoadMore = async () => {
   }
 }
 
+// 将 source 映射为内部平台标识
+const mapSourceToInternal = (source: string): string => {
+  switch (source) {
+    case 'netease': return 'wy'
+    case 'qq': return 'tx'
+    case 'kugou': return 'kg'
+    case 'kuwo': return 'kw'
+    case 'migu': return 'mg'
+    default: return source
+  }
+}
+
+// 获取单个平台的播放 URL
+const getPlatformUrl = async (
+  platform: { id: string | number; source: string; pluginId?: string; quality?: string },
+  musicInfoTemplate: any,
+  quality: string
+): Promise<{ url: string; cacheFilePath: string | null; cacheKey: string } | null> => {
+  const source = mapSourceToInternal(platform.source)
+  const cacheKey = `${source}:${platform.id}:${quality}`
+
+  // 1. 检查本地缓存
+  let cacheFilePath: string | null = null
+  if (window.electron && window.electron.ipcRenderer) {
+    try {
+      const cachePath = await window.electron.ipcRenderer.invoke('online-cache:check', {
+        dir: settingsStore.local.cacheDir || null,
+        key: cacheKey
+      })
+      if (cachePath) {
+        cacheFilePath = cachePath
+        return { url: '', cacheFilePath, cacheKey }
+      }
+    } catch (e) {
+      console.warn('缓存检测失败:', e)
+    }
+  }
+
+  // 2. 获取远程 URL
+  try {
+    const musicInfo = { ...musicInfoTemplate, id: String(platform.id), source, songmid: String(platform.id), mediaId: String(platform.id), pluginId: platform.pluginId }
+    let url = ''
+    if (platform.pluginId) {
+      url = await pluginStore.getMusicUrl(source, musicInfo, quality)
+    } else {
+      const res = await runSnowdropGetMusicUrl(source, musicInfo, quality)
+      url = res.url
+    }
+    if (url) {
+      return { url, cacheFilePath: null, cacheKey }
+    }
+  } catch (e) {
+    console.warn(`平台 ${platform.source} 获取播放链接失败:`, e)
+  }
+
+  return null
+}
+
 // 处理歌曲点击播放
 const handleSongClick = async (song: any) => {
   try {
     message.loading('正在获取播放链接...')
 
-    // 确定音源平台标识
-    let source = 'wy'
-    if (song.source) {
-       switch (song.source) {
-         case 'netease': source = 'wy'; break;
-         case 'qq': source = 'tx'; break;
-         case 'kugou': source = 'kg'; break;
-         case 'kuwo': source = 'kw'; break;
-         case 'migu': source = 'mg'; break;
-         default: source = song.source; break;
-       }
-    } else if (settingsStore.source.preferredPlatform && settingsStore.source.preferredPlatform !== 'all') {
-       const pref = settingsStore.source.preferredPlatform
-       if (pref === 'netease') source = 'wy'
-       else if (pref === 'qq') source = 'tx'
-       else if (pref === 'kugou') source = 'kg'
-       else if (pref === 'kuwo') source = 'kw'
-       else if (pref === 'migu') source = 'mg'
-       else source = pref
+    const quality = settingsStore.source.preferredQuality || '128k'
+
+    // 获取所有待请求的平台列表
+    const platforms: Array<{ id: string | number; source: string; pluginId?: string; quality?: string }> = []
+
+    // 根据音源设置获取首选平台作为默认回退
+    const preferredSource = settingsStore.source.preferredPlatform
+    const defaultSource = (preferredSource && preferredSource !== 'all')
+      ? preferredSource
+      : 'wy'
+
+    // 将主歌曲本身也作为一个平台选项加入
+    const mainPlatform = {
+      id: song.id,
+      source: song.source || defaultSource,
+      pluginId: song.pluginId,
+      quality: song.quality
     }
 
-    // 构造插件需要的 musicInfo
-    const musicInfo = {
-      id: String(song.id),
+    if (song.platforms && song.platforms.length > 0) {
+      // 多平台合并的歌曲：只使用歌曲实际支持的平台（song.platforms）
+      // 主歌曲 platform 已经包含在 song.platforms 中，不需要额外添加
+      // 过滤掉不支持的平台
+      const filteredPlatforms = song.platforms.filter((p: any) => !blockedSources.includes(p.source))
+      platforms.push(...filteredPlatforms)
+      console.log('[播放] 多平台歌曲:', song.name, 'platforms:', platforms.map(p => p.source))
+    } else {
+      // 单平台歌曲：使用主歌曲 platform（如果不是不支持的平台）
+      if (!blockedSources.includes(mainPlatform.source)) {
+        platforms.push(mainPlatform)
+      }
+      console.log('[播放] 单平台歌曲:', song.name, 'source:', mainPlatform.source)
+    }
+
+    // 根据音源设置中的首选播放平台对 platforms 进行排序
+    const searchOrder = settingsStore.general.searchResultOrder || ['tx', 'kg', 'wy', 'kw']
+
+    /**
+     * 构建平台优先级顺序
+     * 如果设置了首选平台（非 'all'），则首选平台排在第一位，其余平台按 searchResultOrder 排序
+     * @returns 平台优先级数组
+     */
+    const buildPlatformOrder = (): string[] => {
+      if (preferredSource && preferredSource !== 'all') {
+        const otherPlatforms = searchOrder.filter(s => s !== preferredSource)
+        return [preferredSource, ...otherPlatforms]
+      }
+      return searchOrder
+    }
+
+    const platformOrder = buildPlatformOrder()
+
+    // 去重：确保同一平台只出现一次（基于标准化后的 source）
+    const seenSources = new Set<string>()
+    const uniquePlatforms: typeof platforms = []
+    for (const platform of platforms) {
+      const internalSource = mapSourceToInternal(platform.source)
+      if (!seenSources.has(internalSource)) {
+        seenSources.add(internalSource)
+        uniquePlatforms.push(platform)
+      }
+    }
+    platforms.length = 0
+    platforms.push(...uniquePlatforms)
+
+    // 对 platforms 按首选平台优先级排序（稳定排序）
+    platforms.sort((a, b) => {
+      const scoreA = platformOrder.indexOf(mapSourceToInternal(a.source))
+      const scoreB = platformOrder.indexOf(mapSourceToInternal(b.source))
+      const sA = scoreA === -1 ? 999 : scoreA
+      const sB = scoreB === -1 ? 999 : scoreB
+      if (sA !== sB) {
+        return sA - sB
+      }
+      // 分数相同时，保持原始顺序（稳定排序）
+      return 0
+    })
+
+    console.log('[播放] 最终请求平台顺序:', platforms.map(p => ({ source: p.source, id: p.id })))
+
+    // 构造 musicInfo 模板
+    const musicInfoTemplate = {
       name: song.name,
       singer: song.ar?.map((a: any) => a.name).join(' / ') || '未知歌手',
       albumName: song.al?.name || '未知专辑',
       pic: song.al?.picUrl || '',
-      // 网易云特有字段，其他平台可能需要适配或忽略
       songmid: String(song.id),
       mediaId: String(song.id),
-      pluginId: song.pluginId,
-      source: source
+      pluginId: song.pluginId
     }
 
-    const quality = settingsStore.source.preferredQuality || '128k'
-
-    // 并行请求播放链接和歌词，提升响应速度
-    // 使用聚合 API 获取歌词 (支持多平台)
-    const lyricPromise = fetchGMALyric(String(song.id), source).catch((err) => {
-      console.error('获取歌词失败:', err)
-      return ''
-    })
-
-    // 生成缓存键：平台 + 歌曲 ID + 音质
-    const cacheKey = `${source}:${song.id}:${quality}`
-    let finalUrl = ''
-    let cacheFilePath: string | null = null
-
-    // 1. 优先检查本地缓存
-    if (window.electron && window.electron.ipcRenderer) {
+    // 使用首选平台（排序后的第一个）获取歌词
+    const firstSource = mapSourceToInternal(platforms[0].source)
+    const lyricPromise = (async () => {
       try {
-        const cachePath = await window.electron.ipcRenderer.invoke('online-cache:check', {
+        const lyricText = await fetchGMALyric(String(platforms[0].id), firstSource)
+        return lyricText || ''
+      } catch (err) {
+        console.error('获取歌词失败:', err)
+        return ''
+      }
+    })()
+
+    // 并行请求所有平台的播放链接
+    const urlResults = await Promise.all(
+      platforms.map(p => getPlatformUrl(p, musicInfoTemplate, quality))
+    )
+
+    // 按平台优先级排列结果
+    // platforms 已按首选平台排序，只需过滤掉获取失败的结果，保持原有顺序
+    const scored = urlResults
+      .map((result, i) => ({ result, platform: platforms[i], index: i }))
+      .filter(item => item.result !== null)
+
+    if (scored.length === 0) {
+      throw new Error('所有平台均未获取到播放链接')
+    }
+
+    // 选择优先级最高的平台
+    const selected = scored[0]
+    const { url: finalUrl, cacheFilePath } = selected.result!
+    const selectedPlatform = selected.platform
+
+    // 对选中的 URL 准备缓存（如果有）
+    let effectiveFilePath = cacheFilePath
+    let effectiveUrl = finalUrl
+
+    if (!effectiveFilePath && finalUrl && window.electron && window.electron.ipcRenderer) {
+      try {
+        const cacheResult = (await window.electron.ipcRenderer.invoke('online-cache:prepare', {
           dir: settingsStore.local.cacheDir || null,
-          key: cacheKey
-        })
-        if (cachePath) {
-          console.log('[SearchView] 主动检测到缓存文件存在', cachePath)
-          cacheFilePath = cachePath
+          key: selected.result!.cacheKey,
+          url: finalUrl
+        })) as { usedCache: boolean; filePath: string | null; url: string }
+
+        if (cacheResult.filePath) {
+          effectiveFilePath = cacheResult.filePath
+          effectiveUrl = cacheResult.url || finalUrl
         }
       } catch (e) {
-        console.warn('主动检测缓存失败:', e)
+        console.error('准备在线播放缓存失败:', e)
       }
     }
 
-    // 2. 如果没有缓存，才调用插件获取 URL
-    if (!cacheFilePath) {
-      let url = ''
-      if (song.pluginId) {
-        url = await pluginStore.getMusicUrl(source, musicInfo, quality)
-      } else {
-        const res = await runSnowdropGetMusicUrl(source, musicInfo, quality)
-        url = res.url
-      }
-
-      if (!url) {
-        throw new Error('未获取到播放链接')
-      }
-      finalUrl = url
-
-      if (window.electron && window.electron.ipcRenderer) {
-        try {
-          const cacheResult = (await window.electron.ipcRenderer.invoke('online-cache:prepare', {
-            dir: settingsStore.local.cacheDir || null,
-            key: cacheKey,
-            url
-          })) as { usedCache: boolean; filePath: string | null; url: string }
-
-          if (cacheResult.filePath) {
-            // 记录本地缓存文件路径，用于走本地文件播放链路
-            cacheFilePath = cacheResult.filePath
-            // finalUrl 保留为可展示/记录的在线地址（或重定向后的地址）
-            finalUrl = cacheResult.url || url
-            console.log('[OnlineCache] 使用缓存文件播放', {
-              cacheKey,
-              filePath: cacheFilePath,
-              usedCache: cacheResult.usedCache,
-              url: cacheResult.url
-            })
-          }
-        } catch (e) {
-          console.error('准备在线播放缓存失败:', e)
-          // 出错时回退为直接使用远程 URL
-        }
-      }
-    }
-
-    // 等待歌词结果（失败则回退为空字符串）
-    // GMA API 直接返回字符串格式歌词
+    // 等待歌词
     const lyrics = (await lyricPromise) || ''
 
     // 构造播放器需要的 Song 对象
     const playerSong = {
-      id: song.id,
+      id: selectedPlatform.id,
       title: song.name,
-      artist: song.ar?.map((a) => a.name).join(' / ') || '未知歌手',
+      artist: song.ar?.map((a: any) => a.name).join(' / ') || '未知歌手',
       album: song.al?.name || '未知专辑',
       cover: song.al?.picUrl || '',
       durationMs: song.dt || 0,
-      // 记录来源平台与平台内原始 ID，供评论等功能使用
-      source: song.source || 'netease',
-      sourceSongId: song.id,
-      // 如果有本地缓存文件，则记录 filePath，后续从歌单等位置播放时可直接走本地缓存
-      filePath: cacheFilePath || undefined,
-      url: finalUrl, // 播放链接（可能为本地缓存文件对应的在线地址）
-      lyrics // 歌词内容
+      source: mapSourceToInternal(selectedPlatform.source),
+      sourceSongId: selectedPlatform.id,
+      filePath: effectiveFilePath || undefined,
+      url: effectiveUrl,
+      lyrics
     }
 
-    // 设置搜索来源播放列表：当前点击的歌曲填充 URL / 歌词 / 本地缓存路径
-    const newPlaylist = searchResults.value.map((s) => ({
-      id: s.id,
-      title: s.name,
-      artist: s.ar?.map((a) => a.name).join(' / ') || '未知歌手',
-      album: s.al?.name || '未知专辑',
-      cover: s.al?.picUrl || '',
-      durationMs: s.dt || 0,
-      source: s.source || 'netease',
-      sourceSongId: s.id,
-      url: s.id === song.id ? finalUrl : '',
-      lyrics: s.id === song.id ? lyrics : '',
-      filePath: s.id === song.id ? cacheFilePath || undefined : undefined
-    }))
-
-    // 更新播放器列表与当前歌曲
-    playerStore.setPlaylistForSource('search', newPlaylist, true)
-
-    // 播放：优先使用本地缓存文件，其次使用远程 URL
+    // 播放
     try {
       await AudioPlayerManager.play({
-        filePath: cacheFilePath || undefined,
-        url: finalUrl,
+        filePath: effectiveFilePath || undefined,
+        url: effectiveUrl,
         volume: playerStore.volume
       })
     } catch (e) {
       console.error('播放失败，尝试回退纯URL播放:', e)
-      // 如果 playWithProxy 是必须的，可以在 AudioPlayerManager 中集成，或者这里暂时保留
-      // 鉴于 AudioPlayerManager 暂未实现 playWithProxy，这里先保留回退到 playWithProxy
-      await playWithProxy(finalUrl)
+      await playWithProxy(effectiveUrl)
     }
 
     // 同步 store 状态
     playerStore.setCurrentSong(playerSong)
     playerStore.setPlaying(true)
 
-    message.success('开始播放')
-
+    // 显示播放平台提示
+    const platformCount = song.platforms ? song.platforms.length : 1
+    if (platformCount > 1) {
+      const sourceLabel = mapSourceToInternal(selectedPlatform.source)
+      const labelMap: Record<string, string> = { wy: '网易云', tx: 'QQ', kg: '酷狗', kw: '酷我', mg: '咪咕' }
+      const label = labelMap[sourceLabel] || selectedPlatform.source
+      message.success(`开始播放 (${label}) - 已同步请求 ${platformCount} 个平台`)
+    } else {
+      message.success('开始播放')
+    }
   } catch (error: any) {
     console.error('播放失败:', error)
     message.error(`播放失败: ${error.message || '未知错误'}`)
@@ -641,7 +874,7 @@ const playWithProxy = async (url: string) => {
         method: 'GET',
         responseType: 'arraybuffer'
       })
-      
+
       if (res.success && res.data) {
         // res.data 在 IPC 传输后通常是 Uint8Array 或 Buffer
         // playFromFileData 接受 ArrayBuffer
@@ -656,7 +889,7 @@ const playWithProxy = async (url: string) => {
       console.error('Play with proxy failed:', e)
     }
   }
-  
+
   // 如果代理失败，尝试直接播放（最后手段）
   await webAudioEngine.playFromUrl(url)
 }
@@ -704,23 +937,23 @@ watch(() => route.query, (newQuery) => {
         </n-tabs>
       </div>
     </div>
-    
-    <div class="search-content">
-      <SongList 
+
+    <div class="search-content" @scroll="handleScroll">
+      <SongList
         v-if="searchType === 'song'"
-        :songs="searchResults" 
+        :songs="searchResults"
         :loading="loading || loadingMore"
         :load-more="loadingMore"
         @scroll="handleScroll"
         @song-click="handleSongClick"
       />
-      
+
       <div v-else-if="searchType === 'playlist'" class="playlist-grid-container">
          <n-scrollbar @scroll="handleScroll">
             <div class="playlist-grid">
                 <div v-for="pl in playlistResults" :key="pl.id" class="playlist-item">
                 <div class="playlist-cover-wrapper">
-                    <img :src="pl.cover" class="playlist-cover" loading="lazy" />
+                    <img :src="pl.cover" class="playlist-cover" loading="lazy" decoding="async" />
                     <div class="playlist-play-count" v-if="pl.playCount">
                         <n-icon size="12"><i class="mgc_play_arrow_fill"></i></n-icon>
                         {{ (pl.playCount / 10000).toFixed(1) }}万
@@ -784,7 +1017,7 @@ watch(() => route.query, (newQuery) => {
 
 .search-content {
   flex: 1;
-  overflow: hidden;
+  overflow: auto;
   position: relative;
 }
 

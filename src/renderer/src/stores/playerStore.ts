@@ -25,9 +25,6 @@ export interface PlayRecord {
   source?: string // 音源平台标识
 }
 
-export type PlaylistSource = 'search' | 'recent' | 'local'
-
-// 使用 Pinia 定义全局播放器 store
 export const usePlayerStore = defineStore('player', {
   // 播放器全局状态
   state: () => ({
@@ -36,16 +33,61 @@ export const usePlayerStore = defineStore('player', {
     volume: 0.8, // 音量（0.0 - 1.0）
     positionMs: 0, // 当前播放进度（毫秒）
     isLoading: false, // 是否正在加载
+    isChangingSong: false, // 是否正在切歌，防止连续触发
     playHistory: [] as PlayRecord[], // 播放历史记录
     playlist: [] as PlayerSong[], // 当前播放列表
-    playlistSource: 'search' as PlaylistSource, // 当前播放列表来源
-    searchPlaylist: [] as PlayerSong[], // 最近一次搜索结果播放列表
-    localPlaylist: [] as PlayerSong[], // 最近一次本地音乐播放列表
+    playlistSessionStart: 0, // 当前播放会话的起始索引（用于区分批量设置与单独追加的歌曲）
     playMode: 'list' as 'list' | 'loop' | 'shuffle', // 播放模式
     currentIndex: -1, // 当前播放索引
     isPlayerPageShown: false, // 是否显示播放页
-    shouldAutoPlay: true // 是否自动播放（用于恢复状态时不自动播放）
+    shouldAutoPlay: true, // 是否自动播放（用于恢复状态时不自动播放）
+    preloadStatus: 'idle' as 'idle' | 'loading' | 'loaded' | 'error', // 预加载状态
+    preloadError: null as string | null, // 预加载错误信息
+    nextSongToPreload: null as PlayerSong | null, // 准备预加载的下一首歌曲
+    transitionEnabled: true, // 是否启用智能过渡
+    transitionDuration: 3000, // 过渡时长（毫秒）
+    transitionType: 'smart' as 'crossfade' | 'fade' | 'smart', // 过渡效果类型
+    isTransitioning: false // 是否正在过渡
   }),
+  getters: {
+    /**
+     * 获取当前播放歌曲索引，无歌曲时返回 -1
+     * @returns 当前播放歌曲在播放列表中的索引
+     */
+    currentSongIndex(state): number {
+      return state.currentIndex
+    },
+    /**
+     * 获取下一首要播放的歌曲，用于预加载
+     * @returns 下一首歌曲对象，播放列表为空时返回 null
+     */
+    nextSong(state): PlayerSong | null {
+      if (state.playlist.length === 0) return null
+      let nextIndex = state.currentIndex
+      if (state.playMode === 'shuffle') {
+        const sessionSize = state.playlist.length - state.playlistSessionStart
+        nextIndex = state.playlistSessionStart + Math.floor(Math.random() * sessionSize)
+      } else {
+        nextIndex = (state.currentIndex + 1) % state.playlist.length
+      }
+      return state.playlist[nextIndex] || null
+    },
+    /**
+     * 获取上一首歌曲
+     * @returns 上一首歌曲对象，播放列表为空时返回 null
+     */
+    prevSong(state): PlayerSong | null {
+      if (state.playlist.length === 0) return null
+      let prevIndex = state.currentIndex
+      if (state.playMode === 'shuffle') {
+        const sessionSize = state.playlist.length - state.playlistSessionStart
+        prevIndex = state.playlistSessionStart + Math.floor(Math.random() * sessionSize)
+      } else {
+        prevIndex = (state.currentIndex - 1 + state.playlist.length) % state.playlist.length
+      }
+      return state.playlist[prevIndex] || null
+    }
+  },
   actions: {
     setPlayerPageShown(show: boolean) {
       this.isPlayerPageShown = show
@@ -60,24 +102,74 @@ export const usePlayerStore = defineStore('player', {
       this.isPlaying = false
     },
 
+  /**
+   * 处理歌曲播放结束后的自动切歌逻辑
+   * 根据当前播放模式决定下一首播放的歌曲
+   */
+  handleSongEnd() {
+    if (this.playlist.length === 0 || this.isChangingSong || this.isTransitioning) return
+
+    switch (this.playMode) {
+      case 'loop':
+        if (this.currentIndex >= 0 && this.currentIndex < this.playlist.length) {
+          this.playSongAtIndex(this.currentIndex)
+        }
+        break
+      case 'shuffle':
+        {
+          const sessionSize = this.playlist.length - this.playlistSessionStart
+          let randomIndex: number
+          if (sessionSize > 1) {
+            do {
+              randomIndex = this.playlistSessionStart + Math.floor(Math.random() * sessionSize)
+            } while (randomIndex === this.currentIndex)
+          } else {
+            randomIndex = this.currentIndex
+          }
+          this.playSongAtIndex(randomIndex)
+        }
+        break
+      case 'list':
+      default:
+        // 列表循环：自动切到下一首，始终循环（与 playNext 行为一致）
+        this.playNext()
+        break
+    }
+  },
+
     // 播放列表操作
     setPlaylist(list: PlayerSong[]) {
-      this.playlist = list
-    },
-
-    // 设置指定来源的播放列表
-    setPlaylistForSource(source: PlaylistSource, list: PlayerSong[], setActive = true) {
-      if (source === 'search') {
-        this.searchPlaylist = list
-      } else if (source === 'local') {
-        this.localPlaylist = list
+      // 限制播放列表大小，避免占用过多内存
+      const MAX_PLAYLIST_SIZE = 500
+      if (list.length > MAX_PLAYLIST_SIZE) {
+        list = list.slice(0, MAX_PLAYLIST_SIZE)
+        console.warn(`Playlist size exceeded limit, truncated to ${MAX_PLAYLIST_SIZE} songs`)
       }
-      if (setActive) {
-        this.playlistSource = source
-        this.playlist = list
+
+      this.playlist = list
+      this.playlistSessionStart = 0
+      if (list.length === 0) {
+        this.currentIndex = -1
+        this.currentSong = null
+        this.isPlaying = false
+      } else {
+        // 如果当前有歌曲，且不在新列表中，则重置当前歌曲
+        if (this.currentSong && !list.find(s => s.id === this.currentSong!.id)) {
+           this.currentIndex = 0
+           this.currentSong = list[0]
+        } else if (this.currentSong) {
+           this.currentIndex = list.findIndex(s => s.id === this.currentSong!.id)
+        }
       }
     },
     addToPlaylist(song: PlayerSong) {
+      // 限制播放列表大小，避免占用过多内存
+      const MAX_PLAYLIST_SIZE = 500
+      if (this.playlist.length >= MAX_PLAYLIST_SIZE) {
+        console.warn('Playlist size exceeded limit, cannot add more songs')
+        return
+      }
+
       if (!this.playlist.some((s) => s.id === song.id)) {
         this.playlist.push(song)
       }
@@ -102,51 +194,12 @@ export const usePlayerStore = defineStore('player', {
     },
     clearPlaylist() {
       this.playlist = []
+      this.playlistSessionStart = 0
       this.currentIndex = -1
       this.currentSong = null
       this.isPlaying = false
     },
 
-    // 切换播放列表来源
-    switchPlaylistSource(source: PlaylistSource) {
-      this.playlistSource = source
-
-      if (source === 'search') {
-        this.playlist = [...this.searchPlaylist]
-      } else if (source === 'local') {
-        this.playlist = [...this.localPlaylist]
-      } else if (source === 'recent') {
-        // 由最近播放记录构造播放列表，并按歌曲去重（保留最新一条）
-        const seen = new Set<string | number>()
-        const recentList: PlayerSong[] = []
-
-        for (const r of this.playHistory) {
-          if (seen.has(r.songId)) continue
-          seen.add(r.songId)
-
-          recentList.push({
-            id: r.songId,
-            title: r.title,
-            artist: r.artist,
-            album: r.album,
-            cover: r.cover,
-            filePath: r.filePath,
-            durationMs: 0
-          })
-        }
-
-        this.playlist = recentList
-      }
-
-      // 切换列表后保持当前歌曲位置
-      if (this.currentSong) {
-        const idx = this.playlist.findIndex((s) => s.id === this.currentSong!.id)
-        this.currentIndex = idx
-      } else {
-        this.currentIndex = this.playlist.length > 0 ? 0 : -1
-      }
-    },
-    
     // 播放模式切换
     togglePlayMode() {
       const modes: ('list' | 'loop' | 'shuffle')[] = ['list', 'loop', 'shuffle']
@@ -155,12 +208,15 @@ export const usePlayerStore = defineStore('player', {
     },
 
     // 切歌逻辑
-    playNext() {
-      if (this.playlist.length === 0) return
+  playNext() {
+    if (this.playlist.length === 0 || this.isChangingSong) return
 
+    this.isChangingSong = true
+    try {
       let nextIndex = this.currentIndex
       if (this.playMode === 'shuffle') {
-        nextIndex = Math.floor(Math.random() * this.playlist.length)
+        const sessionSize = this.playlist.length - this.playlistSessionStart
+        nextIndex = this.playlistSessionStart + Math.floor(Math.random() * sessionSize)
       } else if (this.playMode === 'loop') {
          // 单曲循环模式下，如果是用户手动切歌，通常也是切到下一首，或者重新开始当前首
          // 这里实现为切换到下一首（类似列表循环），只有自动结束时才单曲循环
@@ -169,34 +225,50 @@ export const usePlayerStore = defineStore('player', {
         // 列表循环
         nextIndex = (this.currentIndex + 1) % this.playlist.length
       }
-      
-      this.playSongAtIndex(nextIndex)
-    },
-    
-    playPrev() {
-      if (this.playlist.length === 0) return
 
+      this.playSongAtIndex(nextIndex)
+    } finally {
+      // 确保即使发生错误也能重置状态
+      setTimeout(() => {
+        this.isChangingSong = false
+      }, 300) // 300ms 延迟，确保切歌操作完成
+    }
+  },
+
+  playPrev() {
+    if (this.playlist.length === 0 || this.isChangingSong) return
+
+    this.isChangingSong = true
+    try {
       let prevIndex = this.currentIndex
       if (this.playMode === 'shuffle') {
-         prevIndex = Math.floor(Math.random() * this.playlist.length)
+        const sessionSize = this.playlist.length - this.playlistSessionStart
+        prevIndex = this.playlistSessionStart + Math.floor(Math.random() * sessionSize)
       } else {
         prevIndex = (this.currentIndex - 1 + this.playlist.length) % this.playlist.length
       }
-      
+
       this.playSongAtIndex(prevIndex)
-    },
+    } finally {
+      // 确保即使发生错误也能重置状态
+      setTimeout(() => {
+        this.isChangingSong = false
+      }, 300) // 300ms 延迟，确保切歌操作完成
+    }
+  },
 
     playSongAtIndex(index: number) {
-      if (index >= 0 && index < this.playlist.length) {
-        this.currentIndex = index
-        const song = this.playlist[index]
-        this.currentSong = song
-        this.positionMs = 0
-        this.isPlaying = true 
-        this.shouldAutoPlay = true // 用户主动切歌，自动播放
-        this.recordPlay(song)
-      }
-    },
+    if (index >= 0 && index < this.playlist.length) {
+      this.currentIndex = index
+      const song = this.playlist[index]
+      // 为了触发 watch 监听器，创建一个新的对象引用
+      this.currentSong = { ...song }
+      this.positionMs = 0
+      this.isPlaying = true
+      this.shouldAutoPlay = true // 用户主动切歌，自动播放
+      this.recordPlay(song)
+    }
+  },
 
     // 初始化时加载历史记录
     loadHistory() {
@@ -215,13 +287,13 @@ export const usePlayerStore = defineStore('player', {
       const state = {
         currentSong: this.currentSong,
         playlist: this.playlist,
-        playlistSource: this.playlistSource,
-        searchPlaylist: this.searchPlaylist,
-        localPlaylist: this.localPlaylist,
         playMode: this.playMode,
         currentIndex: this.currentIndex,
         volume: this.volume,
-        positionMs: this.positionMs
+        positionMs: this.positionMs,
+        transitionEnabled: this.transitionEnabled,
+        transitionDuration: this.transitionDuration,
+        transitionType: this.transitionType
       }
       try {
         localStorage.setItem('player_state', JSON.stringify(state))
@@ -237,14 +309,14 @@ export const usePlayerStore = defineStore('player', {
           const state = JSON.parse(stateStr)
           if (state.currentSong) this.currentSong = state.currentSong
           if (state.playlist) this.playlist = state.playlist
-          if (state.playlistSource) this.playlistSource = state.playlistSource
-          if (state.searchPlaylist) this.searchPlaylist = state.searchPlaylist
-          if (state.localPlaylist) this.localPlaylist = state.localPlaylist
           if (state.playMode) this.playMode = state.playMode
           if (typeof state.currentIndex === 'number') this.currentIndex = state.currentIndex
           if (typeof state.volume === 'number') this.volume = state.volume
           if (typeof state.positionMs === 'number') this.positionMs = state.positionMs
-          
+          if (typeof state.transitionEnabled === 'boolean') this.transitionEnabled = state.transitionEnabled
+          if (typeof state.transitionDuration === 'number') this.transitionDuration = state.transitionDuration
+          if (state.transitionType) this.transitionType = state.transitionType
+
           this.shouldAutoPlay = false // 恢复状态时不自动播放
           this.isPlaying = false // 确保不处于播放状态
         } catch (e) {
@@ -282,15 +354,15 @@ export const usePlayerStore = defineStore('player', {
         timestamp: Date.now(),
         source: song.source || (song.filePath ? 'local' : 'netease') // 记录来源
       }
-      
+
       this.playHistory.unshift(record)
-      
+
       // 限制历史记录数量，大幅降低上限，例如最近 200 条
       // LocalStorage 通常限制 5MB，10000 条肯定会超
       if (this.playHistory.length > 200) {
         this.playHistory = this.playHistory.slice(0, 200)
       }
-      
+
       this.saveHistory()
     },
     // 保存历史记录
@@ -314,14 +386,14 @@ export const usePlayerStore = defineStore('player', {
     setCurrentSong(song: PlayerSong | null): void {
       this.currentSong = song
       this.positionMs = 0
-      
+
       // 更新 currentIndex
       if (song) {
         const index = this.playlist.findIndex((s) => s.id === song.id)
         if (index !== -1) {
           this.currentIndex = index
         } else {
-          // 如果不在播放列表中，添加并设置
+          this.playlistSessionStart = this.playlist.length
           this.playlist.push(song)
           this.currentIndex = this.playlist.length - 1
         }
@@ -355,7 +427,7 @@ export const usePlayerStore = defineStore('player', {
         ...this.currentSong,
         lyrics
       }
-      
+
       // 同时更新播放列表中对应歌曲的歌词
       const index = this.playlist.findIndex((s) => s.id === this.currentSong?.id)
       if (index !== -1) {
@@ -364,6 +436,72 @@ export const usePlayerStore = defineStore('player', {
           lyrics
         }
       }
-    }
+    },
+
+    // 设置预加载状态
+    setPreloadStatus(status: 'idle' | 'loading' | 'loaded' | 'error'): void {
+      this.preloadStatus = status
+    },
+
+    // 设置预加载错误信息
+    setPreloadError(error: string | null): void {
+      this.preloadError = error
+    },
+
+    // 设置准备预加载的下一首歌曲
+    setNextSongToPreload(song: PlayerSong | null): void {
+      this.nextSongToPreload = song
+    },
+
+    // 获取下一首歌曲信息，用于预加载
+    getNextSong(): PlayerSong | null {
+      if (this.playlist.length === 0) return null
+
+      let nextIndex = this.currentIndex
+      if (this.playMode === 'shuffle') {
+        const sessionSize = this.playlist.length - this.playlistSessionStart
+        nextIndex = this.playlistSessionStart + Math.floor(Math.random() * sessionSize)
+      } else if (this.playMode === 'list') {
+        // 列表模式：播放下一首歌曲
+        nextIndex = (this.currentIndex + 1) % this.playlist.length
+      } else if (this.playMode === 'loop') {
+        // 单曲循环模式：仍然预加载下一首歌曲
+        nextIndex = (this.currentIndex + 1) % this.playlist.length
+      }
+
+      return this.playlist[nextIndex] || null
+    },
+
+    // 重置预加载状态
+    resetPreloadState(): void {
+      this.preloadStatus = 'idle'
+      this.preloadError = null
+      this.nextSongToPreload = null
+    },
+
+    // 设置过渡功能启用状态
+    setTransitionEnabled(enabled: boolean): void {
+      this.transitionEnabled = enabled
+      this.savePlayerState()
+    },
+
+    // 设置过渡时长
+    setTransitionDuration(duration: number): void {
+      this.transitionDuration = Math.max(500, Math.min(duration, 10000)) // 限制在0.5-10秒之间
+      this.savePlayerState()
+    },
+
+    // 设置过渡效果类型
+    setTransitionType(type: 'crossfade' | 'fade' | 'smart'): void {
+      this.transitionType = type
+      this.savePlayerState()
+    },
+
+    // 设置过渡状态
+    setTransitioning(isTransitioning: boolean): void {
+      this.isTransitioning = isTransitioning
+    },
+
+
   }
 })

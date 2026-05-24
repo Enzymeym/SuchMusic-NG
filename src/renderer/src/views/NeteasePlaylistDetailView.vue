@@ -316,8 +316,6 @@ const playAll = () => {
 const handleSongClick = async (song: any) => {
   const list = getPlayableList()
   
-  // 更新播放列表
-  player.setPlaylist(list)
   const target = list.find((s) => s.id === String(song.id))
   if (!target) return
 

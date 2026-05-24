@@ -1,4 +1,4 @@
-import { ipcMain, dialog, app } from 'electron'
+import { ipcMain, dialog, app, BrowserWindow } from 'electron'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as crypto from 'crypto'
@@ -10,6 +10,16 @@ import {
 } from '../../plugin/utils/snowdrop-transform'
 import { addPluginPaths, removePluginPath } from '../services/pluginConfig'
 import type { Plugin, PluginInfo, PluginSource, PluginConfigItem } from '../../renderer/src/types/plugin'
+
+// 发送日志到前端
+function sendLogToFrontend(level: string, ...args: any[]) {
+  const mainWindow = BrowserWindow.getAllWindows()[0]
+  if (mainWindow) {
+    mainWindow.webContents.send('plugin:log', level, ...args)
+  }
+  // 同时在主进程控制台输出，便于调试
+  console[level](...args)
+}
 
 /**
  * 插件管理器 IPC 处理器
@@ -168,9 +178,9 @@ const loadPluginConfigFromFile = async (
 const getPluginStatus = async (pluginId: string): Promise<Plugin['status']> => {
   try {
     const config = await loadPluginConfigFromFile(pluginId)
-    return config._status || 'uninitialized'
+    return config._status || 'inactive'
   } catch {
-    return 'uninitialized'
+    return 'inactive'
   }
 }
 
@@ -203,7 +213,7 @@ export function registerPluginManagerHandlers(): void {
       // 转换 LX 格式插件
       let processedCode = code
       if (code.toLowerCase().includes('lx') && !code.includes('module.exports')) {
-        const transformResult = transformSnowdropPlugin(code, { sourceType: 'lx' })
+        const transformResult = await transformSnowdropPlugin(code, { sourceType: 'lx' })
         processedCode = transformResult.transformedCode
       }
 
@@ -264,7 +274,7 @@ export function registerPluginManagerHandlers(): void {
       // 转换 LX 格式插件
       let processedCode = code
       if (code.toLowerCase().includes('lx') && !code.includes('module.exports')) {
-        const transformResult = transformSnowdropPlugin(code, { sourceType: 'lx' })
+        const transformResult = await transformSnowdropPlugin(code, { sourceType: 'lx' })
         processedCode = transformResult.transformedCode
       }
 
@@ -385,7 +395,7 @@ export function registerPluginManagerHandlers(): void {
       const logger = new Logger(pluginId)
 
       const host = new SuchMusicPluginHost()
-      await host.loadPlugin(code, logger)
+      await host.loadPluginFromCode(code, logger)
 
       // 缓存插件实例
       pluginInstances.set(pluginId, host)
@@ -494,25 +504,24 @@ export function registerPluginManagerHandlers(): void {
         if (!file.endsWith('.js')) continue
 
         const pluginId = file.replace('.js', '')
-        const status = await getPluginStatus(pluginId)
 
-        if (status === 'uninitialized') {
-          try {
-            const code = await loadPluginCode(pluginId)
-            const { info, sources, configUI, type } = parsePlugin(code)
+        // 尝试加载插件信息
+        try {
+          const code = await loadPluginCode(pluginId)
+          const { info, sources, configUI, type } = parsePlugin(code)
+          const status = await getPluginStatus(pluginId)
 
-            // 只返回可序列化的数据
-            plugins.push({
-              id: pluginId,
-              info,
-              sources,
-              configUI,
-              status,
-              type
-            })
-          } catch (e) {
-            console.error(`加载插件 ${pluginId} 失败:`, e)
-          }
+          // 只返回可序列化的数据
+          plugins.push({
+            id: pluginId,
+            info,
+            sources,
+            configUI,
+            status,
+            type
+          })
+        } catch (e) {
+          console.error(`加载插件 ${pluginId} 失败:`, e)
         }
       }
 
@@ -597,7 +606,7 @@ export function registerPluginManagerHandlers(): void {
         const code = await loadPluginCode(pluginId)
         const logger = new Logger(pluginId)
         host = new SuchMusicPluginHost()
-        await host.loadPlugin(code, logger)
+        await host.loadPluginFromCode(code, logger)
         pluginInstances.set(pluginId, host)
       }
 
@@ -620,7 +629,7 @@ export function registerPluginManagerHandlers(): void {
         const code = await loadPluginCode(pluginId)
         const logger = new Logger(pluginId)
         host = new SuchMusicPluginHost()
-        await host.loadPlugin(code, logger)
+        await host.loadPluginFromCode(code, logger)
         pluginInstances.set(pluginId, host)
       }
 
@@ -643,7 +652,7 @@ export function registerPluginManagerHandlers(): void {
         const code = await loadPluginCode(pluginId)
         const logger = new Logger(pluginId)
         host = new SuchMusicPluginHost()
-        await host.loadPlugin(code, logger)
+        await host.loadPluginFromCode(code, logger)
         pluginInstances.set(pluginId, host)
       }
 
@@ -674,4 +683,86 @@ export function registerPluginManagerHandlers(): void {
       return { error: error.message || '调用插件方法失败' }
     }
   })
+
+  /**
+   * 自动检查所有插件更新
+   */
+  ipcMain.handle('plugin:checkAllUpdates', async () => {
+    try {
+      await checkAllPluginsForUpdates()
+      return { success: true }
+    } catch (error: any) {
+      return { error: error.message || '检查插件更新失败' }
+    }
+  })
+
+  /**
+   * 前端日志输出
+   */
+  ipcMain.on('plugin:log', (_event, level, ...args) => {
+    console[level](...args)
+  })
+}
+
+/**
+ * 检查所有已激活插件的更新
+ */
+export async function checkAllPluginsForUpdates(): Promise<void> {
+  try {
+    sendLogToFrontend('log', '=== 开始自动检查插件更新 ===')
+    const pluginsDir = getPluginsDir()
+    sendLogToFrontend('log', '插件目录:', pluginsDir)
+    
+    await fs.mkdir(pluginsDir, { recursive: true })
+
+    const files = await fs.readdir(pluginsDir)
+    sendLogToFrontend('log', '找到插件文件:', files)
+
+    for (const file of files) {
+      if (!file.endsWith('.js')) continue
+
+      const pluginId = file.replace('.js', '')
+      sendLogToFrontend('log', '检查插件:', pluginId)
+      
+      try {
+        const status = await getPluginStatus(pluginId)
+        sendLogToFrontend('log', '插件状态:', status)
+
+        // 检查所有插件的更新，无论是否激活
+        sendLogToFrontend('log', '加载插件:', pluginId)
+          const code = await loadPluginCode(pluginId)
+          const logger = new Logger(pluginId)
+          const host = new SuchMusicPluginHost()
+          await host.loadPluginFromCode(code, logger)
+
+        // 检查更新
+        sendLogToFrontend('log', '检查插件更新:', pluginId)
+        const updateInfo = await host.checkUpdate()
+        
+        if (updateInfo && updateInfo.version) {
+          sendLogToFrontend('log', `插件 ${pluginId} 有更新: ${updateInfo.version}`)
+        } else if (updateInfo === null) {
+          // 检查插件类型
+          const isNewStyle = host.isNewStylePlugin
+          if (isNewStyle) {
+            sendLogToFrontend('log', `插件 ${pluginId} 未实现更新检查功能`)
+          } else {
+            sendLogToFrontend('log', `插件 ${pluginId} 为旧版插件，不支持自动更新检查`)
+          }
+        } else {
+          sendLogToFrontend('log', `插件 ${pluginId} 无更新`)
+        }
+      } catch (error: any) {
+        sendLogToFrontend('error', `检查插件 ${pluginId} 更新失败:`, error)
+        sendLogToFrontend('error', `错误堆栈:`, error.stack)
+        // 继续检查下一个插件，不影响整体流程
+        sendLogToFrontend('log', `继续检查下一个插件...`)
+      }
+    }
+
+    sendLogToFrontend('log', '=== 插件更新检查完成 ===')
+  } catch (error: any) {
+    sendLogToFrontend('error', '自动检查插件更新失败:', error)
+    sendLogToFrontend('error', '错误堆栈:', error.stack)
+  }
 }

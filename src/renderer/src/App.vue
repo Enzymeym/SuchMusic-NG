@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch, defineAsyncComponent } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NConfigProvider,
@@ -12,11 +12,13 @@ import {
   NCode,
   NSpin
 } from 'naive-ui'
+import 'mingcute_icon/font/Mingcute.css'
 // 引入 highlight.js 提供代码高亮能力
 import hljs from 'highlight.js'
 import { themeOverridesRef, setPrimaryColor } from './themes'
 import { useSettingsStore } from './stores/settingsStore'
 import { usePlayerStore } from './stores/playerStore'
+import { useUserStore } from './stores/userStore'
 import { useAutoNaiveTheme } from './themes/autoNaiveTheme'
 import {
   runSnowdropTransformTest,
@@ -25,12 +27,16 @@ import {
   type SnowdropTransformTestResult
 } from './apis/snowdrop-transform'
 
+const UpdateNotification = defineAsyncComponent(
+  () => import('./components/common/UpdateNotification.vue')
+)
+
 // 初始化主题主色为默认值，后续由设置中的主题色控制
 setPrimaryColor('#2C8EFD')
 
 // 从设置中读取用户配置的主题色并应用
 const settingsStore = useSettingsStore()
-if (settingsStore.appearance.customThemeColor) {
+if (!settingsStore.appearance.themeColorFollowsCover && settingsStore.appearance.customThemeColor) {
   setPrimaryColor(settingsStore.appearance.customThemeColor)
 }
 
@@ -40,9 +46,34 @@ const route = useRoute()
 const isDesktopLyric = computed(() => route.name === 'desktop-lyric')
 
 const playerStore = usePlayerStore()
+const userStore = useUserStore()
 
 // 初始化时恢复播放器状态
 playerStore.loadPlayerState()
+
+// 初始化时恢复用户登录状态
+userStore.initLoginState()
+
+// 监听关键状态变化并保存，使用自定义防抖函数
+
+// 自定义防抖函数
+function debounce<T extends (...args: any[]) => any>(
+  func: T,
+  wait: number
+): (...args: Parameters<T>) => void {
+  let timeout: ReturnType<typeof setTimeout> | null = null
+  return (...args: Parameters<T>) => {
+    if (timeout) clearTimeout(timeout)
+    timeout = setTimeout(() => {
+      func(...args)
+    }, wait)
+  }
+}
+
+// 使用防抖函数优化保存操作，避免频繁触发
+const debouncedSavePlayerState = debounce(() => {
+  playerStore.savePlayerState()
+}, 1000) // 1秒防抖
 
 // 监听关键状态变化并保存
 watch(
@@ -50,11 +81,10 @@ watch(
     playerStore.currentSong?.id,
     playerStore.playMode,
     playerStore.volume,
-    playerStore.playlist.length, // 仅监听长度变化，避免频繁触发
-    playerStore.playlistSource
+    playerStore.playlist.length // 仅监听长度变化，避免频繁触发
   ],
   () => {
-    playerStore.savePlayerState()
+    debouncedSavePlayerState()
   }
 )
 
@@ -81,15 +111,26 @@ watch(
   { immediate: true }
 )
 
+// 在组件卸载时清除定时器和事件监听器
+onUnmounted(() => {
+  if (saveInterval) {
+    clearInterval(saveInterval)
+    saveInterval = null
+  }
+
+  // 清除事件监听器
+  if (!isDesktopLyric.value) {
+    window.electron.ipcRenderer.removeAllListeners('player:control')
+    window.electron.ipcRenderer.removeAllListeners('plugin:hot-updated')
+  }
+})
+
 onMounted(() => {
   if (!isDesktopLyric.value) {
     window.electron.ipcRenderer.on('player:control', (_, action: string) => {
       switch (action) {
         case 'play':
           if (!playerStore.isPlaying) {
-            // We need to access the togglePlay function from PlayerBar or implement it globally
-            // Since PlayerBar logic is inside component, we should probably expose it or move to store/composable
-            // But for now, we can use the webAudioEngine directly if we import it
             import('./audio/audio-engine').then(async ({ webAudioEngine }) => {
               if (playerStore.currentSong) {
                 await webAudioEngine.play()
@@ -126,6 +167,22 @@ onMounted(() => {
         case 'toggle-lock':
           settingsStore.playback.desktopLyricsLocked = !settingsStore.playback.desktopLyricsLocked
           break
+      }
+    })
+
+    // 监听主进程发来的插件热更新完成事件
+    window.electron.ipcRenderer.on('plugin:hot-updated', async (_, data: any) => {
+      // 显示更新成功提示
+      new Notification('更新完成', {
+        body: `插件 ${data.pluginName} 已成功热更新。`
+      })
+      // 可以在此处执行刷新操作或重新加载插件等逻辑
+      console.log(`Plugin ${data.pluginName} hot updated at ${data.path}`)
+      try {
+        await runSnowdropLoadAllPlugins()
+        console.log('Plugins reloaded after hot update')
+      } catch (err) {
+        console.error('Failed to reload plugins after hot update:', err)
       }
     })
   }
@@ -220,30 +277,38 @@ const handleOpenSourceSettings = () => {
   )
 }
 
-// 自动加载所有插件
-onMounted(async () => {
-  try {
-    const { canceled, results, errors } = await runSnowdropLoadAllPlugins()
-    if (!canceled && results && results.length) {
-      snowdropResults.value = results
-      // 自动打开音源设置面板以展示加载结果
-      // showSourceSettings.value = true
-      console.log('[AutoLoad] Successfully loaded plugins:', results.length)
+// 延迟加载插件，避免影响启动速度
+onMounted(() => {
+  // 延迟 1 秒后加载插件，让应用先完成初始化
+  setTimeout(async () => {
+    try {
+      const { canceled, results, errors } = await runSnowdropLoadAllPlugins()
+      if (!canceled && results && results.length) {
+        snowdropResults.value = results
+        // 自动打开音源设置面板以展示加载结果
+        // showSourceSettings.value = true
+        console.log('[AutoLoad] Successfully loaded plugins:', results.length)
+      }
+      if (errors && errors.length) {
+        console.error('[AutoLoad] Errors:', errors)
+      }
+    } catch (err) {
+      console.error('[AutoLoad] Failed to load plugins:', err)
     }
-    if (errors && errors.length) {
-      console.error('[AutoLoad] Errors:', errors)
-    }
-  } catch (err) {
-    console.error('[AutoLoad] Failed to load plugins:', err)
-  }
+  }, 1000)
 })
 </script>
 
 <template>
-  <n-config-provider :theme="isDesktopLyric ? null : theme" :theme-overrides="themeOverridesRef" :hljs="hljs">
+  <n-config-provider
+    :theme="isDesktopLyric ? null : theme"
+    :theme-overrides="themeOverridesRef"
+    :hljs="hljs"
+  >
     <n-global-style v-if="!isDesktopLyric" />
     <n-message-provider>
       <n-dialog-provider>
+        <update-notification />
         <router-view />
         <div class="snowdrop-test-panel">
           <n-card size="small" title="落雪音源插件调试">
@@ -404,5 +469,4 @@ onMounted(async () => {
 .snowdrop-test-loading {
   margin-top: 8px;
 }
-
 </style>

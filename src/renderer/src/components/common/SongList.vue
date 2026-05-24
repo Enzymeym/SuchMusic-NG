@@ -87,94 +87,238 @@
     <Transition name="fade">
       <div v-if="!loading || loadMore" class="song-list-scroll-wrapper">
         <n-scrollbar class="song-list-scroll-container" @scroll="(e) => emit('scroll', e)">
-          <div v-for="(song, index) in songs" :key="song.id" @contextmenu="(e) => showContextMenu(song, e)">
-            <div
-              :class="['song-item', itemVariantClass, { active: song.id == currentPlayingSongId }]"
-              @click="handleSongClick(song)"
-              :draggable="draggableEnabled"
-              @dragstart="(e) => handleDragStart(index, e)"
-              @dragover="(e) => handleDragOver(index, e)"
-              @drop="(e) => handleDrop(index, e)"
-            >
-              <div style="display: flex; align-items: center; gap: 8px">
-                <!-- Index -->
-                <div class="index-cell">
-                  {{ startIndex + index + 1 }}
-                </div>
-                <!-- Cover -->
-                <img
-                  class="song-cover"
-                  :src="song.picUrl || song.al?.picUrl || defaultCover"
-                  alt=""
-                  referrerpolicy="no-referrer"
-                />
-                <!-- Song Info -->
-                <div class="song-info">
-                  <div style="display: flex; align-items: center; gap: 10px">
-                    <div style="display: flex; flex-direction: column; min-width: 0; flex: 1">
-                      <n-ellipsis style="font-weight: bold; font-size: 16.5px; max-width: 200px">
-                        {{ processSongTitle(song.name).mainTitle }}
-                      </n-ellipsis>
+          <!-- 确保 n-scrollbar 能够正确传递滚动事件 -->
+          <!-- 使用虚拟滚动优化长列表性能 -->
+          <n-virtual-list
+            v-if="songs.length > 50"
+            :items="songs"
+            :item-size="props.itemHeight"
+            :show-scrollbar="false"
+          >
+            <template #default="{ item, index }">
+              <div
+                :key="item.id"
+                @contextmenu="(e) => showContextMenu(item, e)"
+                class="song-item-wrapper"
+              >
+                <div
+                  :class="['song-item', itemVariantClass, { active: item.id == currentPlayingSongId }]"
+                  @click="handleSongClick(item)"
+                  :draggable="draggableEnabled"
+                  @dragstart="(e) => handleDragStart(index, e)"
+                  @dragover="(e) => handleDragOver(index, e)"
+                  @drop="(e) => handleDrop(index, e)"
+                >
+                  <div style="display: flex; align-items: center; gap: 8px">
+                    <!-- Index -->
+                    <div class="index-cell">
+                      {{ startIndex + index + 1 }}
+                    </div>
+                    <!-- Cover -->
+                    <img
+                      class="song-cover"
+                      :src="item.picUrl || item.al?.picUrl || defaultCover"
+                      alt=""
+                      referrerpolicy="no-referrer"
+                      loading="lazy"
+                      decoding="async"
+                    />
+                    <!-- Song Info -->
+                    <div class="song-info">
+                      <div style="display: flex; align-items: center; gap: 10px">
+                        <div style="display: flex; flex-direction: column; min-width: 0; flex: 1">
+                          <n-ellipsis style="font-weight: bold; font-size: 16.5px; max-width: 200px">
+                            {{ processSongTitle(item.name).mainTitle }}
+                          </n-ellipsis>
+                          <n-ellipsis
+                            v-if="processSongTitle(item.name).subTitle"
+                            style="font-size: 12.5px; color: #818181; max-width: 200px"
+                          >
+                            {{ processSongTitle(item.name).subTitle }}
+                          </n-ellipsis>
+                        </div>
+
+                        <!-- Tags -->
+                        <n-tag v-if="item.isOriginal" type="success" size="small" round :bordered="false" style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;">原唱</n-tag>
+                        <n-tag v-if="item.mv" type="warning" size="small" round style="cursor: pointer; transform: scale(0.8); margin-right: 2px; flex-shrink: 0;" :bordered="false"
+                          >MV</n-tag
+                        >
+                      </div>
+                      <!-- Artists & Quality Tag -->
+                      <div style="display: flex; align-items: center; max-width: 200px; transform: translateX(-4px);">
+                        <!-- 多平台标签（合并后） -->
+                        <template v-if="filterPlatforms(item.platforms).length > 0">
+                          <n-tag
+                            v-for="p in filterPlatforms(item.platforms)"
+                            :key="p.source"
+                            :type="getSourceType(p.source)"
+                            size="small"
+                            round
+                            :bordered="false"
+                            style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;"
+                          >
+                            {{ getSourceLabel(p.source) }}
+                          </n-tag>
+                        </template>
+                        <!-- 单平台标签（原有逻辑） -->
+                        <n-tag
+                          v-else-if="item.source && !blockedPlatforms.includes(item.source)"
+                          :type="getSourceType(item.source)"
+                          size="small"
+                          round
+                          :bordered="false"
+                          style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;"
+                        >
+                          {{ getSourceLabel(item.source) }}
+                        </n-tag>
+                        <n-tag
+                          v-if="item.quality"
+                          :type="getQualityTag(item.quality).type"
+                          size="small"
+                          round
+                          :bordered="false"
+                          style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;"
+                        >
+                          {{ getQualityTag(item.quality).label }}
+                        </n-tag>
+                        <n-ellipsis style="font-size: 14px; color: #818181; flex: 1;">
+                          {{ getArtistsFormatted(item) }}
+                        </n-ellipsis>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Album & Duration -->
+                  <div class="song-meta">
+                    <div class="album-info">
                       <n-ellipsis
-                        v-if="processSongTitle(song.name).subTitle"
-                        style="font-size: 12.5px; color: #818181; max-width: 200px"
+                        @click.stop="handleAlbumClick(item)"
+                        style="font-size: 14px; color: #818181; cursor: pointer; max-width: 32vh"
                       >
-                        {{ processSongTitle(song.name).subTitle }}
+                        {{ getAlbumName(item) }}
                       </n-ellipsis>
                     </div>
-
-                    <!-- Tags -->
-                    <n-tag v-if="song.isOriginal" type="success" size="small" round :bordered="false" style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;">原唱</n-tag>
-                    <n-tag v-if="song.mv" type="warning" size="small" round style="cursor: pointer; transform: scale(0.8); margin-right: 2px; flex-shrink: 0;" :bordered="false"
-                      >MV</n-tag
-                    >
-                  </div>
-                  <!-- Artists & Quality Tag -->
-                  <div style="display: flex; align-items: center; max-width: 200px; transform: translateX(-4px);">
-                    <!-- Source Tag -->
-                    <n-tag
-                      v-if="song.source"
-                      :type="getSourceType(song.source)"
-                      size="small"
-                      round
-                      :bordered="false"
-                      style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;"
-                    >
-                      {{ getSourceLabel(song.source) }}
-                    </n-tag>
-                    <n-tag
-                      v-if="song.quality"
-                      :type="getQualityTag(song.quality).type"
-                      size="small"
-                      round
-                      :bordered="false"
-                      style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;"
-                    >
-                      {{ getQualityTag(song.quality).label }}
-                    </n-tag>
-                    <n-ellipsis style="font-size: 14px; color: #818181; flex: 1;">
-                      {{ getArtistsFormatted(song) }}
-                    </n-ellipsis>
+                    <div v-if="!hideDuration" class="duration-info">
+                      {{ formatDuration(item.dt) }}
+                    </div>
                   </div>
                 </div>
               </div>
+            </template>
+          </n-virtual-list>
 
-              <!-- Album & Duration -->
-              <div class="song-meta">
-                <div class="album-info">
-                  <n-ellipsis
-                    @click.stop="handleAlbumClick(song)"
-                    style="font-size: 14px; color: #818181; cursor: pointer; max-width: 32vh"
-                  >
-                    {{ getAlbumName(song) }}
-                  </n-ellipsis>
+          <!-- 普通列表渲染（歌曲数量较少时） -->
+          <transition-group name="song-fade" tag="div" v-else>
+            <div
+              v-for="(song, index) in songs"
+              :key="song.id"
+              @contextmenu="(e) => showContextMenu(song, e)"
+              class="song-item-wrapper"
+            >
+              <div
+                :class="['song-item', itemVariantClass, { active: song.id == currentPlayingSongId }]"
+                @click="handleSongClick(song)"
+                :draggable="draggableEnabled"
+                @dragstart="(e) => handleDragStart(index, e)"
+                @dragover="(e) => handleDragOver(index, e)"
+                @drop="(e) => handleDrop(index, e)"
+              >
+                <div style="display: flex; align-items: center; gap: 8px">
+                  <!-- Index -->
+                  <div class="index-cell">
+                    {{ startIndex + index + 1 }}
+                  </div>
+                  <!-- Cover -->
+                  <img
+                    class="song-cover"
+                    :src="song.picUrl || song.al?.picUrl || defaultCover"
+                    alt=""
+                    referrerpolicy="no-referrer"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <!-- Song Info -->
+                  <div class="song-info">
+                    <div style="display: flex; align-items: center; gap: 10px">
+                      <div style="display: flex; flex-direction: column; min-width: 0; flex: 1">
+                        <n-ellipsis style="font-weight: bold; font-size: 16.5px; max-width: 200px">
+                          {{ processSongTitle(song.name).mainTitle }}
+                        </n-ellipsis>
+                        <n-ellipsis
+                          v-if="processSongTitle(song.name).subTitle"
+                          style="font-size: 12.5px; color: #818181; max-width: 200px"
+                        >
+                          {{ processSongTitle(song.name).subTitle }}
+                        </n-ellipsis>
+                      </div>
+
+                      <!-- Tags -->
+                      <n-tag v-if="song.isOriginal" type="success" size="small" round :bordered="false" style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;">原唱</n-tag>
+                      <n-tag v-if="song.mv" type="warning" size="small" round style="cursor: pointer; transform: scale(0.8); margin-right: 2px; flex-shrink: 0;" :bordered="false"
+                        >MV</n-tag
+                      >
+                    </div>
+                    <!-- Artists & Quality Tag -->
+                    <div style="display: flex; align-items: center; max-width: 200px; transform: translateX(-4px);">
+                      <!-- 多平台标签（合并后） -->
+                      <template v-if="filterPlatforms(song.platforms).length > 0">
+                        <n-tag
+                          v-for="p in filterPlatforms(song.platforms)"
+                          :key="p.source"
+                          :type="getSourceType(p.source)"
+                          size="small"
+                          round
+                          :bordered="false"
+                          style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;"
+                        >
+                          {{ getSourceLabel(p.source) }}
+                        </n-tag>
+                      </template>
+                      <!-- 单平台标签（原有逻辑） -->
+                      <n-tag
+                        v-else-if="song.source && !blockedPlatforms.includes(song.source)"
+                        :type="getSourceType(song.source)"
+                        size="small"
+                        round
+                        :bordered="false"
+                        style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;"
+                      >
+                        {{ getSourceLabel(song.source) }}
+                      </n-tag>
+                      <n-tag
+                        v-if="song.quality"
+                        :type="getQualityTag(song.quality).type"
+                        size="small"
+                        round
+                        :bordered="false"
+                        style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0;"
+                      >
+                        {{ getQualityTag(song.quality).label }}
+                      </n-tag>
+                      <n-ellipsis style="font-size: 14px; color: #818181; flex: 1;">
+                        {{ getArtistsFormatted(song) }}
+                      </n-ellipsis>
+                    </div>
+                  </div>
                 </div>
-                <div v-if="!hideDuration" class="duration-info">
-                  {{ formatDuration(song.dt) }}
+
+                <!-- Album & Duration -->
+                <div class="song-meta">
+                  <div class="album-info">
+                    <n-ellipsis
+                      @click.stop="handleAlbumClick(song)"
+                      style="font-size: 14px; color: #818181; cursor: pointer; max-width: 32vh"
+                    >
+                      {{ getAlbumName(song) }}
+                    </n-ellipsis>
+                  </div>
+                  <div v-if="!hideDuration" class="duration-info">
+                    {{ formatDuration(song.dt) }}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          </transition-group>
 
           <!-- Footer -->
           <div style="padding: 16px 0">
@@ -207,6 +351,7 @@ import {
   NDivider,
   NIcon,
   NScrollbar,
+  NVirtualList,
   useMessage
 } from 'naive-ui'
 import { usePlaylistStore } from '../../stores/playlistStore'
@@ -525,15 +670,27 @@ function getQualityTag(quality: string): { label: string; type: TagType } {
   }
 }
 
+// 不支持的平台列表
+const blockedPlatforms = ['soda', '5sing', 'bilibili', 'mg', 'migu']
+
+/**
+ * 过滤掉不支持的平台
+ * @param platforms - 平台列表
+ * @returns 过滤后的平台列表
+ */
+function filterPlatforms(platforms?: any[]) {
+  if (!platforms || platforms.length === 0) return []
+  return platforms.filter(p => !blockedPlatforms.includes(p.source))
+}
+
 /* 辅助函数：根据 source 返回对应的标签类型 */
 function getSourceType(source?: string) {
   if (!source) return 'default'
   switch (source) {
-    case 'netease': return 'error'
-    case 'qq': return 'success'
-    case 'kugou': return 'info'
-    case 'kuwo': return 'warning'
-    case 'bilibili': return 'primary'
+    case 'netease': case 'wy': return 'error'
+    case 'qq': case 'tx': return 'success'
+    case 'kugou': case 'kg': return 'info'
+    case 'kuwo': case 'kw': return 'warning'
     default: return 'default'
   }
 }
@@ -542,12 +699,11 @@ function getSourceType(source?: string) {
 function getSourceLabel(source?: string) {
   if (!source) return '未知'
   switch (source) {
-    case 'netease': return '网易'
-    case 'qq': return 'QQ'
-    case 'kugou': return '酷狗'
-    case 'kuwo': return '酷我'
-    case 'bilibili': return 'B站'
-    case 'migu': return '咪咕'
+    case 'netease': case 'wy': return '网易'
+    case 'qq': case 'tx': return 'QQ'
+    case 'kugou': case 'kg': return '酷狗'
+    case 'kuwo': case 'kw': return '酷我'
+    case 'migu': case 'mg': return '咪咕'
     case 'local': return '本地'
     default: return source
   }
@@ -711,7 +867,7 @@ function processSongTitle(title: string): { mainTitle: string; subTitle: string 
     color: #b6b0b2;
     background-color: transparent;
   }
-  
+
   /* 强制透明背景，用于现代模式等场景 */
   .transparent-header .song-list-header {
     background-color: transparent !important;
@@ -725,5 +881,31 @@ function processSongTitle(title: string): { mainTitle: string; subTitle: string 
 
 :root[data-theme='dark'] .song-item--card {
   border-color: rgba(255, 255, 255, 0.103);
+}
+
+/* 歌曲淡入动画效果 */
+.song-item-wrapper {
+  transition: all 0.3s ease;
+}
+
+.song-fade-enter-active,
+.song-fade-leave-active {
+  transition: all 0.5s ease;
+}
+
+.song-fade-enter-from {
+  opacity: 0;
+  filter: blur(10px);
+  transform: translateY(10px);
+}
+
+.song-fade-leave-to {
+  opacity: 0;
+  filter: blur(10px);
+  transform: translateY(-10px);
+}
+
+.song-fade-move {
+  transition: transform 0.5s ease;
 }
 </style>

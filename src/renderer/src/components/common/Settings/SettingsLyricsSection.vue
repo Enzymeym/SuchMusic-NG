@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { NCard, NSwitch, NSlider, NSelect, NAlert, NColorPicker } from 'naive-ui'
+import { NCard, NSwitch, NSlider, NSelect, NAlert, NColorPicker, NInput } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 
 // 使用设置仓库驱动歌词相关设置
@@ -395,6 +395,61 @@ const playerBackgroundStyleOptions = [
           :show-alpha="true"
           :modes="['hex']"
           style="width: 120px"
+        />
+      </div>
+    </n-card>
+
+    <div class="section-group-title" style="margin-top: 16px;">歌词源设置</div>
+
+    <n-card
+      class="setting-item"
+      :class="{ 'setting-item--highlight': props.highlightKey === 'playback.lyricsPriority' }"
+      data-setting-key="playback.lyricsPriority"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">歌词格式优先级</div>
+          <div class="sub-label">选择优先使用的歌词格式，按顺序尝试获取</div>
+        </div>
+        <n-select
+          v-model:value="settingsStore.playback.lyricsPriority"
+          :options="[
+            { label: 'TTML 格式（推荐）', value: 'ttml' },
+            { label: '逐字歌词', value: 'crlyric' },
+            { label: '普通歌词', value: 'lyric' }
+          ]"
+          multiple
+          style="width: 220px"
+        />
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
+      :class="{ 'setting-item--highlight': props.highlightKey === 'playback.ttmlMirrorUrl' }"
+      data-setting-key="playback.ttmlMirrorUrl"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">TTML 歌词镜像站</div>
+          <div class="sub-label">自定义 TTML 格式歌词的获取地址</div>
+        </div>
+        <n-input
+          v-model:value="settingsStore.playback.ttmlMirrorUrl"
+          placeholder="https://amlldb.bikonoo.com/ncm-lyrics"
+          style="width: 300px"
         />
       </div>
     </n-card>

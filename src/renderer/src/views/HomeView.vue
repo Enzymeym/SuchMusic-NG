@@ -1,14 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { NGrid, NGridItem, NIcon, NScrollbar, NButton } from 'naive-ui'
+import { NGrid, NGridItem, NIcon, NScrollbar, NButton, NPageHeader, NSpin } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import defaultCover from '@renderer/assets/icon.png'
 import { usePlayerStore } from '../stores/playerStore'
+import { useUserStore } from '../stores/userStore'
 import { fetchTopPlaylists, type TopPlaylistItem } from '../apis/netease/playlist/top-playlist'
 import { fetchToplists, type ToplistItem } from '../apis/netease/playlist/toplist'
 import { fetchTopArtists, type TopArtistItem } from '../apis/netease/artist/top-artist'
+import { throttle } from '../utils/performance'
+
 
 const playerStore = usePlayerStore()
+const userStore = useUserStore()
 const router = useRouter()
 
 // 响应式显示数量，确保只显示一行
@@ -18,16 +22,16 @@ const updateDisplayLimit = () => {
   // Use container width or window width to determine columns
   // The layout has a sidebar (200px) + padding (32px), so content area is smaller than window
   const width = document.documentElement.clientWidth
-  
+
   // We need to account for the sidebar (200px) and padding (32px)
   // Effective content width = width - 232
-  
+
   // NGrid breakpoints are based on SCREEN width, not container width by default if responsive="screen"
   // But our grid uses responsive="screen" which matches window width.
   // Let's align exactly with the breakpoints:
   // cols="2 s:3 m:4 l:5 xl:6 2xl:8"
   // s: 640, m: 768, l: 1024, xl: 1280, 2xl: 1536
-  
+
   // Always show 2 rows
   if (width >= 1536) { // 2xl (8 cols)
     displayLimit.value = 16
@@ -79,44 +83,56 @@ const topArtists = ref<
   }>
 >([])
 
+/** 页面内容是否正在加载（歌单广场、歌手广场、排行榜等需要 API 数据的部分） */
+const isContentLoading = ref(true)
+
 // 初始化加载
 onMounted(async () => {
   updateDisplayLimit()
-  window.addEventListener('resize', updateDisplayLimit)
+  window.addEventListener('resize', throttle(updateDisplayLimit, 200))
+
+  // 初始化用户登录状态
+  await userStore.initLoginState()
+  console.log('用户登录状态初始化完成，isLoggedIn:', userStore.isLoggedIn)
 
   playerStore.loadHistory()
 
-  // 并行加载所有数据
-  const [playlistData, toplistData, artistData] = await Promise.all([
-    fetchTopPlaylists(),
-    fetchToplists(),
-    fetchTopArtists()
-  ])
+  try {
+    // 并行加载所有数据
+    const [playlistData, toplistData, artistData] = await Promise.all([
+      fetchTopPlaylists(),
+      fetchToplists(),
+      fetchTopArtists()
+    ])
 
-  // 处理最热歌单
-  squarePlaylists.value = playlistData.slice(0, 24).map((item: TopPlaylistItem) => ({
-    id: item.id,
-    title: item.name,
-    cover: item.coverImgUrl || defaultCover,
-    playCount: formatPlayCount(item.playCount)
-  }))
+    // 处理最热歌单
+    squarePlaylists.value = playlistData.slice(0, 24).map((item: TopPlaylistItem) => ({
+      id: item.id,
+      title: item.name,
+      cover: item.coverImgUrl || defaultCover,
+      playCount: formatPlayCount(item.playCount)
+    }))
 
-  // 处理排行榜数据
-  toplists.value = toplistData.slice(0, 24).map((item: ToplistItem) => ({
-    id: item.id,
-    name: item.name,
-    cover: item.coverImgUrl || defaultCover,
-    playCount: formatPlayCount(item.playCount),
-    updateFrequency: item.updateFrequency ?? ''
-  }))
+    // 处理排行榜数据
+    toplists.value = toplistData.slice(0, 24).map((item: ToplistItem) => ({
+      id: item.id,
+      name: item.name,
+      cover: item.coverImgUrl || defaultCover,
+      playCount: formatPlayCount(item.playCount),
+      updateFrequency: item.updateFrequency ?? ''
+    }))
 
-  // 处理歌手数据
-  topArtists.value = artistData.slice(0, 24).map((item: TopArtistItem) => ({
-    id: item.id,
-    name: item.name,
-    cover: item.picUrl || defaultCover,
-    alias: item.alias && item.alias.length > 0 ? item.alias[0] : ''
-  }))
+    // 处理歌手数据
+    topArtists.value = artistData.slice(0, 24).map((item: TopArtistItem) => ({
+      id: item.id,
+      name: item.name,
+      cover: item.picUrl || defaultCover,
+      alias: item.alias && item.alias.length > 0 ? item.alias[0] : ''
+    }))
+  } finally {
+    // 无论加载成功或失败，都标记加载完成
+    isContentLoading.value = false
+  }
 })
 
 onUnmounted(() => {
@@ -219,20 +235,28 @@ const formatPlayCount = (count: number): string => {
 const goToPlaylistDetail = (id: number) => {
   router.push({ name: 'netease-playlist-detail', params: { id } })
 }
+
+// 格式化艺术家名称
+const formatArtists = (artists: { id: number; name: string }[]): string => {
+  return artists.map(artist => artist.name).join(' / ')
+}
 </script>
 
 <template>
   <div style="height: 100%">
-    <n-scrollbar style="height: 100%" content-style="padding: 16px 24px;">
+    <n-scrollbar
+      style="height: 100%"
+      content-style="padding: 16px 24px;"
+    >
       <div class="home-view">
         <div class="home-container">
           <!-- Greeting Section -->
           <div class="greeting-section">
             <h1 class="greeting-title">
               统计
-              <n-button secondary circle style="margin-top: 2px">
-                <n-icon size="24"><i class="mgc_right_line"></i></n-icon
-              ></n-button>
+              <n-button secondary @click="navigateTo('statistics')" style="margin-top: 2px">
+                详细统计
+              </n-button>
             </h1>
             <p class="greeting-sub">总共播放了 {{ totalPlays }} 次</p>
           </div>
@@ -263,7 +287,7 @@ const goToPlaylistDetail = (id: number) => {
 
               <!-- Top Song -->
               <div class="highlight-item big" v-if="topSong">
-                <img :src="topSong.cover || defaultCover" class="highlight-img" />
+                <img :src="topSong.cover || defaultCover" class="highlight-img" loading="lazy" decoding="async" />
                 <div class="highlight-info">
                   <div class="song-name">{{ topSong.displayTitle }}</div>
                   <div class="artist-name">{{ topSong.artist }}</div>
@@ -277,7 +301,7 @@ const goToPlaylistDetail = (id: number) => {
               <!-- Bottom Row -->
               <div class="highlight-row">
                 <div class="highlight-item small" v-if="topArtist">
-                  <img :src="topArtist.cover || defaultCover" class="highlight-img-small" />
+                  <img :src="topArtist.cover || defaultCover" class="highlight-img-small" loading="lazy" decoding="async" />
                   <div class="highlight-info">
                     <div class="tag">最爱艺人</div>
                     <div class="name">{{ topArtist.displayTitle }}</div>
@@ -291,7 +315,7 @@ const goToPlaylistDetail = (id: number) => {
                 </div>
 
                 <div class="highlight-item small" v-if="topAlbum">
-                  <img :src="topAlbum.cover || defaultCover" class="highlight-img-small" />
+                  <img :src="topAlbum.cover || defaultCover" class="highlight-img-small" loading="lazy" decoding="async" />
                   <div class="highlight-info">
                     <div class="tag">最爱专辑</div>
                     <div class="name">{{ topAlbum.displayTitle }}</div>
@@ -338,11 +362,22 @@ const goToPlaylistDetail = (id: number) => {
             >Netease Music 精选推荐</span
           >
           <div class="playlists-section">
-            <n-grid x-gap="16" y-gap="24" cols="2 s:3 m:4 l:5 xl:6 2xl:8" responsive="screen">
+            <div v-if="isContentLoading" class="section-loading">
+              <n-spin size="large" />
+              <span class="loading-text">正在加载歌单广场...</span>
+            </div>
+            <n-grid
+              v-else
+              x-gap="16"
+              y-gap="24"
+              cols="2 s:3 m:4 l:5 xl:6 2xl:8"
+              responsive="screen"
+              class="fade-blur-enter"
+            >
               <n-grid-item v-for="item in squarePlaylists.slice(0, displayLimit)" :key="item.id">
                 <div class="playlist-card" @click="goToPlaylistDetail(item.id)">
                   <div class="cover-wrapper">
-                    <img :src="item.cover" class="playlist-cover" />
+                    <img :src="item.cover" class="playlist-cover" loading="lazy" decoding="async" />
                     <div class="play-count">
                       <n-icon><i class="mgc_play_line"></i></n-icon> {{ item.playCount }}
                     </div>
@@ -367,11 +402,22 @@ const goToPlaylistDetail = (id: number) => {
             >热门歌手推荐</span
           >
           <div class="playlists-section">
-            <n-grid x-gap="24" y-gap="24" cols="2 s:3 m:4 l:5 xl:6 2xl:8" responsive="screen">
+            <div v-if="isContentLoading" class="section-loading">
+              <n-spin size="large" />
+              <span class="loading-text">正在加载歌手广场...</span>
+            </div>
+            <n-grid
+              v-else
+              x-gap="24"
+              y-gap="24"
+              cols="2 s:3 m:4 l:5 xl:6 2xl:8"
+              responsive="screen"
+              class="fade-blur-enter"
+            >
               <n-grid-item v-for="item in topArtists.slice(0, displayLimit)" :key="item.id">
                 <div class="artist-card">
                   <div class="artist-cover-wrapper">
-                    <img :src="item.cover" class="artist-cover" />
+                    <img :src="item.cover" class="artist-cover" loading="lazy" decoding="async" />
                   </div>
                   <div class="artist-name">{{ item.name }}</div>
                   <div class="artist-alias" v-if="item.alias">{{ item.alias }}</div>
@@ -391,11 +437,22 @@ const goToPlaylistDetail = (id: number) => {
             >探索最新内容</span
           >
           <div class="toplist-section">
-            <n-grid x-gap="16" y-gap="24" cols="2 s:3 m:4 l:5 xl:6 2xl:8" responsive="screen">
+            <div v-if="isContentLoading" class="section-loading">
+              <n-spin size="large" />
+              <span class="loading-text">正在加载排行榜...</span>
+            </div>
+            <n-grid
+              v-else
+              x-gap="16"
+              y-gap="24"
+              cols="2 s:3 m:4 l:5 xl:6 2xl:8"
+              responsive="screen"
+              class="fade-blur-enter"
+            >
               <n-grid-item v-for="item in toplists.slice(0, displayLimit)" :key="item.id">
                 <div class="playlist-card" @click="goToPlaylistDetail(item.id)">
                   <div class="cover-wrapper">
-                    <img :src="item.cover" class="playlist-cover" />
+                    <img :src="item.cover" class="playlist-cover" loading="lazy" decoding="async" />
                     <div class="play-count">
                       <n-icon><i class="mgc_play_line"></i></n-icon> {{ item.playCount }}
                     </div>
@@ -411,6 +468,8 @@ const goToPlaylistDetail = (id: number) => {
               </n-grid-item>
             </n-grid>
           </div>
+
+
         </div>
         <!-- Exclusive Playlists Section -->
       </div>
@@ -637,10 +696,10 @@ const goToPlaylistDetail = (id: number) => {
   /* transition: transform 0.3s; */
 }
 
-/* 
+/*
 .artist-card:hover .artist-cover {
   transform: scale(1.1);
-} 
+}
 */
 
 .artist-name {
@@ -711,6 +770,15 @@ const goToPlaylistDetail = (id: number) => {
   opacity: 1;
 }
 
+.playlist-card.disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.playlist-card.disabled:hover .play-overlay {
+  opacity: 0;
+}
+
 .playlist-title {
   font-size: 14px;
   line-height: 1.4;
@@ -720,6 +788,7 @@ const goToPlaylistDetail = (id: number) => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
+
 
 .stats-section {
   margin-bottom: 32px;
@@ -945,6 +1014,16 @@ const goToPlaylistDetail = (id: number) => {
   z-index: 1;
 }
 
+@media (max-width: 950px) {
+  /* 窗口较小时调整统计卡片网格布局，隐藏活跃动态区域 */
+  .stats-card {
+    grid-template-columns: 1fr 1.5fr;
+  }
+  .stats-right {
+    display: none !important;
+  }
+}
+
 .stats-card::before {
   content: '';
   position: absolute;
@@ -961,5 +1040,39 @@ const goToPlaylistDetail = (id: number) => {
   z-index: -1;
   transform: scale(1.5);
   /* Prevent white edges from blur */
+}
+
+/* ========== 加载指示器样式 ========== */
+.section-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  min-height: 200px;
+  padding: 48px 0;
+}
+
+.loading-text {
+  font-size: 14px;
+  color: var(--n-text-color-3);
+}
+
+/* ========== 淡入模糊进入动画 ========== */
+.fade-blur-enter {
+  animation: fadeBlurIn 0.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes fadeBlurIn {
+  from {
+    opacity: 0;
+    filter: blur(12px);
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0);
+  }
 }
 </style>

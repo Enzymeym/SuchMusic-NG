@@ -96,7 +96,7 @@ async function processPluginFile(filePath: string): Promise<ProcessPluginFileRes
     }
   } else {
     // 使用统一转换器解析本地落雪插件
-    single = transformSnowdropPlugin(originalCode, { sourceType: 'lx' })
+    single = await transformSnowdropPlugin(originalCode, { sourceType: 'lx' })
   }
 
   const singleDurationMs = single.stats.durationMs
@@ -282,37 +282,39 @@ export function registerPluginHandlers(): void {
   // 加载所有保存的插件文件
   ipcMain.handle('snowdrop:plugin:load-all', async () => {
     const config = await getPluginConfig()
-    const paths = config.pluginPaths
-    if (!paths.length) {
-      return { canceled: true, reason: 'no-paths', results: [] }
-    }
-
-    const results: ProcessPluginFileResult[] = []
+    const paths = config.pluginPaths || []
+    const results: any[] = []
     const errors: string[] = []
 
-    // 并行加载所有插件
     await Promise.all(
-      paths.map(async (fp) => {
+      paths.map(async (p) => {
         try {
-          // 检查文件是否存在
-          await fs.access(fp)
-          const res = await processPluginFile(fp)
-          results.push(res)
-        } catch (err) {
-          console.error(`Failed to load plugin ${fp}:`, err)
-          // 如果文件不存在或读取失败，可以选择不报错，或者记录错误
-          // 这里我们简单记录错误
-          errors.push(`File ${fp}: ${String(err)}`)
+          const result = await processPluginFile(p)
+          results.push(result)
+        } catch (err: any) {
+          errors.push(`处理插件文件 ${p} 失败: ${err.message}`)
         }
       })
     )
+
+    const activePath = config.activePluginPath ?? null
+
+    // 确保激活的插件也被加载以触发更新检查等事件
+    if (activePath && !paths.includes(activePath)) {
+      try {
+        const result = await processPluginFile(activePath)
+        results.push(result)
+      } catch (err: any) {
+        errors.push(`处理激活插件文件 ${activePath} 失败: ${err.message}`)
+      }
+    }
 
     return {
       canceled: false,
       results,
       errors,
       // 当前被选中的插件路径，供前端高亮与使用
-      activeFilePath: config.activePluginPath ?? null
+      activeFilePath: activePath
     }
   })
 
@@ -364,10 +366,10 @@ lx.send(lx.EVENT_NAMES.inited, {
 `
 
     const memoryBefore = process.memoryUsage().heapUsed
-    const single = transformSnowdropPlugin(sampleCode, { sourceType: 'lx' })
+    const single = await transformSnowdropPlugin(sampleCode, { sourceType: 'lx' })
     const singleDurationMs = single.stats.durationMs
 
-    const bench = benchmarkSnowdropTransform(sampleCode, 1000)
+    const bench = await benchmarkSnowdropTransform(sampleCode, 10) // 减少测试次数以加快响应
     const memoryAfter = process.memoryUsage().heapUsed
     const memoryDeltaMb = (memoryAfter - memoryBefore) / (1024 * 1024)
 

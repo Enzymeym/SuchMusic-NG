@@ -1,11 +1,35 @@
 // 提取图片主色与中性色的工具函数（纯前端实现）
 
+/**
+ * 图片颜色调色板接口
+ * @property main - 主色（高饱和度）
+ * @property secondary - 次主色
+ * @property third - 第三色
+ * @property neutral - 中性色（灰度/低饱和）
+ * @property neutralVariant - 中性色变体（亮/暗）
+ */
 export interface ImageColorPalette {
-  main: string // 主色（高饱和度）
-  secondary: string // 次主色
-  third: string // 第三色
-  neutral: string // 中性色（灰度/低饱和）
-  neutralVariant: string // 中性色变体（亮/暗）
+  main: string
+  secondary: string
+  third: string
+  neutral: string
+  neutralVariant: string
+}
+
+/**
+ * 提取颜色选项接口
+ * @property isLightMode - 是否为浅色模式，浅色模式下会自动调整颜色以保证可读性
+ * @property brightnessThreshold - 亮度阈值，默认 0.6，超过此值的颜色会被压暗
+ * @property saturationBoost - 饱和度提升系数，默认 1.3，用于提升低饱和度颜色
+ * @property darkenFactor - 压暗系数，默认 0.75，用于降低过亮颜色的亮度
+ * @property minSaturation - 最小饱和度阈值，默认 0.3，低于此值会提升饱和度
+ */
+export interface ExtractColorOptions {
+  isLightMode?: boolean
+  brightnessThreshold?: number
+  saturationBoost?: number
+  darkenFactor?: number
+  minSaturation?: number
 }
 
 interface BucketStat {
@@ -27,7 +51,13 @@ interface BucketColor {
 const MAX_SAMPLE_SIZE = 96 // 降采样边长，控制计算量
 const COLOR_QUANT_SHIFT = 3 // 每通道量化位移（8->5bit）
 
-// 将 RGB 转为 HSL（0-1）
+/**
+ * 将 RGB 转为 HSL（0-1）
+ * @param r - 红色通道值（0-255）
+ * @param g - 绿色通道值（0-255）
+ * @param b - 蓝色通道值（0-255）
+ * @returns 返回包含 h（色相）、s（饱和度）、l（亮度）的对象
+ */
 const rgbToHsl = (r: number, g: number, b: number) => {
   r /= 255
   g /= 255
@@ -36,13 +66,62 @@ const rgbToHsl = (r: number, g: number, b: number) => {
   const min = Math.min(r, g, b)
   const l = (max + min) / 2
   let s = 0
+  let h = 0
 
   if (max !== min) {
     const d = max - min
     s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+    switch (max) {
+      case r:
+        h = (g - b) / d + (g < b ? 6 : 0)
+        break
+      case g:
+        h = (b - r) / d + 2
+        break
+      case b:
+        h = (r - g) / d + 4
+        break
+    }
+    h /= 6
   }
 
-  return { s, l }
+  return { h, s, l }
+}
+
+/**
+ * 将 HSL 转为 RGB
+ * @param h - 色相（0-1）
+ * @param s - 饱和度（0-1）
+ * @param l - 亮度（0-1）
+ * @returns 返回包含 r、g、b 的对象（0-255）
+ */
+const hslToRgb = (h: number, s: number, l: number) => {
+  let r: number, g: number, b: number
+
+  if (s === 0) {
+    r = g = b = l
+  } else {
+    const hue2rgb = (p: number, q: number, t: number) => {
+      if (t < 0) t += 1
+      if (t > 1) t -= 1
+      if (t < 1 / 6) return p + (q - p) * 6 * t
+      if (t < 1 / 2) return q
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6
+      return p
+    }
+
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s
+    const p = 2 * l - q
+    r = hue2rgb(p, q, h + 1 / 3)
+    g = hue2rgb(p, q, h)
+    b = hue2rgb(p, q, h - 1 / 3)
+  }
+
+  return {
+    r: Math.round(r * 255),
+    g: Math.round(g * 255),
+    b: Math.round(b * 255)
+  }
 }
 
 // 计算两个颜色的欧氏距离（RGB 空间）
@@ -53,10 +132,76 @@ const colorDistance = (a: { r: number; g: number; b: number }, b: { r: number; g
   return Math.sqrt(dr * dr + dg * dg + db * db)
 }
 
-// 将 RGB 转为 #rrggbb
+/**
+ * 将 RGB 转为 #rrggbb
+ * @param r - 红色通道值（0-255）
+ * @param g - 绿色通道值（0-255）
+ * @param b - 蓝色通道值（0-255）
+ * @returns 返回 hex 颜色字符串
+ */
 const rgbToHex = (r: number, g: number, b: number) => {
   const toHex = (v: number) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`
+}
+
+/**
+ * 将 hex 颜色转为 RGB
+ * @param hex - hex 颜色字符串（支持 #rgb 或 #rrggbb 格式）
+ * @returns 返回包含 r、g、b 的对象，转换失败返回 null
+ */
+const hexToRgb = (hex: string): { r: number; g: number; b: number } | null => {
+  let s = hex.trim()
+  if (s.startsWith('#')) s = s.slice(1)
+  if (s.length === 3) {
+    s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2]
+  }
+  if (s.length !== 6) return null
+  const r = parseInt(s.slice(0, 2), 16)
+  const g = parseInt(s.slice(2, 4), 16)
+  const b = parseInt(s.slice(4, 6), 16)
+  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return null
+  return { r, g, b }
+}
+
+/**
+ * 在浅色模式下调整颜色，通过压暗和增加饱和度来保证可读性
+ * @param hexColor - 原始 hex 颜色字符串
+ * @param options - 调整选项
+ * @returns 返回调整后的 hex 颜色字符串
+ */
+export const adjustColorForLightMode = (
+  hexColor: string,
+  options?: ExtractColorOptions
+): string => {
+  const {
+    brightnessThreshold = 0.5,
+    saturationBoost = 1.5,
+    darkenFactor = 0.6,
+    minSaturation = 0.35
+  } = options || {}
+
+  const rgb = hexToRgb(hexColor)
+  if (!rgb) return hexColor
+
+  // 转换为 HSL
+  const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b)
+
+  // 如果亮度超过阈值，按比例压暗
+  if (hsl.l > brightnessThreshold) {
+    const excessBrightness = hsl.l - brightnessThreshold
+    const darkenAmount = excessBrightness * (1 - darkenFactor)
+    hsl.l = Math.max(0.15, hsl.l - darkenAmount)
+  }
+
+  // 如果饱和度低于阈值，提升饱和度
+  if (hsl.s < minSaturation) {
+    hsl.s = Math.min(1, hsl.s * saturationBoost)
+  }
+
+  // 转换回 RGB
+  const newRgb = hslToRgb(hsl.h, hsl.s, hsl.l)
+
+  return rgbToHex(newRgb.r, newRgb.g, newRgb.b)
 }
 
 // 从 ImageData 中量化颜色并统计直方图
@@ -184,8 +329,16 @@ export const fetchImageAsDataURL = async (src: string): Promise<string> => {
   })
 }
 
-// 从图片中提取主色、中性色等调色板信息
-export const extractImageColors = async (src: string | HTMLImageElement): Promise<ImageColorPalette> => {
+/**
+ * 从图片中提取主色、中性色等调色板信息
+ * @param src - 图片源，可以是 URL 字符串或 HTMLImageElement
+ * @param options - 提取选项，包含浅色模式调整参数
+ * @returns 返回包含主色、次主色、第三色、中性色等的调色板对象
+ */
+export const extractImageColors = async (
+  src: string | HTMLImageElement,
+  options?: ExtractColorOptions
+): Promise<ImageColorPalette> => {
   let img: HTMLImageElement
 
   if (typeof src === 'string') {
@@ -283,10 +436,22 @@ export const extractImageColors = async (src: string | HTMLImageElement): Promis
   const neutralColor = neutralSorted[0] ?? mainColor
   const neutralVariantHex = deriveNeutralVariant(neutralSorted[1] ?? neutralColor)
 
+  // 提取原始颜色
+  let mainHex = rgbToHex(mainColor.r, mainColor.g, mainColor.b)
+  let secondaryHex = rgbToHex(secondaryColor.r, secondaryColor.g, secondaryColor.b)
+  let thirdHex = rgbToHex(thirdColor.r, thirdColor.g, thirdColor.b)
+
+  // 如果是浅色模式，对主色、次主色、第三色应用颜色调整
+  if (options?.isLightMode) {
+    mainHex = adjustColorForLightMode(mainHex, options)
+    secondaryHex = adjustColorForLightMode(secondaryHex, options)
+    thirdHex = adjustColorForLightMode(thirdHex, options)
+  }
+
   return {
-    main: rgbToHex(mainColor.r, mainColor.g, mainColor.b),
-    secondary: rgbToHex(secondaryColor.r, secondaryColor.g, secondaryColor.b),
-    third: rgbToHex(thirdColor.r, thirdColor.g, thirdColor.b),
+    main: mainHex,
+    secondary: secondaryHex,
+    third: thirdHex,
     neutral: rgbToHex(neutralColor.r, neutralColor.g, neutralColor.b),
     neutralVariant: neutralVariantHex
   }

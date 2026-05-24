@@ -1,7 +1,10 @@
 import { defineStore } from 'pinia'
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
+import { useOsTheme } from 'naive-ui'
 import { webAudioEngine } from '../audio/audio-engine'
 import { setPrimaryColor, setGlobalFontFamily } from '../themes'
+import { usePlayerStore } from './playerStore'
+import { extractImageColors } from '../utils/imageColors'
 
 export interface GeneralSettings {
   onlineServices: boolean
@@ -24,10 +27,12 @@ export interface AppearanceSettings {
   customThemeColor: string
   playlistLayoutStyle: 'classic' | 'modern'
   songListStyle: 'card' | 'plain'
+  themeColorFollowsCover: boolean
 }
 
 export interface PlaybackSettings {
   autoHideCursorWhenControlsHidden: boolean
+  autoHidePlayerPageFooter: boolean
   limiterStrength: number
   eqEnabled: boolean
   eqGains: number[]
@@ -47,6 +52,10 @@ export interface PlaybackSettings {
   desktopLyricsAlign: 'left' | 'center' | 'right'
   desktopLyricsLocked: boolean
   desktopLyricsForceDuet: boolean
+  preloadTriggerThreshold: number // 预加载触发阈值（0-1，默认0.85）
+  preloadQualityLevel: string // 预加载质量级别
+  lyricsPriority: string[] // 歌词格式优先级
+  ttmlMirrorUrl: string // TTML 歌词镜像站地址
 }
 
 export interface LocalSettings {
@@ -70,7 +79,7 @@ export const useSettingsStore = defineStore('settings', () => {
     orpheusProtocol: true,
     autoCheckUpdate: true,
     updateChannel: 'stable',
-    searchResultOrder: ['tx', 'kg', 'wy', 'kw', 'bilibili', 'mg']
+    searchResultOrder: ['tx', 'kg', 'wy', 'kw', 'mg']
   })
 
   const appearance = ref<AppearanceSettings>({
@@ -82,11 +91,13 @@ export const useSettingsStore = defineStore('settings', () => {
     themeColorPreset: 'default',
     customThemeColor: '#2C8EFD',
     playlistLayoutStyle: 'classic',
-    songListStyle: 'card'
+    songListStyle: 'card',
+    themeColorFollowsCover: false
   })
 
   const playback = ref<PlaybackSettings>({
     autoHideCursorWhenControlsHidden: true,
+    autoHidePlayerPageFooter: true,
     limiterStrength: 0.6,
     eqEnabled: false,
     eqGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -112,7 +123,14 @@ export const useSettingsStore = defineStore('settings', () => {
     desktopLyricsShowNextLine: true,
     desktopLyricsAlign: 'center',
     desktopLyricsLocked: false,
-    desktopLyricsForceDuet: false
+    desktopLyricsForceDuet: false,
+    // 预加载设置
+    preloadTriggerThreshold: 0.85, // 预加载触发阈值（0-1）
+    preloadQualityLevel: '128k', // 预加载质量级别
+    // 歌词格式优先级
+    lyricsPriority: ['ttml', 'crlyric', 'lyric'],
+    // TTML 歌词镜像站地址
+    ttmlMirrorUrl: 'https://amlldb.bikonoo.com/ncm-lyrics'
   })
 
   const local = ref<LocalSettings>({
@@ -126,8 +144,19 @@ export const useSettingsStore = defineStore('settings', () => {
     preferredQuality: '128k'
   })
 
+  // 获取系统主题
+  const osThemeRef = useOsTheme()
+
+  // 计算当前是否为深色模式
+  const isDark = computed(() => {
+    const mode = appearance.value.themeMode
+    if (mode === 'dark') return true
+    if (mode === 'light') return false
+    return osThemeRef.value === 'dark'
+  })
+
   // --- Actions ---
-  
+
   // 构造统一的字体栈字符串
   const buildFontStack = (font: string): string => {
     // 组合用户选择字体与系统通用字体栈
@@ -147,22 +176,11 @@ export const useSettingsStore = defineStore('settings', () => {
     { immediate: true }
   )
 
-  // 同步主题主色到 Naive UI 主题
-  watch(
-    () => appearance.value.customThemeColor,
-    (color) => {
-      if (color) {
-        setPrimaryColor(color)
-      }
-    },
-    { immediate: true }
-  )
-
   // 同步压限器设置到音频引擎
   watch(
     () => playback.value.limiterStrength,
-    (val) => {
-      webAudioEngine.setLimiterStrength(val)
+    async (val) => {
+      await webAudioEngine.setLimiterStrength(val)
     },
     { immediate: true }
   )
@@ -170,8 +188,8 @@ export const useSettingsStore = defineStore('settings', () => {
   // 同步均衡器启用状态
   watch(
     () => playback.value.eqEnabled,
-    (val) => {
-      webAudioEngine.setEqEnabled(val)
+    async (val) => {
+      await webAudioEngine.setEqEnabled(val)
     },
     { immediate: true }
   )
@@ -179,10 +197,70 @@ export const useSettingsStore = defineStore('settings', () => {
   // 同步均衡器各频段增益
   watch(
     () => playback.value.eqGains,
-    (val) => {
-      webAudioEngine.setEqGains(val)
+    async (val) => {
+      await webAudioEngine.setEqGains(val)
     },
     { immediate: true, deep: true }
+  )
+
+  // 同步关闭行为设置到主进程
+  watch(
+    () => general.value.closeAction,
+    (val) => {
+      if (window.electron && window.electron.ipcRenderer) {
+        window.electron.ipcRenderer.send('settings:closeAction', val)
+      }
+    },
+    { immediate: true }
+  )
+
+  // 主题色跟随封面逻辑
+  // 延迟获取 playerStore 以避免循环依赖
+  let playerStore: ReturnType<typeof usePlayerStore> | null = null
+  const getPlayerStore = () => {
+    if (!playerStore) playerStore = usePlayerStore()
+    return playerStore
+  }
+
+  // 记录最后一次提取的主色，防止切歌太快导致的异步覆盖
+  let lastCoverUrl = ''
+
+  watch(
+    () => {
+      const ps = getPlayerStore()
+      return {
+        followsCover: appearance.value.themeColorFollowsCover,
+        cover: ps.currentSong?.cover,
+        customThemeColor: appearance.value.customThemeColor,
+        isLightMode: !isDark.value
+      }
+    },
+    async ({ followsCover, cover, customThemeColor, isLightMode }) => {
+      if (followsCover) {
+        if (cover) {
+          lastCoverUrl = cover
+          try {
+            const colors = await extractImageColors(cover, { isLightMode })
+            // 确保当前封面没有发生变化，再应用颜色
+            if (lastCoverUrl === cover) {
+              setPrimaryColor(colors.main)
+            }
+          } catch (e) {
+            console.error('Failed to extract theme color from cover', e)
+            if (lastCoverUrl === cover) {
+              setPrimaryColor(customThemeColor)
+            }
+          }
+        } else {
+          // 如果开启了跟随封面，但当前没有封面，则回退到自定义颜色
+          setPrimaryColor(customThemeColor)
+        }
+      } else {
+        // 如果没有开启跟随封面，则使用自定义颜色
+        setPrimaryColor(customThemeColor)
+      }
+    },
+    { immediate: true }
   )
 
   // Persistence (Optional for now, can be expanded later)
@@ -212,10 +290,22 @@ export const useSettingsStore = defineStore('settings', () => {
     }))
   }
 
-  // Watch for changes to save
+  /**
+   * 防抖保存函数，减少频繁 JSON 序列化带来的性能开销
+   * @param delay - 防抖延迟时间（毫秒）
+   */
+  let saveTimer: ReturnType<typeof setTimeout> | null = null
+  const debouncedSave = () => {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = setTimeout(() => {
+      saveSettings()
+    }, 500)
+  }
+
+  // 监听每个设置分组的顶层属性变化，使用浅监听替代 deep watch
   watch([general, appearance, playback, local, source], () => {
-    saveSettings()
-  }, { deep: true })
+    debouncedSave()
+  }, { deep: false })
 
   // Initialize
   loadSettings()

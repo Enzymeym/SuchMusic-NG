@@ -1,9 +1,20 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, h } from 'vue'
-import { NButton, NDivider, NTag, NSpin, NModal, NCode, NDropdown, NInput, NCard, NSelect, useMessage } from 'naive-ui'
+import {
+  NButton,
+  NDivider,
+  NTag,
+  NSpin,
+  NModal,
+  NCode,
+  NDropdown,
+  NInput,
+  NCard,
+  NSelect,
+  useMessage
+} from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePluginStore } from '../../../stores/pluginStore'
-import { PluginInitModal } from '../PluginInitModal'
 import type { Plugin } from '../../../types/plugin'
 import {
   runSnowdropLoadAllPlugins,
@@ -64,21 +75,18 @@ const currentLogResult = ref<SnowdropTransformTestResult | null>(null)
 const suchPlugins = ref<Plugin[]>([])
 // 当前激活的 Such 插件ID
 const activeSuchPluginId = ref<string | null>(null)
-// 插件初始化弹窗显示状态
-const showPluginInitModal = ref(false)
-// 当前要初始化的插件ID
-const currentInitPluginId = ref<string | undefined>(undefined)
 
 const qualityLabelMap: Record<string, string> = {
   '128k': '标准音质 (128k)',
   '320k': '高音质 (320k)',
-  'flac': '无损音质 (FLAC)',
-  'flac24bit': 'Hi-Res 无损 (24bit)',
-  'hires': 'Hi-Res',
-  'master': '母带级 (Master)',
-  'atmos': '杜比全景声 (Dolby)',
+  flac: '无损音质 (FLAC)',
+  flac24bit: 'Hi-Res 无损 (24bit)',
+  hires: 'Hi-Res',
+  master: '母带级 (Master)',
+  atmos: '杜比全景声 (Dolby)'
 }
 
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
 const getQualityLabel = (q: string) => qualityLabelMap[q] || q
 
 const qualityOptions = computed(() => {
@@ -89,9 +97,9 @@ const qualityOptions = computed(() => {
   if (currentPlatform !== 'all') {
     for (const plugin of plugins.value) {
       if (plugin.sources && Array.isArray(plugin.sources)) {
-        const targetSource = plugin.sources.find(s => s.id === currentPlatform)
+        const targetSource = plugin.sources.find((s) => s.id === currentPlatform)
         if (targetSource && targetSource.qualities) {
-          targetSource.qualities.forEach(q => availableQualities.add(q))
+          targetSource.qualities.forEach((q) => availableQualities.add(q))
         }
       }
     }
@@ -99,9 +107,9 @@ const qualityOptions = computed(() => {
     // 如果是所有平台，则收集所有平台支持的音质
     for (const plugin of plugins.value) {
       if (plugin.sources && Array.isArray(plugin.sources)) {
-        plugin.sources.forEach(src => {
+        plugin.sources.forEach((src) => {
           if (src.qualities) {
-            src.qualities.forEach(q => availableQualities.add(q))
+            src.qualities.forEach((q) => availableQualities.add(q))
           }
         })
       }
@@ -125,35 +133,37 @@ const qualityOptions = computed(() => {
       if (idxB !== -1) return 1
       return a.localeCompare(b)
     })
-    .map(q => ({
+    .map((q) => ({
       label: getQualityLabel(q),
       value: q
     }))
 })
 
 // 当可用音质列表变化时，如果当前选中的音质不再可用，重置为第一个可用音质
-watch(qualityOptions, (newOptions) => {
-  if (newOptions.length > 0) {
-    const currentQuality = settingsStore.source.preferredQuality
-    const isAvailable = newOptions.some(opt => opt.value === currentQuality)
-    if (!isAvailable) {
-      // 优先尝试保留原有选择的意图（例如都是无损，只是名字变了？暂不处理复杂映射）
-      // 简单回退到 128k 或者列表第一项
-      const fallback = newOptions.find(o => o.value === '128k') || newOptions[0]
-      settingsStore.source.preferredQuality = fallback.value
+watch(
+  qualityOptions,
+  (newOptions) => {
+    if (newOptions.length > 0) {
+      const currentQuality = settingsStore.source.preferredQuality
+      const isAvailable = newOptions.some((opt) => opt.value === currentQuality)
+      if (!isAvailable) {
+        // 优先尝试保留原有选择的意图（例如都是无损，只是名字变了？暂不处理复杂映射）
+        // 简单回退到 128k 或者列表第一项
+        const fallback = newOptions.find((o) => o.value === '128k') || newOptions[0]
+        settingsStore.source.preferredQuality = fallback.value
+      }
     }
-  }
-}, { deep: true })
+  },
+  { deep: true }
+)
 
 const platformOptions = computed(() => {
-  const options = [
-    { label: '所有平台 (默认)', value: 'all' }
-  ]
+  const options = [{ label: '所有平台 (默认)', value: 'all' }]
 
   // 遍历所有已加载的插件，提取 sources
-  plugins.value.forEach(plugin => {
+  plugins.value.forEach((plugin) => {
     if (plugin.sources && Array.isArray(plugin.sources)) {
-      plugin.sources.forEach(src => {
+      plugin.sources.forEach((src) => {
         if (src.id === 'bilibili' || src.id === 'mg' || src.id === 'migu') return
         options.push({
           label: src.name || src.id,
@@ -164,12 +174,12 @@ const platformOptions = computed(() => {
   })
 
   // 去重
-  const uniqueOptions: {label: string, value: string}[] = []
+  const uniqueOptions: { label: string; value: string }[] = []
   const map = new Map()
   for (const item of options) {
-    if(!map.has(item.value)){
-        map.set(item.value, true);
-        uniqueOptions.push(item);
+    if (!map.has(item.value)) {
+      map.set(item.value, true)
+      uniqueOptions.push(item)
     }
   }
   return uniqueOptions
@@ -186,8 +196,12 @@ const loadAllPlugins = async (): Promise<void> => {
   loading.value = true
   errorMessage.value = null
   try {
-    const { canceled, results, errors, activeFilePath: remoteActive } =
-      await runSnowdropLoadAllPlugins()
+    const {
+      canceled,
+      results,
+      errors,
+      activeFilePath: remoteActive
+    } = await runSnowdropLoadAllPlugins()
     if (!canceled && results && results.length) {
       plugins.value = results
       // 如果主进程已有激活插件且仍然存在，则直接使用
@@ -216,8 +230,6 @@ const loadAllPlugins = async (): Promise<void> => {
     loading.value = false
   }
 }
-
-
 
 // 打开指定插件的日志视图
 const handleOpenPluginLogs = (result: SnowdropTransformTestResult): void => {
@@ -250,9 +262,7 @@ const handleRemovePlugin = async (index: number): Promise<void> => {
 }
 
 // 将指定插件设置为当前使用的插件
-const handleSetActivePlugin = async (
-  result: SnowdropTransformTestResult
-): Promise<void> => {
+const handleSetActivePlugin = async (result: SnowdropTransformTestResult): Promise<void> => {
   if (!result.filePath || result.filePath === activeFilePath.value) {
     return
   }
@@ -279,23 +289,11 @@ const loadSuchPlugins = async (): Promise<void> => {
   try {
     await pluginStore.loadAllPlugins()
     // 只显示 Such 类型的插件
-    suchPlugins.value = pluginStore.installedPlugins.filter(p => p.type === 'such')
+    suchPlugins.value = pluginStore.installedPlugins.filter((p) => p.type === 'such')
     activeSuchPluginId.value = pluginStore.activePluginId
   } catch (err: unknown) {
     console.error('加载 Such 插件失败:', err)
   }
-}
-
-
-
-// @ts-nocheck - unused such plugin code
-
-/**
- * 处理插件初始化完成
- */
-const handlePluginInitialized = async (_pluginId: string): Promise<void> => {
-  await loadSuchPlugins()
-  message.success('插件初始化完成！')
 }
 
 /**
@@ -321,7 +319,7 @@ const handleUnifiedImportFile = async () => {
   errorMessage.value = null
   try {
     const result = await pluginStore.importPluginFromFile()
-    
+
     if (result.canceled) {
       return
     }
@@ -336,14 +334,9 @@ const handleUnifiedImportFile = async () => {
         await loadAllPlugins()
         message.success(`落雪插件 "${result.plugin.info.name}" 导入成功`)
       } else {
-        if (result.plugin.configUI && result.plugin.configUI.length > 0) {
-          currentInitPluginId.value = result.plugin.id
-          showPluginInitModal.value = true
-        } else {
-          await pluginStore.activatePlugin(result.plugin.id)
-          message.success(`Such 插件 "${result.plugin.info.name}" 导入并激活成功`)
-        }
+        await pluginStore.activatePlugin(result.plugin.id)
         await loadSuchPlugins()
+        message.success(`Such 插件 "${result.plugin.info.name}" 导入并激活成功`)
       }
     }
   } catch (err: any) {
@@ -362,13 +355,13 @@ const handleImportUrlConfirm = async (): Promise<void> => {
     errorMessage.value = '请输入有效的 URL 地址'
     return
   }
-  
+
   loading.value = true
   errorMessage.value = null
-  
+
   try {
     const result = await pluginStore.importPluginFromUrl(url)
-    
+
     if (result.error) {
       errorMessage.value = result.error
       return
@@ -379,14 +372,9 @@ const handleImportUrlConfirm = async (): Promise<void> => {
         await loadAllPlugins()
         message.success(`落雪插件 "${result.plugin.info.name}" 导入成功`)
       } else {
-        if (result.plugin.configUI && result.plugin.configUI.length > 0) {
-          currentInitPluginId.value = result.plugin.id
-          showPluginInitModal.value = true
-        } else {
-          await pluginStore.activatePlugin(result.plugin.id)
-          message.success(`Such 插件 "${result.plugin.info.name}" 导入并激活成功`)
-        }
+        await pluginStore.activatePlugin(result.plugin.id)
         await loadSuchPlugins()
+        message.success(`Such 插件 "${result.plugin.info.name}" 导入并激活成功`)
       }
       showImportUrlModal.value = false
       importUrl.value = ''
@@ -411,7 +399,7 @@ const handleConfigureSuchPlugin = (plugin: Plugin) => {
  */
 const handleSetSuchPluginActive = async (plugin: Plugin) => {
   if (plugin.id === activeSuchPluginId.value) return
-  
+
   loading.value = true
   try {
     await pluginStore.activatePlugin(plugin.id)
@@ -509,20 +497,16 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
       </div>
     </n-card>
 
-    <div class="section-group-title" style="margin-top: 24px;">落雪音源插件</div>
+    <div class="section-group-title" style="margin-top: 24px">落雪音源插件</div>
 
-    <div
-      data-setting-key="source.plugins"
-      :bordered="true"
-      size="small"
-    >
+    <div data-setting-key="source.plugins" :bordered="true" size="small">
       <div class="source-settings">
         <div class="source-settings-actions">
           <n-dropdown trigger="click" :options="importOptions" @select="handleImportSelect">
             <n-button type="primary" :loading="loading">
               导入插件
               <template #icon>
-                <i class="mgc_arrow_down_line" style="margin-left: 4px;"></i>
+                <i class="mgc_arrow_down_line" style="margin-left: 4px"></i>
               </template>
             </n-button>
           </n-dropdown>
@@ -543,10 +527,16 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
 
         <template v-else-if="plugins.length">
           <div class="plugin-list">
-            <div
+            <n-card
               v-for="(result, index) in plugins"
               :key="result.filePath || index"
               class="setting-item"
+              :bordered="true"
+              size="small"
+              :style="{
+                backgroundColor: props.settingItemBgColor,
+                borderColor: props.settingItemBorderColor
+              }"
             >
               <div
                 class="plugin-card"
@@ -618,7 +608,7 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
                   </div>
                 </div>
               </div>
-            </div>
+            </n-card>
           </div>
         </template>
 
@@ -628,7 +618,7 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
       </div>
     </div>
 
-    <div class="section-group-title" style="margin-top: 32px;">Such 插件</div>
+    <div class="section-group-title" style="margin-top: 32px">Such 插件</div>
 
     <div class="source-settings">
       <div class="source-settings-actions">
@@ -641,16 +631,21 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
 
       <template v-if="suchPlugins.length">
         <div class="plugin-list">
-          <div
+          <n-card
             v-for="plugin in suchPlugins"
             :key="plugin.id"
             class="setting-item"
+            :bordered="true"
+            size="small"
+            :style="{
+              backgroundColor: props.settingItemBgColor,
+              borderColor: props.settingItemBorderColor
+            }"
           >
             <div
               class="plugin-card"
               :class="{
                 'plugin-card--active': plugin.id === activeSuchPluginId,
-                'plugin-card--uninitialized': plugin.status === 'uninitialized',
                 'plugin-card--error': plugin.status === 'error'
               }"
             >
@@ -668,20 +663,7 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
                     >
                       当前使用
                     </n-tag>
-                    <n-tag
-                      v-else-if="plugin.status === 'uninitialized'"
-                      size="small"
-                      type="warning"
-                      round
-                    >
-                      待初始化
-                    </n-tag>
-                    <n-tag
-                      v-else-if="plugin.status === 'error'"
-                      size="small"
-                      type="error"
-                      round
-                    >
+                    <n-tag v-else-if="plugin.status === 'error'" size="small" type="error" round>
                       错误
                     </n-tag>
                     <n-tag
@@ -713,17 +695,7 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
                   <div v-else-if="plugin.status !== 'error'" class="plugin-line">暂无音源信息</div>
                 </div>
                 <div class="plugin-card-right">
-                  <template v-if="plugin.status === 'uninitialized'">
-                    <n-button
-                      size="small"
-                      type="warning"
-                      tertiary
-                      @click="handleConfigureSuchPlugin(plugin)"
-                    >
-                      初始化
-                    </n-button>
-                  </template>
-                  <template v-else-if="plugin.status === 'error'">
+                  <template v-if="plugin.status === 'error'">
                     <!-- Error state actions -->
                   </template>
                   <template v-else-if="plugin.status === 'active'">
@@ -736,11 +708,7 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
                     >
                       设为当前
                     </n-button>
-                    <n-button
-                      size="small"
-                      tertiary
-                      @click="handleDeactivateSuchPlugin(plugin)"
-                    >
+                    <n-button size="small" tertiary @click="handleDeactivateSuchPlugin(plugin)">
                       停用
                     </n-button>
                   </template>
@@ -755,7 +723,11 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
                     </n-button>
                   </template>
                   <n-button
-                    v-if="plugin.configUI && plugin.configUI.length > 0 && plugin.status !== 'uninitialized' && plugin.status !== 'error'"
+                    v-if="
+                      plugin.configUI &&
+                      plugin.configUI.length > 0 &&
+                      plugin.status !== 'error'
+                    "
                     size="small"
                     tertiary
                     @click="handleConfigureSuchPlugin(plugin)"
@@ -763,18 +735,18 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
                     配置
                   </n-button>
                   <n-button
-                    size="small"
-                    type="error"
-                    tertiary
-                    class="plugin-uninstall-btn"
-                    @click="handleUninstallSuchPlugin(plugin)"
-                  >
-                    卸载
-                  </n-button>
+                      size="small"
+                      type="error"
+                      tertiary
+                      class="plugin-uninstall-btn"
+                      @click="handleUninstallSuchPlugin(plugin)"
+                    >
+                      卸载
+                    </n-button>
+                  </div>
                 </div>
               </div>
-            </div>
-          </div>
+            </n-card>
         </div>
       </template>
 
@@ -810,7 +782,9 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
     <n-modal
       v-model:show="showImportUrlModal"
       preset="dialog"
-      :title="importUrlType === 'snowdrop' ? '从在线 URL 导入落雪插件' : '从在线 URL 导入 Such 插件'"
+      :title="
+        importUrlType === 'snowdrop' ? '从在线 URL 导入落雪插件' : '从在线 URL 导入 Such 插件'
+      "
       style="width: 520px"
     >
       <div class="import-url-body">
@@ -820,9 +794,11 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
         <n-input
           v-model:value="importUrl"
           type="text"
-          :placeholder="importUrlType === 'snowdrop'
-            ? '例如：https://example.com/my-snowdrop-plugin.js'
-            : '例如：https://example.com/my-such-plugin.js'"
+          :placeholder="
+            importUrlType === 'snowdrop'
+              ? '例如：https://example.com/my-snowdrop-plugin.js'
+              : '例如：https://example.com/my-such-plugin.js'
+          "
         />
       </div>
       <template #action>
@@ -832,14 +808,6 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
         </n-button>
       </template>
     </n-modal>
-
-    <!-- Such 插件初始化弹窗 -->
-    <plugin-init-modal
-      v-model:show="showPluginInitModal"
-      :plugin-id="currentInitPluginId"
-      @initialized="handlePluginInitialized"
-      @cancel="() => { currentInitPluginId = undefined }"
-    />
   </div>
 </template>
 
@@ -884,28 +852,16 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
 }
 
 .plugin-card {
-  /* 每个插件项的卡片背景色 */
-  background-color: var(--n-card-color);
-  /* 每个插件项的轻微边框 */
-  border: 1px solid var(--n-border-color);
-  border-radius: 12px;
-  padding: 12px 16px;
+  /* 插件项内容区域，使用n-card的样式，这里只设置内边距 */
+  padding: 12px 8px;
 }
 
 .plugin-card--active {
-  /* 当前使用的插件高亮边框 */
-  border-color: var(--n-primary-color);
-}
-
-.plugin-card--uninitialized {
-  /* 待初始化的插件边框 */
-  border-color: var(--n-warning-color);
-  background-color: var(--n-warning-color-hover);
+  /* 当前使用的插件高亮样式 */
 }
 
 .plugin-card--error {
-  /* 错误插件边框 */
-  border-color: var(--n-error-color);
+  /* 错误插件样式 */
   background-color: rgba(208, 58, 82, 0.05);
 }
 

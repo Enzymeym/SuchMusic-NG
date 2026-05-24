@@ -13,3 +13,4 @@ native
 src/renderer/src/utils/supabase.ts
 .figma
 .vscode
+.trae

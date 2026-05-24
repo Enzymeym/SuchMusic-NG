@@ -47,13 +47,6 @@ export const usePluginStore = defineStore('plugin', () => {
   })
 
   /**
-   * 获取未初始化的插件
-   */
-  const uninitializedPlugins = computed(() => {
-    return installedPlugins.value.filter(p => p.status === 'uninitialized')
-  })
-
-  /**
    * 获取所有支持的音源
    */
   const allSources = computed(() => {
@@ -300,22 +293,6 @@ export const usePluginStore = defineStore('plugin', () => {
   }
 
   /**
-   * 获取未初始化的插件列表
-   * @returns 插件列表
-   */
-  const getUninitializedPlugins = async (): Promise<Plugin[]> => {
-    try {
-      const result = await window.electron.ipcRenderer.invoke(
-        'plugin:list:uninitialized'
-      )
-
-      return result.plugins || []
-    } catch (err: any) {
-      throw new Error(err.message || '获取未初始化插件列表失败')
-    }
-  }
-
-  /**
    * 加载所有插件
    */
   const loadAllPlugins = async (): Promise<void> => {
@@ -473,7 +450,7 @@ export const usePluginStore = defineStore('plugin', () => {
         if (plugin.id === musicInfo.pluginId || plugin.id === activePluginId.value) {
           continue
         }
-        
+
         const sourceExists = plugin.sources.some(s => s.id === source)
         if (sourceExists) {
           const result = await callPluginMethod(
@@ -505,7 +482,6 @@ export const usePluginStore = defineStore('plugin', () => {
     // Getters
     activePlugin,
     activePlugins,
-    uninitializedPlugins,
     allSources,
 
     // Actions
@@ -518,7 +494,6 @@ export const usePluginStore = defineStore('plugin', () => {
     deactivatePlugin,
     uninstallPlugin,
     getPluginById,
-    getUninitializedPlugins,
     loadAllPlugins,
     callPluginMethod,
     getMusicUrl,

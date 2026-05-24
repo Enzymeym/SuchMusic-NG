@@ -21,7 +21,7 @@
       <div class="header-content">
         <!-- 封面 -->
         <div class="cover-wrapper" :class="playlist.coverStyle || 'square'">
-          <img :src="playlistCover" class="cover-img" :style="playlistCoverStyle" />
+          <img :src="playlistCover" class="cover-img" :style="playlistCoverStyle" loading="lazy" decoding="async" />
         </div>
 
         <!-- 信息区域 -->
@@ -89,8 +89,8 @@
       />
     </div>
 
-    <PlaylistSettingsModal 
-      v-model:show="showSettings" 
+    <PlaylistSettingsModal
+      v-model:show="showSettings"
       :playlist="playlist || null"
       @save="handleSavePlaylist"
       @delete="handleDeletePlaylist"
@@ -115,7 +115,7 @@ import PlaylistSettingsModal from '../components/common/PlaylistSettingsModal.vu
 import defaultCover from '@renderer/assets/icon.png'
 import { AudioPlayerManager } from '../utils/audioPlayerManager'
 import { runSnowdropGetMusicUrl } from '../apis/snowdrop-transform'
-import { fetchNewLyric } from '../apis/netease/lyric'
+import { fetchGMALyric } from '../apis/gma'
 
 const route = useRoute()
 const router = useRouter()
@@ -159,10 +159,10 @@ const playlistCover = computed(() => {
 const playlistCoverStyle = computed<CSSProperties>(() => {
   if (!playlist.value) return {}
   const style = playlist.value.coverStyle || 'square'
-  
+
   switch (style) {
     case 'full': return { objectFit: 'cover' }
-    case 'square': 
+    case 'square':
     default: return { aspectRatio: '1/1', objectFit: 'cover' }
   }
 })
@@ -172,14 +172,14 @@ const playlistTitleStyle = computed(() => {
   if (!playlist.value) return {}
   const weight = playlist.value.titleFontWeight || 'bold'
   const family = playlist.value.titleFontFamily || 'default'
-  
+
   const weightMap: Record<string, string> = {
     light: '300',
     regular: '400',
     bold: '700',
     heavy: '900'
   }
-  
+
   return {
     fontWeight: weightMap[weight] || 'bold',
     fontFamily: family === 'serif' ? '"SHSC", serif' : 'inherit'
@@ -246,7 +246,6 @@ const handleSongClick = async (song: any) => {
     lyrics: ''
   }))
 
-  player.setPlaylist(list)
   const target = list.find((s) => s.id === song.id)
   if (!target) return
 
@@ -261,28 +260,12 @@ const handleSongClick = async (song: any) => {
       }
 
       try {
-        if (source === 'wy' || source === 'netease') {
-          const lyricRes = await fetchNewLyric(Number(id))
-          if (lyricRes && lyricRes.code === 200) {
-            const lrc =
-              lyricRes.yrc?.lyric ||
-              lyricRes.lrc?.lyric ||
-              lyricRes.klyric?.lyric ||
-              lyricRes.tlyric?.lyric ||
-              lyricRes.romalrc?.lyric ||
-              ''
-            if (lrc) return lrc
-          }
-        } else {
-          // 动态导入 fetchGMALyric 避免顶部导入
-          const { fetchGMALyric } = await import('../apis/gma')
-          const lrc = await fetchGMALyric(id, source)
-          if (lrc) return lrc
-        }
+        const lyricText = await fetchGMALyric(String(id), source)
+        if (lyricText) return lyricText
       } catch (e) {
         console.warn(`获取歌词失败，第 ${attempt + 1} 次重试:`, e)
       }
-      
+
       attempt++
       // 指数退避策略，最大延迟 5 秒
       const delay = Math.min(500 + attempt * 500, 5000)
@@ -340,7 +323,7 @@ const handleSongClick = async (song: any) => {
     settingsStore.source.preferredPlatform === 'all'
       ? 'wy'
       : settingsStore.source.preferredPlatform
-  
+
   // 映射旧设置值
   if (source === 'netease') source = 'wy'
   else if (source === 'qq') source = 'tx'
@@ -361,7 +344,7 @@ const handleSongClick = async (song: any) => {
   }
 
   const cacheKey = `${source}:${neteaseId}:${quality}`
-  
+
   if (window.electron && window.electron.ipcRenderer) {
     try {
       const cachePath = await window.electron.ipcRenderer.invoke('online-cache:check', {
@@ -371,7 +354,7 @@ const handleSongClick = async (song: any) => {
 
       if (cachePath) {
          console.log('[PlaylistDetail] 主动检测到缓存文件存在', cachePath)
-         
+
          // 尝试获取歌词
          let lyrics = target.lyrics || ''
          if (!lyrics) {

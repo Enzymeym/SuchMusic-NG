@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useSettingsStore } from '../stores/settingsStore'
+
 const appName = ref('Such PC')
+const settingsStore = useSettingsStore()
 
 //当前窗口尺寸的类型
 const sizeType = ref<'max' | 'min'>('min')
@@ -10,7 +13,14 @@ onMounted(() => {
   })
 })
 
-const handleClick = (type: 'hide' | 'min' | 'max' | 'close'): void => {
+const handleClick = (type: 'hide' | 'min' | 'max' | 'close' | 'hide-to-tray'): void => {
+  if (type === 'close') {
+    const { closeAction } = settingsStore.general
+    if (closeAction === 'minimize') {
+      window.electron.ipcRenderer.send('winAction', { type: 'hide-to-tray' })
+      return
+    }
+  }
   window.electron.ipcRenderer.send('winAction', { type })
 }
 </script>

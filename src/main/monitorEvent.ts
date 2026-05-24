@@ -1,4 +1,4 @@
-import { ipcMain, type IpcMainEvent } from 'electron'
+import { ipcMain, type IpcMainEvent, app } from 'electron'
 import { getMainWindow } from './windows/mainWindow'
 
 export const monitorEvent = (): void => {
@@ -6,21 +6,28 @@ export const monitorEvent = (): void => {
     console.log(data)
   })
 
+  // 接收渲染进程的设置
+  ipcMain.on('settings:closeAction', (_, action: 'minimize' | 'quit') => {
+    ;(app as any).closeAction = action
+  })
+
   ipcMain.on(
     'winAction',
-    (_event: IpcMainEvent, data: { type: 'hide' | 'min' | 'max' | 'close' }) => {
+    (_event: IpcMainEvent, data: { type: 'hide' | 'min' | 'max' | 'close' | 'hide-to-tray' }) => {
       const type = data.type
       const mainWindow = getMainWindow()
       if (!mainWindow) return
 
       if (type === 'hide') {
         mainWindow.minimize()
+      } else if (type === 'hide-to-tray') {
+        mainWindow.hide()
       } else if (type === 'min') {
         mainWindow.unmaximize()
       } else if (type === 'max') {
         mainWindow.maximize()
       } else if (type === 'close') {
-        mainWindow.close()
+        app.quit()
       }
     }
   )

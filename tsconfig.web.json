@@ -4,8 +4,9 @@
     "src/renderer/src/env.d.ts",
     "src/renderer/src/**/*",
     "src/renderer/src/**/*.vue",
-    "src/preload/*.d.ts"
-, "cr-music-source-paid-1772964041307.js"  ],
+    "src/preload/*.d.ts",
+    "cr-music-source-paid-1772964041307.js"
+  ],
   "compilerOptions": {
     "composite": true,
     "baseUrl": ".",

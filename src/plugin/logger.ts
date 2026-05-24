@@ -1,6 +1,7 @@
 import path from 'path'
 import fsPromise from 'fs/promises'
 import { app } from 'electron'
+import util from 'util'
 
 function getAppDirPath(): string {
   return app.getPath('userData')
@@ -42,9 +43,11 @@ async function writeLog(filePath: string, content: string, mode: WriteMode) {
 
 class Logger {
   private readonly logFilePath: string
+  private initPromise: Promise<void>
+
   constructor(pluginId: string) {
     this.logFilePath = getLogPath(pluginId)
-    fsPromise.mkdir(path.dirname(this.logFilePath), { recursive: true }).then()
+    this.initPromise = fsPromise.mkdir(path.dirname(this.logFilePath), { recursive: true }).then()
   }
 
   log(...args: any[]): void {
@@ -71,21 +74,14 @@ class Logger {
     this.write(`end ${parseArgs(args)}\n`)
   }
 
-  private write(msg: string): void {
-    writeLog(this.logFilePath, msg, WriteMode.APPEND)
+  private async write(msg: string): Promise<void> {
+    await this.initPromise
+    await writeLog(this.logFilePath, msg, WriteMode.APPEND)
   }
 }
 
 function parseArgs(args) {
-  return args
-    .map((arg) => {
-      if (typeof arg === 'object') {
-        return JSON.stringify(arg)
-      }
-
-      return arg
-    })
-    .join(' ')
+  return util.format(...args)
 }
 
 async function getLog(pluginId: string) {
@@ -93,7 +89,11 @@ async function getLog(pluginId: string) {
   try {
     const content: string = await fsPromise.readFile(logFilePath, 'utf-8')
     const last200Lines: string[] = remove_empty_strings(content.split('\n')).slice(-200)
-    await selectWriteFunc(WriteMode.OVERWRITE)(logFilePath, last200Lines.join('\n'))
+    if (last200Lines.length > 0) {
+      await selectWriteFunc(WriteMode.OVERWRITE)(logFilePath, last200Lines.join('\n') + '\n')
+    } else {
+      await selectWriteFunc(WriteMode.OVERWRITE)(logFilePath, '')
+    }
     return last200Lines
   } catch {
     return []

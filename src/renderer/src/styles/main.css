@@ -6,6 +6,7 @@
 @font-face {
   font-family: 'SHSC';
   src: url('../assets/SourceHanSerifCN-Bold-2.otf');
+  font-display: swap;
 }
 
 [class^='mgc_']::before,

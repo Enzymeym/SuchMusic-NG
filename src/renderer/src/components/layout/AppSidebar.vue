@@ -94,63 +94,70 @@ const menuOptions: MenuOption[] = [
 
 <template>
   <div class="sidebar-container" :class="{ 'is-collapsed': collapsed }">
-    <template v-if="!collapsed">
-      <!-- Logo Area -->
-      <div class="logo-area">
-        <img src="../../assets/icon.png" alt="Logo" class="logo-img" />
-        <span class="logo-text">
-          Such
-          <n-tag type="info" size="small" round>
-            Next Gen
-          </n-tag>
-        </span>
-      </div>
-
-      <!-- Main Navigation -->
-      <div class="nav-scroll">
-        <SidebarNavigation :options="menuOptions" v-model:value="activeKey" />
-      </div>
-
-      <!-- Float Collapse Button -->
-      <div class="float-collapse-btn" @click="toggleCollapse">
-        <i class="mgc_left_line"></i>
-      </div>
-    </template>
-    
-    <template v-else>
-      <!-- Collapsed Capsule Tab -->
-      <div class="capsule-wrapper">
-        <div class="drag-area">
-          <transition name="fade">
-            <div class="mini-logo" v-if="collapsed">
-              <img src="../../assets/icon.png" alt="Logo" class="mini-logo-img" />
-            </div>
-          </transition>
+    <transition name="sidebar-fade">
+      <div v-if="!collapsed" class="full-menu" key="full">
+        <!-- Logo Area -->
+        <div class="logo-area">
+          <img src="../../assets/icon.png" alt="Logo" class="logo-img" />
+          <span class="logo-text">
+            Such
+            <n-tag type="info" size="small" round>
+              Next Gen
+            </n-tag>
+          </span>
         </div>
-        <div class="capsule-container">
-          <div class="capsule-tab">
-            <!-- Expand Button -->
-            <div class="capsule-item" @click="toggleCollapse">
-              <i class="mgc_menu_line" style="font-size: 20px;"></i>
+
+        <!-- Main Navigation -->
+        <div class="nav-scroll">
+          <SidebarNavigation :options="menuOptions" v-model:value="activeKey" />
+        </div>
+
+        <!-- Float Collapse Button -->
+        <div class="float-collapse-btn" @click="toggleCollapse">
+          <i class="mgc_left_line"></i>
+        </div>
+      </div>
+      
+      <div v-else class="collapsed-menu" key="collapsed">
+        <!-- Collapsed Capsule Tab -->
+        <div class="capsule-wrapper">
+          <div class="hover-trigger"></div>
+          <div class="drag-area">
+            <transition name="fade">
+              <div class="mini-logo" v-if="collapsed">
+                <img src="../../assets/icon.png" alt="Logo" class="mini-logo-img" />
+              </div>
+            </transition>
+          </div>
+          
+          <!-- Vertical Line Indicator -->
+          <div class="collapse-indicator"></div>
+
+          <div class="capsule-container">
+            <div class="capsule-tab">
+              <!-- Expand Button -->
+              <div class="capsule-item" @click="toggleCollapse">
+                <i class="mgc_menu_line" style="font-size: 20px;"></i>
+              </div>
+              <div class="capsule-divider"></div>
+              <!-- Menu Items -->
+              <n-tooltip v-for="item in menuOptions" :key="item.key" placement="right">
+                <template #trigger>
+                  <div 
+                    class="capsule-item" 
+                    :class="{ active: activeKey === item.key }"
+                    @click="activeKey = item.key as string"
+                  >
+                    <component :is="item.icon" />
+                  </div>
+                </template>
+                {{ item.label }}
+              </n-tooltip>
             </div>
-            <div class="capsule-divider"></div>
-            <!-- Menu Items -->
-            <n-tooltip v-for="item in menuOptions" :key="item.key" placement="right">
-              <template #trigger>
-                <div 
-                  class="capsule-item" 
-                  :class="{ active: activeKey === item.key }"
-                  @click="activeKey = item.key as string"
-                >
-                  <component :is="item.icon" />
-                </div>
-              </template>
-              {{ item.label }}
-            </n-tooltip>
           </div>
         </div>
       </div>
-    </template>
+    </transition>
   </div>
 </template>
 
@@ -160,6 +167,33 @@ const menuOptions: MenuOption[] = [
   flex-direction: column;
   height: 100%;
   position: relative; /* For float collapse button positioning */
+}
+
+.full-menu {
+  width: 240px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.collapsed-menu {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-fade-enter-active,
+.sidebar-fade-leave-active {
+  transition: opacity 0.2s ease;
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.sidebar-fade-enter-from,
+.sidebar-fade-leave-to {
+  opacity: 0;
 }
 
 .logo-area {
@@ -238,6 +272,15 @@ html[data-theme='dark'] .float-collapse-btn {
   pointer-events: none;
 }
 
+.hover-trigger {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 24px;
+  height: 100vh;
+  pointer-events: auto;
+}
+
 .capsule-container {
   height: 100vh;
   display: flex;
@@ -248,13 +291,13 @@ html[data-theme='dark'] .float-collapse-btn {
   top: 0;
   left: 0;
   width: 100%;
-  pointer-events: auto;
+  pointer-events: none; /* Changed from auto to none */
 }
 
 .drag-area {
   position: absolute;
   top: 11px;
-  left: -1;
+  left: 0;
   width: 100%;
   height: 60px; /* 匹配 header 的高度 */
   -webkit-app-region: drag;
@@ -270,6 +313,7 @@ html[data-theme='dark'] .float-collapse-btn {
   align-items: center;
   justify-content: center;
   height: 100%;
+  transition: all 0.3s ease;
 }
 
 .mini-logo-img {
@@ -288,6 +332,31 @@ html[data-theme='dark'] .float-collapse-btn {
   opacity: 0;
 }
 
+/* Vertical Line Indicator */
+.collapse-indicator {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 48px;
+  background-color: rgba(0, 0, 0, 0.2); /* 加深浅色模式下的灰色 */
+  border-radius: 0 4px 4px 0;
+  opacity: 0.8;
+  transition: opacity 0.3s ease, transform 0.3s ease, background-color 0.3s ease;
+  pointer-events: none;
+  z-index: 999;
+}
+
+html[data-theme='dark'] .collapse-indicator {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+.capsule-wrapper:hover .collapse-indicator {
+  opacity: 0;
+  transform: translateY(-50%) translateX(-4px);
+}
+
 .capsule-tab {
   display: flex;
   flex-direction: column;
@@ -303,14 +372,15 @@ html[data-theme='dark'] .float-collapse-btn {
   border: 1px solid var(--n-border-color);
   z-index: 1;
   pointer-events: auto;
-  /* 调整偏移，使其在视觉上居中。默认状态只露出右边一点点 */
-  transform: translateY(-40px) translateX(-40px);
+  /* 隐藏在左侧，等待悬停时出现 */
+  transform: translateY(-40px) translateX(-60px);
   transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.3s ease;
-  opacity: 0.4;
+  opacity: 0;
 }
 
 .capsule-wrapper:hover .capsule-tab {
-  transform: translateY(-40px) translateX(0);
+  /* 悬停时往右移出一点，留出边距 */
+  transform: translateY(-40px) translateX(12px);
   opacity: 1;
 }
 

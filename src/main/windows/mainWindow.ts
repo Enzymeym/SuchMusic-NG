@@ -1,4 +1,4 @@
-import { shell, BrowserWindow } from 'electron'
+import { shell, BrowserWindow, app } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import icon from '../../../resources/icon.png?asset'
@@ -19,12 +19,14 @@ export function createWindow(): void {
     icon,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      sandbox: false,
+      webSecurity: false
     },
     frame: false,
     titleBarStyle: 'hidden',
-    minWidth: 1100,
-    minHeight: 670,
+    // 减小窗口的最小尺寸限制
+    minWidth: 800,
+    minHeight: 600,
     // expose window controls in Windows/Linux
     ...(process.platform !== 'darwin' ? { titleBarOverlay: false } : {})
   })
@@ -45,6 +47,17 @@ export function createWindow(): void {
       mainWindow.webContents.send('winSizeChange', { size: 'max' })
     } else {
       mainWindow.webContents.send('winSizeChange', { size: 'min' })
+    }
+  })
+
+  mainWindow.on('close', (event) => {
+    // 如果不是真的要退出，并且用户设置了最小化到托盘，就隐藏窗口
+    if (!(app as any).isQuiting) {
+      const closeAction = (app as any).closeAction || 'minimize'
+      if (closeAction === 'minimize') {
+        event.preventDefault()
+        mainWindow?.hide()
+      }
     }
   })
 

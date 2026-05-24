@@ -1,17 +1,30 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { NCard, NSwitch, NSlider, NButton } from 'naive-ui'
+import { computed, watch } from 'vue'
+import { NCard, NSwitch, NSlider, NButton, NSelect } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
+import { usePlayerStore } from '../../../stores/playerStore'
+import { useAudioEngine } from '../../../composables/useAudioEngine'
 
 // 使用设置仓库，驱动播放设置选项
 const settingsStore = useSettingsStore()
+const playerStore = usePlayerStore()
+const audioEngine = useAudioEngine()
 
-const props = defineProps<{
-  settingItemBgColor: string
-  settingItemBorderColor: string
-  // 当前高亮的设置项 key
-  highlightKey?: string | null
-}>()
+// 过渡时长显示值（秒）
+const transitionDurationSeconds = computed({
+  get: () => playerStore.transitionDuration / 1000,
+  set: (val: number) => {
+    const durationMs = val * 1000
+    playerStore.setTransitionDuration(durationMs)
+  }
+})
+
+// 过渡效果类型选项
+const transitionTypeOptions = [
+  { label: '智能过渡', value: 'smart' },
+  { label: '交叉淡入淡出', value: 'crossfade' },
+  { label: '普通淡入淡出', value: 'fade' }
+];
 
 // 压限强度显示值（0-100）
 const limiterStrengthPercent = computed({
@@ -19,6 +32,8 @@ const limiterStrengthPercent = computed({
   set: (val: number) => {
     const normalized = Math.min(Math.max(val, 0), 100) / 100
     settingsStore.playback.limiterStrength = normalized
+    // 同步到 Rust 引擎
+    updateLimiterFromSettings()
   }
 })
 
@@ -76,9 +91,43 @@ const eqBandValues = eqBands.map((band) =>
       settingsStore.playback.eqGains = next
       // 手动调整时标记为自定义预设
       settingsStore.playback.eqPreset = 'custom'
+      // 同步到 Rust 引擎
+      updateEqFromSettings()
     }
   })
 )
+
+// 同步 EQ 设置到 Rust 引擎
+function updateEqFromSettings() {
+  if (!audioEngine.state.isInitialized) return
+  
+  // 设置 EQ 启用状态
+  audioEngine.setEqEnabled(settingsStore.playback.eqEnabled)
+  
+  // 设置 EQ 增益
+  if (settingsStore.playback.eqEnabled) {
+    audioEngine.setEqGains(settingsStore.playback.eqGains)
+  }
+}
+
+// 同步限制器设置到 Rust 引擎
+function updateLimiterFromSettings() {
+  if (!audioEngine.state.isInitialized) return
+  
+  // 根据压限强度调整限制器参数
+  const strength = settingsStore.playback.limiterStrength
+  if (strength > 0) {
+    audioEngine.setLimiterEnabled(true)
+    // 根据强度调整天花板（强度越高，天花板越低，限制越强）
+    const ceiling = -0.3 - (strength * 2.7) // 0% -> -0.3dB, 100% -> -3dB
+    audioEngine.setLimiterParams({
+      ceiling: Math.max(ceiling, -3),
+      release: 50
+    })
+  } else {
+    audioEngine.setLimiterEnabled(false)
+  }
+}
 
 // 应用选中的 EQ 预设
 const applyEqPreset = (id: string) => {
@@ -89,7 +138,26 @@ const applyEqPreset = (id: string) => {
   settingsStore.playback.eqEnabled = true
   settingsStore.playback.eqGains = [...preset.gains]
   settingsStore.playback.eqPreset = id
+  
+  // 同步到 Rust 引擎
+  updateEqFromSettings()
 }
+
+// 监听设置变化并同步到 Rust 引擎
+watch(() => settingsStore.playback.eqEnabled, () => {
+  updateEqFromSettings()
+})
+
+watch(() => settingsStore.playback.limiterStrength, () => {
+  updateLimiterFromSettings()
+})
+
+const props = defineProps<{
+  settingItemBgColor: string
+  settingItemBorderColor: string
+  // 当前高亮的设置项 key
+  highlightKey?: string | null
+}>()
 </script>
 
 <template>
@@ -116,6 +184,29 @@ const applyEqPreset = (id: string) => {
           <div class="sub-label">播放页底栏隐藏时自动隐藏鼠标指针，移动鼠标后重新显示</div>
         </div>
         <n-switch v-model:value="settingsStore.playback.autoHideCursorWhenControlsHidden" />
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
+      :class="{
+        'setting-item--highlight':
+          props.highlightKey === 'playback.autoHidePlayerPageFooter'
+      }"
+      data-setting-key="playback.autoHidePlayerPageFooter"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">播放页底栏自动隐藏</div>
+          <div class="sub-label">播放页底栏在无操作时自动隐藏，移动鼠标后重新显示</div>
+        </div>
+        <n-switch v-model:value="settingsStore.playback.autoHidePlayerPageFooter" />
       </div>
     </n-card>
 
@@ -231,5 +322,65 @@ const applyEqPreset = (id: string) => {
         </div>
       </div>
     </n-card>
+
+    <n-card
+      class="setting-item"
+      :class="{ 'setting-item--highlight': props.highlightKey === 'playback.transition' }"
+      data-setting-key="playback.transition"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row" style="flex-direction: column; align-items: flex-start; gap: 12px">
+        <div class="setting-label">
+          <div class="main-label">智能过渡</div>
+          <div class="sub-label">实现歌曲之间的无缝衔接，提升播放体验</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px">
+          <n-switch v-model:value="playerStore.transitionEnabled" @update:value="playerStore.setTransitionEnabled($event)" />
+          <span class="time-text">{{
+            playerStore.transitionEnabled ? '已启用' : '已关闭'
+          }}</span>
+        </div>
+        <div v-if="playerStore.transitionEnabled" style="width: 100%">
+          <div class="setting-row" style="margin-bottom: 8px">
+            <div class="setting-label">
+              <div class="main-label">过渡时长</div>
+              <div class="sub-label">调整歌曲切换时的过渡时间</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; min-width: 220px">
+              <n-slider
+                v-model:value="transitionDurationSeconds"
+                :min="0.5"
+                :max="10"
+                :step="0.5"
+                :tooltip="false"
+                style="width: 160px"
+              />
+              <span class="time-text">{{ transitionDurationSeconds }} 秒</span>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="main-label">过渡效果</div>
+              <div class="sub-label">选择不同的过渡效果类型</div>
+            </div>
+            <n-select
+              v-model:value="playerStore.transitionType"
+              :options="transitionTypeOptions"
+              style="width: 180px"
+              @update:value="playerStore.setTransitionType($event)"
+            />
+          </div>
+        </div>
+      </div>
+    </n-card>
   </div>
 </template>
+
+<style lang="scss" scoped>
+@import '../../../styles/settings-modal.scss';
+</style>
