@@ -144,6 +144,7 @@ function handleUpdateAlert(data, suchmusicApi) {
         title: \`${pluginName} 有新版本可用\`,
         content: log,
         url: updateUrl,
+        version: data.version || '${pluginVersion}',
         pluginInfo: {
           name: '${pluginName}',
           type: 'lx',

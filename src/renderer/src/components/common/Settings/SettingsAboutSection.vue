@@ -4,9 +4,9 @@ import { NCard, NIcon, useThemeVars, NAlert, NSpin, NButton, NProgress, useMessa
 import MarkdownIt from 'markdown-it'
 import { full as emoji } from 'markdown-it-emoji'
 import markdownItGitHubAlerts from 'markdown-it-github-alerts'
-import 'markdown-it-github-alerts/styles/github-colors-light.css';
-import 'markdown-it-github-alerts/styles/github-colors-dark-class.css';
-import 'markdown-it-github-alerts/styles/github-base.css';
+import 'markdown-it-github-alerts/styles/github-colors-light.css'
+import 'markdown-it-github-alerts/styles/github-colors-dark-class.css'
+import 'markdown-it-github-alerts/styles/github-base.css'
 import axios, { type AxiosError } from 'axios'
 import { useUpdater } from '../../../composables/useUpdater'
 import { useSettingsStore } from '../../../stores/settingsStore'
@@ -36,19 +36,19 @@ const {
 
 // GitHub Release 数据类型定义
 interface GitHubRelease {
-  tag_name: string;
-  body: string;
-  name?: string;
-  published_at?: string;
-  prerelease?: boolean;
+  tag_name: string
+  body: string
+  name?: string
+  published_at?: string
+  prerelease?: boolean
 }
 
 // GitHub User 数据类型定义
 interface GitHubUser {
-  login: string;
-  name: string;
-  avatar_url: string;
-  html_url: string;
+  login: string
+  name: string
+  avatar_url: string
+  html_url: string
 }
 
 // 初始化 MarkdownIt，处理可能的导入兼容性问题
@@ -126,7 +126,7 @@ const fetchDeveloperInfo = async () => {
   const owner = 'Enzymeym'
   try {
     const { data } = await axios.get<GitHubUser>(`https://api.github.com/users/${owner}`, {
-      headers: { 'Accept': 'application/vnd.github.v3+json' },
+      headers: { Accept: 'application/vnd.github.v3+json' },
       timeout: 10000
     })
     developerInfo.value = data
@@ -163,29 +163,31 @@ const fetchChangelog = async () => {
     const url = `https://api.github.com/repos/${owner}/${repo}/releases`
     try {
       const { data } = await axios.get<GitHubRelease[]>(url, {
-        headers: { 'Accept': 'application/vnd.github.v3+json' },
+        headers: { Accept: 'application/vnd.github.v3+json' },
         params: { per_page: 10 }, // 仅获取最近的 10 个 release 即可
         timeout: 10000
       })
       return data
     } catch (error) {
-       const axiosError = error as AxiosError;
-       console.warn(`请求 GitHub Releases 列表失败: ${axiosError.message}`)
-       return []
+      const axiosError = error as AxiosError
+      console.warn(`请求 GitHub Releases 列表失败: ${axiosError.message}`)
+      return []
     }
   }
 
   try {
     const version = appVersion.value
-    
+
     // 获取最近的 release 列表，避免通过 tag 猜测导致的 404 错误
     const releases = await getReleases()
-    
+
     // 1. 在列表中查找当前版本
     // 优先匹配 name 字段为 v+version，其次匹配 tag_name
-    let release = releases.find(r => 
-      (r.name && r.name === `v${version}`) || 
-      (r.tag_name === `v${version}` || r.tag_name === version)
+    let release = releases.find(
+      (r) =>
+        (r.name && r.name === `v${version}`) ||
+        r.tag_name === `v${version}` ||
+        r.tag_name === version
     )
 
     if (release) {
@@ -195,9 +197,11 @@ const fetchChangelog = async () => {
       // 2. 如果没找到，回退到列表中的第一个版本（通常是最新发布的）
       // 注意：GitHub API 返回的列表通常按 created_at 倒序排列
       const latest = releases[0]
-      
+
       if (latest) {
-        changelogContent.value = `> **提示**：未找到当前版本 (v${version}) 的更新日志，以下是最新${latest.prerelease ? '预发布' : ''}版本 (${latest.tag_name}) 的日志：\n\n` + (latest.body || '无详细说明')
+        changelogContent.value =
+          `> **提示**：未找到当前版本 (v${version}) 的更新日志，以下是最新${latest.prerelease ? '预发布' : ''}版本 (${latest.tag_name}) 的日志：\n\n` +
+          (latest.body || '无详细说明')
         currentChangelogVersion.value = latest.tag_name
       } else {
         throw new Error('未找到任何更新日志信息')
@@ -249,7 +253,10 @@ const renderedChangelog = computed(() => {
       </div>
 
       <!-- 更新状态卡片 -->
-      <div class="update-status-card" v-if="isUpdateAvailable || isDownloading || isDownloaded || hasError">
+      <div
+        class="update-status-card"
+        v-if="isUpdateAvailable || isDownloading || isDownloaded || hasError"
+      >
         <div v-if="isChecking" class="update-status-item">
           <n-spin size="small" />
           <span>正在检查更新...</span>
@@ -259,7 +266,10 @@ const renderedChangelog = computed(() => {
           <span>{{ error || '检查更新失败' }}</span>
           <n-button size="tiny" @click="handleCheckUpdate">重试</n-button>
         </div>
-        <div v-else-if="isUpdateAvailable && !isDownloading && !isDownloaded" class="update-status-item">
+        <div
+          v-else-if="isUpdateAvailable && !isDownloading && !isDownloaded"
+          class="update-status-item"
+        >
           <i class="mgc_alert_line" />
           <span>发现新版本: v{{ updateInfo?.latestVersion }}</span>
           <n-button size="tiny" type="primary" @click="handleDownloadUpdate">立即下载</n-button>
@@ -274,11 +284,14 @@ const renderedChangelog = computed(() => {
               :show-indicator="false"
               :height="4"
               :border-radius="2"
-              style="width: 120px;"
+              style="width: 120px"
             />
             <span class="update-download-detail">
-              {{ formatBytes(downloadProgress.downloaded) }} / {{ formatBytes(downloadProgress.total) }}
-              <span v-if="downloadProgress.speed > 0">({{ formatSpeed(downloadProgress.speed) }})</span>
+              {{ formatBytes(downloadProgress.downloaded) }} /
+              {{ formatBytes(downloadProgress.total) }}
+              <span v-if="downloadProgress.speed > 0"
+                >({{ formatSpeed(downloadProgress.speed) }})</span
+              >
             </span>
           </div>
         </div>
@@ -300,11 +313,10 @@ const renderedChangelog = computed(() => {
     </div>
 
     <div class="about-cards">
-
-      <n-alert type="info" style="margin-bottom: 12px;">
-        注意：当前版本为为测试版，功能不完善，请谨慎使用
+      <n-alert :bordered="false" type="info">
+        注意：当前版本为测试版，功能不完善，请谨慎使用
       </n-alert>
-    
+
       <n-card
         class="about-card"
         :bordered="false"
@@ -315,16 +327,18 @@ const renderedChangelog = computed(() => {
         <template #header>
           <div>开发者</div>
         </template>
-        
-        <div v-if="developerLoading" class="about-card-row" style="justify-content: center;">
+
+        <div v-if="developerLoading" class="about-card-row" style="justify-content: center">
           <n-spin size="small" />
         </div>
 
         <div v-else-if="developerInfo" class="developer-info">
-          <img :src="developerInfo.avatar_url" class="developer-avatar" alt="avatar">
+          <img :src="developerInfo.avatar_url" class="developer-avatar" alt="avatar" />
           <div class="developer-details">
             <div class="developer-name">{{ developerInfo.name || developerInfo.login }}</div>
-            <a :href="developerInfo.html_url" target="_blank" class="developer-link">@{{ developerInfo.login }}</a>
+            <a :href="developerInfo.html_url" target="_blank" class="developer-link"
+              >@{{ developerInfo.login }}</a
+            >
           </div>
         </div>
 
@@ -333,7 +347,7 @@ const renderedChangelog = computed(() => {
           <span class="about-card-value">Enzymeym</span>
         </div>
       </n-card>
-      
+
       <!-- 更新日志卡片 -->
       <n-card
         class="about-card changelog-card"
@@ -352,15 +366,17 @@ const renderedChangelog = computed(() => {
           <n-spin size="medium" />
           <div class="loading-text">正在获取更新日志...</div>
         </div>
-        
+
         <div v-else-if="changelogError" class="error-container">
-          <n-icon size="32" color="#d03050" style="margin-bottom: 8px;">
-             <i class="mgc_wifi_off_line"></i>
+          <n-icon size="32" color="#d03050" style="margin-bottom: 8px">
+            <i class="mgc_wifi_off_line"></i>
           </n-icon>
           <div class="error-text">{{ changelogError }}</div>
-          <n-button size="small" secondary style="margin-top: 12px;" @click="fetchChangelog">重试</n-button>
+          <n-button size="small" secondary style="margin-top: 12px" @click="fetchChangelog"
+            >重试</n-button
+          >
         </div>
-        
+
         <div v-else class="markdown-body changelog-content" v-html="renderedChangelog"></div>
       </n-card>
     </div>
@@ -375,19 +391,30 @@ const renderedChangelog = computed(() => {
   overflow: hidden;
 }
 
-/* 顶部彩虹动态流光背景，仅扩展水平方向 */
+/* 顶部圆形渐变背景 */
 .about-root::before {
   content: '';
   position: absolute;
   left: 50%;
-  top: 0;
-  width: 180%;
-  height: 150px;
-
+  top: -280px;
+  width: 480px;
+  height: 480px;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 180deg at 50% 50%,
+    #2e4d7b 0deg,
+    #3e2b59 59deg,
+    #793236 111deg,
+    #92371c 150deg,
+    #c18e42 185deg,
+    #877545 224deg,
+    #417175 256deg,
+    #366775 303deg,
+    #2c5777 360deg
+  );
   opacity: 0.6;
-  filter: blur(26px);
+  filter: blur(56px);
   transform: translateX(-50%);
-  animation: about-hero-rainbow 14s ease-in-out infinite;
 }
 
 .about-hero {
@@ -432,7 +459,9 @@ const renderedChangelog = computed(() => {
   cursor: pointer;
   background-color: rgba(0, 0, 0, 0.06);
   color: inherit;
-  transition: background-color 0.2s, transform 0.15s;
+  transition:
+    background-color 0.2s,
+    transform 0.15s;
 }
 
 .about-hero-github:hover {
@@ -452,25 +481,16 @@ const renderedChangelog = computed(() => {
   color: rgba(0, 0, 0, 0.75);
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.04);
   backdrop-filter: blur(10px);
-  transition: background-color 0.2s, transform 0.15s, box-shadow 0.2s;
+  transition:
+    background-color 0.2s,
+    transform 0.15s,
+    box-shadow 0.2s;
 }
 
 .about-hero-update:hover {
   background-color: rgba(255, 255, 255, 0.98);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
   transform: translateY(-1px);
-}
-
-@keyframes about-hero-rainbow {
-  0% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-  100% {
-    background-position: 0% 50%;
-  }
 }
 
 .about-cards {
@@ -545,9 +565,19 @@ const renderedChangelog = computed(() => {
   line-height: 1.25;
 }
 
-:deep(.markdown-body h1) { font-size: 1.5em; border-bottom: 1px solid rgba(127,127,127,0.2); padding-bottom: 0.3em; }
-:deep(.markdown-body h2) { font-size: 1.3em; border-bottom: 1px solid rgba(127,127,127,0.1); padding-bottom: 0.3em; }
-:deep(.markdown-body h3) { font-size: 1.1em; }
+:deep(.markdown-body h1) {
+  font-size: 1.5em;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.2);
+  padding-bottom: 0.3em;
+}
+:deep(.markdown-body h2) {
+  font-size: 1.3em;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.1);
+  padding-bottom: 0.3em;
+}
+:deep(.markdown-body h3) {
+  font-size: 1.1em;
+}
 
 :deep(.markdown-body ul),
 :deep(.markdown-body ol) {
@@ -576,13 +606,13 @@ const renderedChangelog = computed(() => {
   padding-left: 1em;
   color: v-bind('themeVars.textColor3');
   margin: 1em 0;
-  background-color: rgba(127,127,127,0.05);
+  background-color: rgba(127, 127, 127, 0.05);
   padding: 8px 12px;
   border-radius: 4px;
 }
 
 :deep(.markdown-body code) {
-  background-color: rgba(127,127,127,0.15);
+  background-color: rgba(127, 127, 127, 0.15);
   padding: 0.2em 0.4em;
   border-radius: 4px;
   font-family: monospace;
@@ -590,7 +620,7 @@ const renderedChangelog = computed(() => {
 }
 
 :deep(.markdown-body pre) {
-  background-color: rgba(127,127,127,0.1);
+  background-color: rgba(127, 127, 127, 0.1);
   padding: 12px;
   border-radius: 8px;
   overflow-x: auto;

@@ -116,6 +116,7 @@ import defaultCover from '@renderer/assets/icon.png'
 import { AudioPlayerManager } from '../utils/audioPlayerManager'
 import { runSnowdropGetMusicUrl } from '../apis/snowdrop-transform'
 import { fetchGMALyric } from '../apis/gma'
+import { fetchQQMusicLyric } from '../apis/vkeys'
 
 const route = useRoute()
 const router = useRouter()
@@ -249,8 +250,21 @@ const handleSongClick = async (song: any) => {
   const target = list.find((s) => s.id === song.id)
   if (!target) return
 
+  /**
+   * 判断歌词是否为 YRC 逐字格式
+   * YRC 格式特征：每行包含形如 (词,开始时间,持续时长) 的词级时间戳
+   * @param lyrics 歌词字符串
+   * @returns 是否为 YRC 逐字格式
+   */
+  const isYrcFormat = (lyrics: string): boolean => {
+    return lyrics.includes('(') && /\d+,\d+,\d+/.test(lyrics)
+  }
+
   // 歌词重试获取函数
   const fetchLyricWithRetry = async (id: string, source: string): Promise<string> => {
+    // 标准化 source：将外部格式 qq→tx 统一为内部格式
+    const normalizedSource = source === 'qq' ? 'tx' : source
+
     let attempt = 0
     while (true) {
       // 检查当前播放歌曲是否改变，如果改变则停止重试
@@ -260,7 +274,22 @@ const handleSongClick = async (song: any) => {
       }
 
       try {
-        const lyricText = await fetchGMALyric(String(id), source)
+        // QQ音乐优先使用 VKeys API
+        if (normalizedSource === 'tx') {
+          try {
+            const result = await fetchQQMusicLyric(String(id))
+            const mainLyric = result.yrc || result.lrc
+            if (mainLyric) {
+              if (result.trans) {
+                player.setTranslatedLyrics(result.trans)
+              }
+              return mainLyric
+            }
+          } catch (e) {
+            console.warn(`获取歌词失败，第 ${attempt + 1} 次重试:`, e)
+          }
+        }
+        const lyricText = await fetchGMALyric(String(id), normalizedSource)
         if (lyricText) return lyricText
       } catch (e) {
         console.warn(`获取歌词失败，第 ${attempt + 1} 次重试:`, e)
@@ -280,12 +309,16 @@ const handleSongClick = async (song: any) => {
       // const exists = await window.electron.ipcRenderer.invoke('system:fs-exists', target.filePath)
       // if (!exists) throw new Error('Local file not found')
 
-      // 尝试获取歌词（如果本地没存）
+      // 尝试获取歌词（如果本地没存，或者QQ音乐只有LRC没有YRC逐字）
       let lyrics = target.lyrics || ''
-      if (!lyrics) {
-        const neteaseId = target.sourceSongId ?? target.id
-        const source = target.source || 'wy'
-        lyrics = await fetchLyricWithRetry(String(neteaseId), source)
+      const neteaseId = target.sourceSongId ?? target.id
+      const localSource = target.source || 'wy'
+      const needsYrc = localSource === 'qq' && lyrics && !isYrcFormat(lyrics)
+      if (!lyrics || needsYrc) {
+        if (needsYrc) {
+          console.log('[PlaylistDetail] 检测到 QQ 音乐 LRC 歌词，尝试获取 YRC 逐字歌词...')
+        }
+        lyrics = await fetchLyricWithRetry(String(neteaseId), localSource)
       }
 
       await AudioPlayerManager.play({
@@ -355,9 +388,13 @@ const handleSongClick = async (song: any) => {
       if (cachePath) {
          console.log('[PlaylistDetail] 主动检测到缓存文件存在', cachePath)
 
-         // 尝试获取歌词
+         // 尝试获取歌词（如果本地没存，或者QQ音乐只有LRC没有YRC逐字）
          let lyrics = target.lyrics || ''
-         if (!lyrics) {
+         const needsYrc2 = source === 'tx' && lyrics && !isYrcFormat(lyrics)
+         if (!lyrics || needsYrc2) {
+           if (needsYrc2) {
+             console.log('[PlaylistDetail][Cache] 检测到 QQ 音乐 LRC 歌词，尝试获取 YRC 逐字歌词...')
+           }
            lyrics = await fetchLyricWithRetry(String(neteaseId), source)
          }
 

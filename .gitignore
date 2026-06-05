@@ -14,3 +14,4 @@ src/renderer/src/utils/supabase.ts
 .figma
 .vscode
 .trae
+.trae/specs

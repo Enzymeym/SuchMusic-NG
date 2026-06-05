@@ -12,6 +12,7 @@ import { runSnowdropGetMusicUrl } from '../apis/snowdrop-transform'
 import { throttle } from '../utils/performance'
 import { formatQuality, calculateBitrate } from '../utils/quality'
 import { searchMusic, fetchGMALyric } from '../apis/gma'
+import { fetchQQMusicLyric } from '../apis/vkeys'
 
 const route = useRoute()
 const router = useRouter()
@@ -671,16 +672,23 @@ const handleSongClick = async (song: any) => {
   try {
     message.loading('正在获取播放链接...')
 
-    const quality = settingsStore.source.preferredQuality || '128k'
+    // 获取音质：优先使用该歌曲原始音源的独立音质设置，其次使用全局设置
+    const mappedSource = mapSourceToInternal(song.source || '')
+    const quality = (mappedSource ? settingsStore.getEffectiveQuality(mappedSource) : undefined)
+      || settingsStore.source.preferredQuality
+      || '128k'
 
     // 获取所有待请求的平台列表
     const platforms: Array<{ id: string | number; source: string; pluginId?: string; quality?: string }> = []
 
-    // 根据音源设置获取首选平台作为默认回退
-    const preferredSource = settingsStore.source.preferredPlatform
-    const defaultSource = (preferredSource && preferredSource !== 'all')
-      ? preferredSource
+    // 确定首选平台：优先使用歌曲原始音源的独立设置，否则使用全局设置
+    const effectivePreferredSource = mappedSource
+      ? settingsStore.getEffectivePlatform(mappedSource)
+      : settingsStore.source.preferredPlatform
+    const preferredSource = (effectivePreferredSource && effectivePreferredSource !== 'all')
+      ? effectivePreferredSource
       : 'wy'
+    const defaultSource = preferredSource
 
     // 将主歌曲本身也作为一个平台选项加入
     const mainPlatform = {
@@ -766,6 +774,20 @@ const handleSongClick = async (song: any) => {
     const firstSource = mapSourceToInternal(platforms[0].source)
     const lyricPromise = (async () => {
       try {
+        // QQ音乐优先使用 VKeys API
+        if (firstSource === 'tx') {
+          console.log(`[SearchView] 检测到 QQ 音乐，使用 VKeys API 获取歌词...`)
+          const result = await fetchQQMusicLyric(String(platforms[0].id))
+          const mainLyric = result.yrc || result.lrc
+          if (mainLyric) {
+            console.log(`[SearchView] VKeys 歌词获取成功 | 主歌词: ${result.yrc ? 'YRC(逐字)' : 'LRC(标准)'} (${mainLyric.length} 字符) | 翻译: ${result.trans ? '✓' : '✗'}`)
+            if (result.trans) {
+              playerStore.setTranslatedLyrics(result.trans)
+            }
+            return mainLyric
+          }
+          console.warn(`[SearchView] VKeys 返回空歌词，回退到 GMA API`)
+        }
         const lyricText = await fetchGMALyric(String(platforms[0].id), firstSource)
         return lyricText || ''
       } catch (err) {

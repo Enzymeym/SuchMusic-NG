@@ -52,6 +52,9 @@ export class RustAudioAdapter {
   private pendingTransitionDurationMs: number = 0
   private pendingTransitionStartPositionMs: number = 0
 
+  // 防止重复触发结束回调（positionTimer 每100ms检查一次，stream loop 和 source.onended 也会触发）
+  private hasEndedCallbackTriggered: boolean = false
+
   // 确保 AudioContext 初始化
   public ensureContext(): void {
     if (this.audioContext) return
@@ -239,6 +242,9 @@ export class RustAudioAdapter {
       window.clearInterval(this.positionTimer);
     }
 
+    // 重置结束回调触发标志，允许新歌曲结束时再次触发
+    this.hasEndedCallbackTriggered = false
+
     const p = usePlayerStore()
     const durationMs = p.currentSong?.durationMs ?? 0
     const api = getRustAudioAPI();
@@ -301,13 +307,15 @@ export class RustAudioAdapter {
       api.stop().catch((e: any) => console.warn('[RustAudioAdapter] 停止 Rust 引擎失败:', e))
     }
 
-    // 停止 Web Audio 播放
+    // 停止 Web Audio 播放（先清除 onended 回调防止异步触发 handleSongEnd）
     if (this.webAudioSource) {
+      this.webAudioSource.onended = null
       try {
         this.webAudioSource.stop()
       } catch (e) {
         // 忽略停止错误
       }
+      this.webAudioSource.disconnect()
       this.webAudioSource = null
     }
 
@@ -324,6 +332,7 @@ export class RustAudioAdapter {
 
     // 立即停止之前的音频源，避免多个音频同时播放
     if (this.webAudioSource) {
+      this.webAudioSource.onended = null
       try {
         this.webAudioSource.stop()
         this.webAudioSource.disconnect()
@@ -442,8 +451,9 @@ export class RustAudioAdapter {
     if (this.isWebAudioMode) {
       // Web Audio API 模式：重新创建源节点并从新位置播放
       if (this.audioContext && this.currentAudioBuffer) {
-        // 停止当前播放
+        // 停止当前播放（先清除 onended 回调防止异步触发 handleSongEnd）
         if (this.webAudioSource) {
+          this.webAudioSource.onended = null
           try {
             this.webAudioSource.stop()
           } catch (e) {
@@ -505,8 +515,16 @@ export class RustAudioAdapter {
     this.onEndedCallback = null
   }
 
-  // 触发播放结束回调
+  /**
+   * 触发播放结束回调
+   * 使用防重复标志位，避免 positionTimer、stream loop、source.onended 多源重复触发
+   * 导致 handleSongEnd → playNext 被多次调用，造成歌曲跳变
+   */
   private triggerEndedCallback() {
+    if (this.hasEndedCallbackTriggered) return
+    this.hasEndedCallbackTriggered = true
+    // 立即停止位置定时器，防止 100ms 后再次触发
+    this.stopProgressUpdates()
     if (this.onEndedCallback) {
       this.onEndedCallback()
     }

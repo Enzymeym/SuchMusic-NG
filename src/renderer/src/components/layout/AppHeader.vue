@@ -45,7 +45,7 @@ let searchTimer: NodeJS.Timeout | null = null
 // Watch search text for suggestions
 watch(searchText, (newVal) => {
   if (searchTimer) clearTimeout(searchTimer)
-  
+
   if (!newVal.trim()) {
     showSuggestions.value = false
     return
@@ -55,21 +55,21 @@ watch(searchText, (newVal) => {
     suggestionLoading.value = true
     try {
       const keyword = newVal.toLowerCase().trim()
-      
+
       // 1. Local Songs
-      const localSongs = localMusicStore.songs.filter(s => 
-        s.name?.toLowerCase().includes(keyword) || 
+      const localSongs = localMusicStore.songs.filter(s =>
+        s.name?.toLowerCase().includes(keyword) ||
         s.ar?.some(a => a.name.toLowerCase().includes(keyword)) ||
         s.al?.name?.toLowerCase().includes(keyword)
       ).slice(0, 5)
 
       // 2. Local Playlists
-      const localPlaylists = playlistStore.playlists.filter(p => 
+      const localPlaylists = playlistStore.playlists.filter(p =>
         p.name.toLowerCase().includes(keyword)
       ).slice(0, 3)
 
       // 3. Recent Play
-      const recent = playerStore.playHistory.filter(p => 
+      const recent = playerStore.playHistory.filter(p =>
         p.title.toLowerCase().includes(keyword) ||
         p.artist.toLowerCase().includes(keyword)
       ).slice(0, 5)
@@ -106,7 +106,7 @@ const handleSearch = () => {
 
 const handleSuggestionClick = (type: string, item: any) => {
   showSuggestions.value = false
-  
+
   if (type === 'local-song') {
     // Construct PlayerSong from LocalSong
     const song = {
@@ -280,7 +280,7 @@ const isTransparent = computed(() => {
         <template #trigger>
           <n-input
             v-model:value="searchText"
-            placeholder="搜索音乐..."
+            placeholder="搜索音乐"
             class="search-bar"
             @keydown.enter="handleSearch"
             @focus="handleFocus"
@@ -296,14 +296,14 @@ const isTransparent = computed(() => {
              <!-- Online Songs -->
             <template v-if="suggestions.online.songs.length">
               <div class="suggestion-header">在线歌曲</div>
-              <div 
-                v-for="item in suggestions.online.songs" 
-                :key="'online-s-'+item.id" 
+              <div
+                v-for="item in suggestions.online.songs"
+                :key="'online-s-'+item.id"
                 class="suggestion-item"
                 @click="handleSuggestionClick('online-song', item)"
               >
-                 <!-- Use first artist pic if available or online playlist cover logic, but online songs usually don't have direct cover in suggest result. 
-                      Actually search/suggest result for songs usually has artists. 
+                 <!-- Use first artist pic if available or online playlist cover logic, but online songs usually don't have direct cover in suggest result.
+                      Actually search/suggest result for songs usually has artists.
                       If we want cover, we might need album.picUrl if available.
                       Let's check API response structure. Usually suggest API returns `songs` with `album`.
                       If not, we use icon or placeholder.
@@ -314,7 +314,7 @@ const isTransparent = computed(() => {
                 </div>
                  <!-- Try to use album pic if available (netease api usually provides al or album) -->
                 <img v-else :src="item.album?.picUrl || item.album?.artist?.img1v1Url" class="suggestion-cover" />
-                
+
                 <div class="suggestion-info">
                   <div class="suggestion-title">
                     {{ item.name }}
@@ -327,11 +327,11 @@ const isTransparent = computed(() => {
             <!-- Local & Recent (Merged) -->
             <template v-if="suggestions.recent.length || suggestions.localSongs.length">
               <div class="suggestion-header">本地&最近</div>
-              
+
               <!-- Local Songs -->
-              <div 
-                v-for="item in suggestions.localSongs" 
-                :key="'local-'+item.id" 
+              <div
+                v-for="item in suggestions.localSongs"
+                :key="'local-'+item.id"
                 class="suggestion-item"
                 @click="handleSuggestionClick('local-song', item)"
               >
@@ -345,9 +345,9 @@ const isTransparent = computed(() => {
               </div>
 
               <!-- Recent Play -->
-              <div 
-                v-for="item in suggestions.recent" 
-                :key="'recent-'+item.songId" 
+              <div
+                v-for="item in suggestions.recent"
+                :key="'recent-'+item.songId"
                 class="suggestion-item"
                 @click="handleSuggestionClick('recent', item)"
               >
@@ -364,9 +364,9 @@ const isTransparent = computed(() => {
               <div class="suggestion-header">歌单</div>
               <div class="playlist-grid">
                 <!-- Local Playlists -->
-                <div 
-                  v-for="item in suggestions.localPlaylists" 
-                  :key="'lp-'+item.id" 
+                <div
+                  v-for="item in suggestions.localPlaylists"
+                  :key="'lp-'+item.id"
                   class="playlist-item"
                   @click="handleSuggestionClick('local-playlist', item)"
                 >
@@ -377,9 +377,9 @@ const isTransparent = computed(() => {
                 </div>
 
                 <!-- Online Playlists -->
-                <div 
-                  v-for="item in suggestions.online.playlists" 
-                  :key="'online-p-'+item.id" 
+                <div
+                  v-for="item in suggestions.online.playlists"
+                  :key="'online-p-'+item.id"
                   class="playlist-item"
                   @click="handleSuggestionClick('online-playlist', item)"
                 >
@@ -392,9 +392,9 @@ const isTransparent = computed(() => {
             <!-- Online Artists (Keep them but maybe at bottom or merged? Design didn't show them. Let's keep at bottom for now) -->
             <template v-if="suggestions.online.artists.length">
                 <div class="suggestion-header">相关歌手</div>
-                <div 
-                  v-for="item in suggestions.online.artists" 
-                  :key="'online-a-'+item.id" 
+                <div
+                  v-for="item in suggestions.online.artists"
+                  :key="'online-a-'+item.id"
                   class="suggestion-item"
                   @click="handleSuggestionClick('online-artist', item)"
                 >
@@ -404,7 +404,7 @@ const isTransparent = computed(() => {
                   </div>
                 </div>
             </template>
-            
+
             <div v-if="!suggestions.recent.length && !suggestions.localSongs.length && !suggestions.localPlaylists.length && !suggestions.online.songs.length && !suggestions.online.artists.length && !suggestions.online.playlists.length" class="no-suggestions">
                 未找到相关结果
             </div>
@@ -480,8 +480,8 @@ const isTransparent = computed(() => {
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
-  height: 60px;
-  padding: 0 24px 0 20px;
+  height: 72px;
+  padding: 0px 24px 12px 20px;
   -webkit-app-region: drag;
   /* Draggable */
   position: relative;

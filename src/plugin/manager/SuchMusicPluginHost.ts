@@ -15,7 +15,7 @@ import * as crypto from 'crypto'
 import { pluginLog } from '../logger'
 import { transformSnowdropPlugin } from '../utils/snowdrop-transform'
 import { getMainWindow } from '../../main/windows/mainWindow'
-import { handlePluginUpdate } from './pluginNotifier'
+import { sendUpdateNotificationToRenderer } from './pluginNotifier'
 import {
   PluginInfo,
   PluginSource,
@@ -29,14 +29,10 @@ function sendPluginNotice(data: any, pluginName: string) {
   pluginLog.info(`[PluginNotice] ${pluginName}:`, data)
   
   if (data.type === 'update') {
-    // 调用主进程通知服务，支持原生 Toast 及热更新
-    handlePluginUpdate(pluginName, data.data).catch(err => {
-      pluginLog.error('Error handling plugin update notification:', err)
-    })
+    sendUpdateNotificationToRenderer(pluginName, data.data)
     return
   }
 
-  // 其他类型通知仍然发送给渲染进程
   try {
     const win = getMainWindow()
     if (win) {
@@ -53,12 +49,16 @@ function sendPluginNotice(data: any, pluginName: string) {
 
 // ==================== 常量定义 ====================
 const CONSTANTS = {
-  DEFAULT_TIMEOUT: 10000, // 10秒超时
+  DEFAULT_TIMEOUT: 15000, // 15秒超时（音乐直链获取）
   API_VERSION: '1.0.3',
   ENVIRONMENT: 'nodejs',
   NOTICE_DELAY: 100, // 通知延迟时间
   LOG_PREFIX: '[SuchMusic]'
 } as const
+
+// 绕过 TLS 证书验证，解决部分音源服务器证书链不兼容导致 fetch 失败的问题
+// 浏览器对证书链的容忍度高于 Node.js，此设置确保 sandbox 请求行为与浏览器一致
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 
 // 判断是否为洛雪格式插件代码
 function isLxStylePluginCode(code: string): boolean {
@@ -182,6 +182,8 @@ class SuchMusicPluginHost {
   private pluginCode: string | null
   private plugin: SuchMusicPlugin | SuchPluginNew | null
   private isNewStyle: boolean = false
+  private _pendingUpdateInfo: { version: string; log: string; url?: string } | null = null
+  private _updatePromiseResolve: (() => void) | null = null
 
   /**
    * 创建一个新的插件主机实例
@@ -405,7 +407,10 @@ class SuchMusicPluginHost {
   }
 
   /**
-   * 检查更新
+   * 检查插件更新
+   * 优先使用插件自身的 checkUpdate() 返回值，其次等待异步 updateAlert 通知
+   * 事件驱动插件通过异步 HTTP 请求获取更新信息，本方法会最多等待 17 秒
+   * @returns 更新信息对象（含 version、log、url），或 null 表示当前无可用更新
    */
   async checkUpdate(): Promise<any> {
     this._ensurePluginInitialized()
@@ -426,16 +431,48 @@ class SuchMusicPluginHost {
           pluginLog.log(`${CONSTANTS.LOG_PREFIX} 结果:`, result)
         } else {
           const executionTime = Date.now() - startTime
-          pluginLog.log(`${CONSTANTS.LOG_PREFIX} checkUpdate 方法不存在，跳过执行`)
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} checkUpdate 方法不存在`)
           pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
         }
-      } else {
-        const executionTime = Date.now() - startTime
-        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 旧版插件不支持 checkUpdate 方法`)
-        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
       }
       
-      return result
+      if (result && result.version) {
+        return result
+      }
+      
+      if (this._pendingUpdateInfo) {
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 返回插件运行时缓存的更新信息`)
+        return this._pendingUpdateInfo
+      }
+      
+      // 等待异步 updateAlert 通知（最多等待 17 秒）
+      // 沙箱中 suchmusic.request() 默认超时为 15 秒
+      // 等待足够长的时间以确保沙箱的 HTTP 请求有机会完成或超时
+      pluginLog.log(`${CONSTANTS.LOG_PREFIX} 等待插件异步更新通知（最多 17 秒）...`)
+      await Promise.race([
+        new Promise<void>(resolve => {
+          this._updatePromiseResolve = resolve
+        }),
+        new Promise<void>(resolve => setTimeout(() => {
+          pluginLog.log(`${CONSTANTS.LOG_PREFIX} 等待异步更新通知超时`)
+          resolve()
+        }, 17000))
+      ])
+      
+      if (this._updatePromiseResolve) {
+        this._updatePromiseResolve = null
+      }
+      
+      if (this._pendingUpdateInfo) {
+        const executionTime = Date.now() - startTime
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 异步获取到插件更新信息`)
+        pluginLog.log(`${CONSTANTS.LOG_PREFIX} 执行时间: ${executionTime}ms`)
+        return this._pendingUpdateInfo
+      }
+      
+      const executionTime = Date.now() - startTime
+      pluginLog.log(`${CONSTANTS.LOG_PREFIX} 未检测到可用更新，执行时间: ${executionTime}ms`)
+      return null
     } catch (error: any) {
       const executionTime = Date.now() - startTime
       pluginLog.error(`${CONSTANTS.LOG_PREFIX} checkUpdate 方法执行失败:`, error.message)
@@ -602,7 +639,7 @@ class SuchMusicPluginHost {
       Buffer,
       JSON,
       require: () => ({}),
-      process: { env: {} }
+      process: { env: { NODE_TLS_REJECT_UNAUTHORIZED: '0' } }
     }
     
     // 配置 window 和 notify
@@ -897,7 +934,7 @@ class SuchMusicPluginHost {
     }, timeout)
 
     try {
-      const fetchOptions = {
+      const fetchOptions: Record<string, any> = {
         method: 'GET',
         ...options,
         signal: controller.signal
@@ -958,10 +995,24 @@ class SuchMusicPluginHost {
 
   /**
    * 创建通知中心
+   * 插件通过此 API 发送通知，update 类型通知会被缓存供 checkUpdate() 查询
+   * @returns 通知中心函数
    * @private
    */
   private _createNoticeCenter() {
     return (type: string, data: any) => {
+      if (type === 'update' && data) {
+        this._pendingUpdateInfo = {
+          version: data.version,
+          log: data.content || data.log,
+          url: data.url
+        }
+        if (this._updatePromiseResolve) {
+          this._updatePromiseResolve()
+          this._updatePromiseResolve = null
+        }
+      }
+
       const sendNotice = () => {
         let pluginName = 'Unknown'
         let version = '0.0.0'
@@ -970,6 +1021,9 @@ class SuchMusicPluginHost {
              const info = this.getPluginInfo()
              pluginName = info.name
              version = info.version
+        } else if (data?.pluginInfo?.name) {
+             pluginName = data.pluginInfo.name
+             version = data.pluginInfo.version || '0.0.0'
         }
 
         sendPluginNotice(

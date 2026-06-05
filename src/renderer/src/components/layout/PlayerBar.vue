@@ -1,6 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch, onMounted } from 'vue'
-import { NSlider, NIcon, NText, NButton, NPopover, useThemeVars, NDrawer, NDrawerContent, NEmpty, useMessage, NBadge } from 'naive-ui'
+import {
+  NSlider,
+  NIcon,
+  NText,
+  NButton,
+  NPopover,
+  useThemeVars,
+  NDrawer,
+  NDrawerContent,
+  NEmpty,
+  useMessage,
+  NBadge
+} from 'naive-ui'
 import { usePlayerStore, type PlayerSong } from '../../stores/playerStore'
 import { usePlaylistStore } from '../../stores/playlistStore'
 import defaultCover from '@renderer/assets/icon.png'
@@ -12,6 +24,7 @@ import { useTaskbarLyric } from '../../composables/useTaskbarLyric'
 import { runSnowdropGetMusicUrl } from '../../apis/snowdrop-transform'
 import { AudioPlayerManager } from '../../utils/audioPlayerManager'
 import { searchMusic, fetchGMALyric } from '../../apis/gma'
+import { fetchQQMusicLyric } from '../../apis/vkeys'
 import { useDownloadMusic } from '../../composables/useDownloadMusic'
 import SoundEffectsModal from '../common/SoundEffectsModal.vue'
 
@@ -45,6 +58,16 @@ const mixHexColor = (color1: string, color2: string, weight: number): string => 
   return `#${toHex(r)}${toHex(g)}${toHex(bVal)}`
 }
 
+/**
+ * 判断歌词是否为 YRC 逐字格式
+ * YRC 格式特征：每行包含形如 (词,开始时间,持续时长) 的词级时间戳
+ * @param lyrics 歌词字符串
+ * @returns 是否为 YRC 逐字格式
+ */
+const isYrcFormat = (lyrics: string): boolean => {
+  return lyrics.includes('(') && /\d+,\d+,\d+/.test(lyrics)
+}
+
 // 获取全局播放器 store
 const player = usePlayerStore()
 const playlistStore = usePlaylistStore()
@@ -52,7 +75,11 @@ const playlistStore = usePlaylistStore()
 const settingsStore = useSettingsStore()
 
 const { isDesktopLyricOpen, toggleDesktopLyric } = useDesktopLyric()
-const { isOpen: isTaskbarLyricOpen, toggle: toggleTaskbarLyric, init: initTaskbarLyric } = useTaskbarLyric()
+const {
+  isOpen: isTaskbarLyricOpen,
+  toggle: toggleTaskbarLyric,
+  init: initTaskbarLyric
+} = useTaskbarLyric()
 
 // 音效调节弹窗
 const showSoundEffectsModal = ref(false)
@@ -74,6 +101,35 @@ onBeforeUnmount(() => {
   webAudioEngine.removeOnEndedCallback()
 })
 
+// 歌词重试获取函数（辅助：实际发起请求）
+const doFetchBarLyric = async (id: string, source: string): Promise<{ lyrics: string; translatedLyrics: string }> => {
+  // 标准化 source：将外部格式 qq→tx 统一为内部格式
+  const normalizedSource = source === 'qq' ? 'tx' : source
+
+  // QQ音乐音源：优先使用 VKeys API 获取完整歌词（含YRC逐字歌词和翻译）
+  if (normalizedSource === 'tx') {
+    console.log(`[PlayerBar] 检测到 QQ 音乐音源(source=${source})，使用 VKeys API 获取歌词...`)
+    try {
+      const result = await fetchQQMusicLyric(String(id))
+      if (result.yrc || result.lrc) {
+        const mainLyric = result.yrc || result.lrc
+        const lyricType = result.yrc ? 'YRC(逐字)' : 'LRC(标准)'
+        const transStatus = result.trans ? '✓' : '✗'
+        console.log(`[PlayerBar] VKeys 歌词获取成功 | 主歌词: ${lyricType} (${mainLyric.length} 字符) | 翻译: ${transStatus}`)
+        return { lyrics: mainLyric, translatedLyrics: result.trans }
+      }
+      console.warn(`[PlayerBar] VKeys 返回空歌词，回退到 GMA API`)
+    } catch (e) {
+      console.warn('[PlayerBar] VKeys API 获取歌词失败，回退到 GMA API:', e)
+    }
+  }
+
+  // 其他音源或 VKeys 失败：使用 GMA API
+  console.log(`[PlayerBar] 使用 GMA API 获取歌词 (source=${source})...`)
+  const lyricText = await fetchGMALyric(String(id), normalizedSource)
+  return { lyrics: lyricText, translatedLyrics: '' }
+}
+
 // 歌词重试获取函数
 const fetchLyricWithRetry = async (id: string, source: string): Promise<string> => {
   let attempt = 0
@@ -85,8 +141,14 @@ const fetchLyricWithRetry = async (id: string, source: string): Promise<string> 
     }
 
     try {
-      const lyricText = await fetchGMALyric(String(id), source)
-      if (lyricText) return lyricText
+      const { lyrics, translatedLyrics } = await doFetchBarLyric(String(id), source)
+      if (lyrics) {
+        // 同时存储翻译歌词
+        if (translatedLyrics) {
+          player.setTranslatedLyrics(translatedLyrics)
+        }
+        return lyrics
+      }
     } catch (e) {
       console.warn(`[PlayerBar] 获取歌词失败，第 ${attempt + 1} 次重试:`, e)
     }
@@ -138,20 +200,26 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
 
   if ((song as any).filePath && window.electron && window.electron.ipcRenderer) {
     // 先检查文件是否存在
-    const exists = await window.electron.ipcRenderer.invoke('system:fs-exists', (song as any).filePath)
+    const exists = await window.electron.ipcRenderer.invoke(
+      'system:fs-exists',
+      (song as any).filePath
+    )
 
     if (player.currentSong?.id !== currentProcessId) return
 
     if (exists) {
       // 尝试加载本地歌词（如果缺失）
       if (!song.lyrics) {
-        window.electron.ipcRenderer.invoke('local-music:get-meta', (song as any).filePath).then((meta: any) => {
-          if (meta && meta.lyrics && player.currentSong?.id === song.id) {
-            player.setLyrics(meta.lyrics)
-          }
-        }).catch(err => {
-          console.warn('Failed to load local lyrics:', err)
-        })
+        window.electron.ipcRenderer
+          .invoke('local-music:get-meta', (song as any).filePath)
+          .then((meta: any) => {
+            if (meta && meta.lyrics && player.currentSong?.id === song.id) {
+              player.setLyrics(meta.lyrics)
+            }
+          })
+          .catch((err) => {
+            console.warn('Failed to load local lyrics:', err)
+          })
       }
 
       try {
@@ -172,8 +240,8 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
         }
 
         if (player.currentSong?.id !== currentProcessId) {
-           webAudioEngine.stop() // 如果播放后发现切歌了，立即停止
-           return
+          webAudioEngine.stop() // 如果播放后发现切歌了，立即停止
+          return
         }
         if (shouldPlay) {
           player.setPlaying(true)
@@ -183,13 +251,16 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
         console.error('Failed to play song from bar (file)', e)
       }
     } else {
-      console.warn('[PlayerBar] Local file not found, falling back to online:', (song as any).filePath);
+      console.warn(
+        '[PlayerBar] Local file not found, falling back to online:',
+        (song as any).filePath
+      )
       // 关键修正：文件不存在时，清除 filePath，以便后续逻辑能进入在线/搜索流程
-      (song as any).filePath = undefined;
+      ;(song as any).filePath = undefined
     }
   }
 
-  if (!((song as any).filePath)) {
+  if (!(song as any).filePath) {
     try {
       const songId = song.sourceSongId ?? song.id
       const musicInfo = {
@@ -202,32 +273,56 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
         mediaId: String(songId)
       }
 
-      // 确定源平台：
-      // 1. 如果歌曲自身带有 source 属性，优先使用它（映射到插件所需的源标识）
-      // 2. 否则使用设置中的首选平台
+      // 确定源平台和音质：
+      // 优先级：歌曲自带 source → 音源独立设置 → 全局设置
       let source = 'wy' // 默认为网易云 (wy)
+      let quality = settingsStore.source.preferredQuality || '128k'
       if (song.source) {
-         // 映射 source 到插件支持的标识
-         // 假设插件支持的标识: wy, tx, kg, kw, mg 等
-         switch (song.source) {
-           case 'netease': source = 'wy'; break;
-           case 'qq': source = 'tx'; break;
-           case 'kugou': source = 'kg'; break;
-           case 'kuwo': source = 'kw'; break;
-           case 'migu': source = 'mg'; break;
-           default: source = song.source; break;
-         }
-      } else if (settingsStore.source.preferredPlatform && settingsStore.source.preferredPlatform !== 'all') {
-         const pref = settingsStore.source.preferredPlatform
-         if (pref === 'netease') source = 'wy'
-         else if (pref === 'qq') source = 'tx'
-         else if (pref === 'kugou') source = 'kg'
-         else if (pref === 'kuwo') source = 'kw'
-         else if (pref === 'migu') source = 'mg'
-         else source = pref
-      }
+        // 映射歌曲 source 到插件支持的标识（netease → wy, qq → tx 等）
+        switch (song.source) {
+          case 'netease':
+            source = 'wy'
+            break
+          case 'qq':
+            source = 'tx'
+            break
+          case 'kugou':
+            source = 'kg'
+            break
+          case 'kuwo':
+            source = 'kw'
+            break
+          case 'migu':
+            source = 'mg'
+            break
+          default:
+            source = song.source
+            break
+        }
 
-      const quality = settingsStore.source.preferredQuality || '128k'
+        const originalSource = source // 保存原始音源，用于查询独立设置
+
+        // 应用该音源的独立平台设置（如 kw 独立设为 tx 平台）
+        const effectivePlatform = settingsStore.getEffectivePlatform(originalSource)
+        if (effectivePlatform && effectivePlatform !== 'all') {
+          source = effectivePlatform
+        }
+
+        // 应用该音源的独立音质设置（基于原始音源查询）
+        quality = settingsStore.getEffectiveQuality(originalSource) || quality
+      } else if (
+        settingsStore.source.preferredPlatform &&
+        settingsStore.source.preferredPlatform !== 'all'
+      ) {
+        // 歌曲无 source 信息时，回退到全局设置
+        const pref = settingsStore.source.preferredPlatform
+        if (pref === 'netease') source = 'wy'
+        else if (pref === 'qq') source = 'tx'
+        else if (pref === 'kugou') source = 'kg'
+        else if (pref === 'kuwo') source = 'kw'
+        else if (pref === 'migu') source = 'mg'
+        else source = pref
+      }
       const cacheKey = `${source}:${songId}:${quality}`
 
       // 尝试在获取在线 URL 之前，先检查本地缓存
@@ -253,13 +348,20 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
       // 如果检测到缓存，直接播放缓存，跳过 fetchGMALyric 和 runSnowdropGetMusicUrl
       // 但为了保证歌词显示，如果本地没有歌词，还是需要尝试获取歌词
       if (cacheFilePath) {
-        // 尝试获取歌词（如果当前歌曲没有歌词）
-        if (!song.lyrics) {
-           fetchLyricWithRetry(String(songId), source).then(lyric => {
-             if (lyric && player.currentSong?.id === song.id) {
-               player.setLyrics(lyric)
-             }
-           }).catch(e => console.error('Failed to fetch lyric in PlayerBar:', e))
+        // 判断是否需要获取歌词：没有歌词，或者QQ音乐只有LRC没有YRC逐字
+        const normalizedSourceForCache = source === 'qq' ? 'tx' : source
+        const needsYrcForCache = normalizedSourceForCache === 'tx' && song.lyrics && !isYrcFormat(song.lyrics)
+        if (!song.lyrics || needsYrcForCache) {
+          if (needsYrcForCache) {
+            console.log('[PlayerBar][Cache] 检测到 QQ 音乐 LRC 歌词，尝试获取 YRC 逐字歌词...')
+          }
+          fetchLyricWithRetry(String(songId), source)
+            .then((lyric) => {
+              if (lyric && player.currentSong?.id === song.id) {
+                player.setLyrics(lyric)
+              }
+            })
+            .catch((e) => console.error('Failed to fetch lyric in PlayerBar:', e))
         }
 
         try {
@@ -280,8 +382,8 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
           }
 
           if (player.currentSong?.id !== currentProcessId) {
-             webAudioEngine.stop()
-             return
+            webAudioEngine.stop()
+            return
           }
 
           // 更新当前歌曲的 filePath，以便后续使用
@@ -303,15 +405,22 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
         }
       }
 
-      // 尝试获取歌词（如果当前歌曲没有歌词）
-      if (!song.lyrics) {
-         // 使用重试机制获取歌词
-         fetchLyricWithRetry(String(songId), source).then(lyric => {
-           console.log('[PlayerBar] Fetched lyric with retry:', lyric ? 'Success' : 'Empty')
-           if (lyric && player.currentSong?.id === song.id) {
-             player.setLyrics(lyric)
-           }
-         }).catch(e => console.error('Failed to fetch lyric in PlayerBar:', e))
+      // 判断是否需要获取歌词：没有歌词，或者QQ音乐只有LRC没有YRC逐字
+      const normalizedSourceForOnline = source === 'qq' ? 'tx' : source
+      const needsYrcForOnline = normalizedSourceForOnline === 'tx' && song.lyrics && !isYrcFormat(song.lyrics)
+      if (!song.lyrics || needsYrcForOnline) {
+        if (needsYrcForOnline) {
+          console.log('[PlayerBar] 检测到 QQ 音乐 LRC 歌词，尝试获取 YRC 逐字歌词...')
+        }
+        // 使用重试机制获取歌词
+        fetchLyricWithRetry(String(songId), source)
+          .then((lyric) => {
+            console.log('[PlayerBar] Fetched lyric with retry:', lyric ? 'Success' : 'Empty')
+            if (lyric && player.currentSong?.id === song.id) {
+              player.setLyrics(lyric)
+            }
+          })
+          .catch((e) => console.error('Failed to fetch lyric in PlayerBar:', e))
       }
 
       const { url } = await runSnowdropGetMusicUrl(source, musicInfo, quality)
@@ -327,14 +436,11 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
 
       if (window.electron && window.electron.ipcRenderer) {
         try {
-          const cacheResult = (await window.electron.ipcRenderer.invoke(
-            'online-cache:prepare',
-            {
-              dir: settingsStore.local.cacheDir || null,
-              key: cacheKey,
-              url
-            }
-          )) as { usedCache: boolean; filePath: string | null; url: string }
+          const cacheResult = (await window.electron.ipcRenderer.invoke('online-cache:prepare', {
+            dir: settingsStore.local.cacheDir || null,
+            key: cacheKey,
+            url
+          })) as { usedCache: boolean; filePath: string | null; url: string }
 
           if (player.currentSong?.id !== currentProcessId) return
 
@@ -411,8 +517,8 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
       }
 
       if (player.currentSong?.id !== currentProcessId) {
-         webAudioEngine.stop()
-         return
+        webAudioEngine.stop()
+        return
       }
 
       const updatedSong: PlayerSong = {
@@ -426,7 +532,8 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
         source: song.source,
         sourceSongId: song.sourceSongId,
         // 保留已有的歌词，防止被覆盖为空
-        lyrics: song.lyrics || player.currentSong?.lyrics
+        lyrics: song.lyrics || player.currentSong?.lyrics,
+        translatedLyrics: song.translatedLyrics || player.currentSong?.translatedLyrics
       }
       player.setCurrentSong(updatedSong)
       if (shouldPlay) {
@@ -437,7 +544,7 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
     }
   }
 
-  if (!((song as any).filePath) && !song.source && !song.sourceSongId) {
+  if (!(song as any).filePath && !song.source && !song.sourceSongId) {
     try {
       const platform = settingsStore.source.preferredPlatform
       // 仅当首选平台为网易云或所有平台时，才使用网易云搜索回退
@@ -451,24 +558,25 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
 
       // 使用 GMA API 进行搜索
       const result = await searchMusic(keyword, 1, 10)
-      
+
       if (player.currentSong?.id !== currentProcessId) return
 
       const allSongs = result.songs || []
-      
+
       if (allSongs.length === 0) {
         return
       }
 
       // 尝试精确匹配
       const norm = (s: string) => s.toLowerCase().trim()
-      const target = allSongs.find((s: any) => {
-        const sName = norm(s.name || '')
-        const sArtist = norm(s.artist || '')
-        const tName = norm(name)
-        const tArtist = norm(artist)
-        return sName === tName && (!tArtist || sArtist === tArtist)
-      }) || allSongs[0]
+      const target =
+        allSongs.find((s: any) => {
+          const sName = norm(s.name || '')
+          const sArtist = norm(s.artist || '')
+          const tName = norm(name)
+          const tArtist = norm(artist)
+          return sName === tName && (!tArtist || sArtist === tArtist)
+        }) || allSongs[0]
 
       if (!target) {
         return
@@ -500,14 +608,11 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
 
       if (window.electron && window.electron.ipcRenderer) {
         try {
-          const cacheResult = (await window.electron.ipcRenderer.invoke(
-            'online-cache:prepare',
-            {
-              dir: settingsStore.local.cacheDir || null,
-              key: cacheKey,
-              url
-            }
-          )) as { usedCache: boolean; filePath: string | null; url: string }
+          const cacheResult = (await window.electron.ipcRenderer.invoke('online-cache:prepare', {
+            dir: settingsStore.local.cacheDir || null,
+            key: cacheKey,
+            url
+          })) as { usedCache: boolean; filePath: string | null; url: string }
 
           if (player.currentSong?.id !== currentProcessId) return
 
@@ -545,8 +650,8 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
         } catch (e) {
           console.error('[PlayerBar][SearchFallback] 从缓存文件播放失败，回退到在线播放:', e)
           if (player.currentSong?.id !== currentProcessId) {
-             webAudioEngine.stop()
-             return
+            webAudioEngine.stop()
+            return
           }
           if (shouldPlay) {
             await webAudioEngine.playFromUrl(finalUrl)
@@ -565,8 +670,8 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
       }
 
       if (player.currentSong?.id !== currentProcessId) {
-         webAudioEngine.stop()
-         return
+        webAudioEngine.stop()
+        return
       }
 
       const updatedSong: PlayerSong = {
@@ -580,7 +685,8 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
         source: source,
         sourceSongId: target.id,
         // 保留已有的歌词，防止被覆盖为空
-        lyrics: song.lyrics || player.currentSong?.lyrics
+        lyrics: song.lyrics || player.currentSong?.lyrics,
+        translatedLyrics: song.translatedLyrics || player.currentSong?.translatedLyrics
       }
       player.setCurrentSong(updatedSong)
       if (shouldPlay) {
@@ -594,11 +700,15 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
 
 // 监听 currentSong 变化，触发播放
 // 注意：LocalMusicView 中也有播放逻辑，这里主要是响应上一首/下一首的切换
-watch(() => player.currentSong, async (newSong, oldSong) => {
-  if (newSong && newSong.id !== oldSong?.id) {
-     await loadAndPlaySong(newSong)
+// 使用对象引用比较而非 id 比较，确保单曲循环模式下同一首歌也能重新加载
+watch(
+  () => player.currentSong,
+  async (newSong, oldSong) => {
+    if (newSong && newSong !== oldSong) {
+      await loadAndPlaySong(newSong)
+    }
   }
-})
+)
 
 // 播放 / 暂停切换
 const togglePlay = async () => {
@@ -641,9 +751,13 @@ const toggleMode = () => {
 
 const modeIcon = computed(() => {
   switch (player.playMode) {
-    case 'loop': return 'mgc_repeat_one_line'
-    case 'shuffle': return 'mgc_shuffle_line'
-    case 'list': default: return 'mgc_repeat_line'
+    case 'loop':
+      return 'mgc_repeat_one_line'
+    case 'shuffle':
+      return 'mgc_shuffle_line'
+    case 'list':
+    default:
+      return 'mgc_repeat_line'
   }
 })
 
@@ -751,8 +865,6 @@ const volumePercent = computed({
     updateVolume(val)
   }
 })
-
-
 
 // 已播放时间（秒），用于显示为分钟:秒
 const playedSeconds = computed(() => Math.floor(player.positionMs / 1000))
@@ -883,7 +995,6 @@ const ensureMediaSessionHandlers = () => {
   mediaSession.setActionHandler('previoustrack', () => {
     player.playPrev()
   })
-
 
   // 下一首
   mediaSession.setActionHandler('nexttrack', () => {
@@ -1044,18 +1155,21 @@ watch(showPlaylist, (val) => {
 
 import { nextTick } from 'vue'
 const drawerTarget = ref('body')
-watch(() => player.isPlayerPageShown, async (val) => {
-  if (val) {
-    await nextTick()
-    // Wait an extra tick to ensure Transition has started and element is fully inserted
-    setTimeout(() => {
-      drawerTarget.value = '#player-page-container'
-    }, 50)
-  } else {
-    drawerTarget.value = 'body'
-  }
-}, { immediate: true })
-
+watch(
+  () => player.isPlayerPageShown,
+  async (val) => {
+    if (val) {
+      await nextTick()
+      // Wait an extra tick to ensure Transition has started and element is fully inserted
+      setTimeout(() => {
+        drawerTarget.value = '#player-page-container'
+      }, 50)
+    } else {
+      drawerTarget.value = 'body'
+    }
+  },
+  { immediate: true }
+)
 </script>
 
 <template>
@@ -1087,7 +1201,7 @@ watch(() => player.isPlayerPageShown, async (val) => {
             <n-text strong class="song-title">
               {{ player.currentSong?.title || '未选择歌曲' }}
             </n-text>
-            <n-button text style="display: none;" @click="toggleFavorite">
+            <n-button text style="display: none" @click="toggleFavorite">
               <n-icon size="18" :color="isCurrentFavorite ? '#d03050' : undefined">
                 <i :class="isCurrentFavorite ? 'mgc_heart_fill' : 'mgc_heart_line'"></i>
               </n-icon>
@@ -1141,24 +1255,37 @@ watch(() => player.isPlayerPageShown, async (val) => {
       <n-button
         quaternary
         class="action-btn"
-        style="display: none;"
+        style="display: none"
         :type="isTaskbarLyricOpen ? 'primary' : 'default'"
         @click="toggleTaskbarLyric"
         title="任务栏歌词"
       >
         <n-icon size="22" style="margin-left: -5px"><i class="mgc_text_line"></i></n-icon>
       </n-button>
-      <n-button quaternary class="action-btn" @click="showSoundEffectsModal = true" title="音效调节">
-        <n-icon size="22" style="margin-left: -5px"><i class="mgc_audio_line"></i></n-icon>
+      <n-button
+        quaternary
+        class="action-btn"
+        @click="showSoundEffectsModal = true"
+      >
+        <n-icon size="22" style="margin-left: -5px"><i class="mgc_settings_2_line"></i></n-icon>
       </n-button>
-      <n-button quaternary class="action-btn"
-        ><n-icon size="22" style="margin-left: -5px"><i class="mgc_settings_2_line"></i></n-icon
-      ></n-button>
 
       <div class="volume-control">
-        <n-popover v-model:show="showVolumePopover" trigger="manual" :show-arrow="false" overlay-class="player-bar-volume-popover" :placement="'top'" :to="drawerTarget">
+        <n-popover
+          v-model:show="showVolumePopover"
+          trigger="manual"
+          :show-arrow="false"
+          overlay-class="player-bar-volume-popover"
+          :placement="'top'"
+          :to="drawerTarget"
+        >
           <template #trigger>
-            <n-button style="width: 40px; height: 40px" quaternary class="action-btn" @click="toggleVolumePopover">
+            <n-button
+              style="width: 40px; height: 40px"
+              quaternary
+              class="action-btn"
+              @click="toggleVolumePopover"
+            >
               <n-icon size="22" style="margin-left: -4px"><i class="mgc_volume_line"></i></n-icon
             ></n-button>
           </template>
@@ -1171,13 +1298,22 @@ watch(() => player.isPlayerPageShown, async (val) => {
               :max="100"
               :tooltip="false"
               class="volume-slider"
-              style="width: 4px; height: 100px; min-height: 100px; flex-shrink: 0;"
+              style="width: 4px; height: 100px; min-height: 100px; flex-shrink: 0"
             />
           </div>
         </n-popover>
       </div>
-      <n-badge :value="player.playlist.length" :max="999" :bordered="false" :show="player.playlist.length > 0">
-        <n-button style="width: 40px; height: 40px" quaternary class="action-btn" @click="togglePlaylist"
+      <n-badge
+        :value="player.playlist.length"
+        :max="999"
+        :bordered="false"
+        :show="player.playlist.length > 0"
+      >
+        <n-button
+          style="width: 40px; height: 40px"
+          quaternary
+          class="action-btn"
+          @click="togglePlaylist"
           ><n-icon size="22" style="margin-left: -4px"><i class="mgc_playlist_2_fill"></i></n-icon
         ></n-button>
       </n-badge>
@@ -1202,46 +1338,61 @@ watch(() => player.isPlayerPageShown, async (val) => {
           </div>
         </template>
 
-        <div ref="playlistContainerRef" style="padding: 12px;">
-           <n-empty v-if="player.playlist.length === 0" description="暂无歌曲" style="margin-top: 40px;" />
-           <div
-             v-else
-             v-for="(song, index) in player.playlist"
-             :key="song.id || index"
-             class="playlist-item"
-             :class="{ active: player.currentSong?.id === song.id }"
-             @click="handlePlaylistClick(song)"
-             :id="'song-' + song.id"
-           >
-             <div class="item-index">
-               <n-icon v-if="player.currentSong?.id === song.id" :color="themeVars.primaryColor"><i class="mgc_music_fill"></i></n-icon>
-               <span v-else>{{ index + 1 }}</span>
-             </div>
-             <div class="item-info">
-               <div class="item-title" :class="{ 'active-text': player.currentSong?.id === song.id }">{{ song.title }}</div>
-               <div class="item-artist">{{ song.artist }}</div>
-             </div>
-             <div class="item-actions">
-               <n-button text class="download-btn" @click.stop="downloadMusic(song)">
-                 <n-icon size="18"><i class="mgc_download_line"></i></n-icon>
-               </n-button>
-               <n-button text class="delete-btn" @click.stop="handleRemove(song)">
-                 <n-icon size="18"><i class="mgc_delete_line"></i></n-icon>
-               </n-button>
-             </div>
-           </div>
+        <div ref="playlistContainerRef" style="padding: 12px">
+          <n-empty
+            v-if="player.playlist.length === 0"
+            description="暂无歌曲"
+            style="margin-top: 40px"
+          />
+          <div
+            v-else
+            v-for="(song, index) in player.playlist"
+            :key="song.id || index"
+            class="playlist-item"
+            :class="{ active: player.currentSong?.id === song.id }"
+            @click="handlePlaylistClick(song)"
+            :id="'song-' + song.id"
+          >
+            <div class="item-index">
+              <n-icon v-if="player.currentSong?.id === song.id" :color="themeVars.primaryColor"
+                ><i class="mgc_music_fill"></i
+              ></n-icon>
+              <span v-else>{{ index + 1 }}</span>
+            </div>
+            <div class="item-info">
+              <div
+                class="item-title"
+                :class="{ 'active-text': player.currentSong?.id === song.id }"
+              >
+                {{ song.title }}
+              </div>
+              <div class="item-artist">{{ song.artist }}</div>
+            </div>
+            <div class="item-actions">
+              <n-button text class="download-btn" @click.stop="downloadMusic(song)">
+                <n-icon size="18"><i class="mgc_download_line"></i></n-icon>
+              </n-button>
+              <n-button text class="delete-btn" @click.stop="handleRemove(song)">
+                <n-icon size="18"><i class="mgc_delete_line"></i></n-icon>
+              </n-button>
+            </div>
+          </div>
         </div>
 
         <template #footer>
           <div class="playlist-footer">
-             <n-button class="footer-btn" quaternary @click="handleClear">
-               <template #icon><n-icon><i class="mgc_delete_2_line"></i></n-icon></template>
-               清空列表
-             </n-button>
-             <n-button class="footer-btn" secondary type="primary" @click="scrollToCurrent">
-               <template #icon><n-icon><i class="mgc_target_line"></i></n-icon></template>
-               当前播放
-             </n-button>
+            <n-button class="footer-btn" quaternary @click="handleClear">
+              <template #icon
+                ><n-icon><i class="mgc_delete_2_line"></i></n-icon
+              ></template>
+              清空列表
+            </n-button>
+            <n-button class="footer-btn" secondary type="primary" @click="scrollToCurrent">
+              <template #icon
+                ><n-icon><i class="mgc_target_line"></i></n-icon
+              ></template>
+              当前播放
+            </n-button>
           </div>
         </template>
       </n-drawer-content>
@@ -1666,7 +1817,9 @@ html[data-theme='dark'] .playlist-item.active {
   background-color: #2c8efd;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
   border: none;
-  transition: width 0.1s ease, height 0.1s ease;
+  transition:
+    width 0.1s ease,
+    height 0.1s ease;
 }
 
 .volume-slider :deep(.n-slider:hover .n-slider-handle) {

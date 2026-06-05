@@ -45,3 +45,7 @@ html[data-theme='dark'] body {
   opacity: 0;
   transform: translateY(10px);
 }
+
+.n-scrollbar > .n-scrollbar-container > .n-scrollbar-content {
+  padding-top: 0 !important;
+}

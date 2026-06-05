@@ -23,10 +23,11 @@ export function useTaskbarLyric() {
 
   // Sync lyrics to taskbar lyric window
   watch(
-    () => [playerStore.currentSong?.id, playerStore.currentSong?.lyrics],
+    () => [playerStore.currentSong?.id, playerStore.currentSong?.lyrics, playerStore.currentSong?.translatedLyrics],
     () => {
       const lyricsContent = playerStore.currentSong?.lyrics || ''
-      const parsedLyrics = parseLyricsToCore(lyricsContent)
+      const translatedContent = playerStore.currentSong?.translatedLyrics || ''
+      const parsedLyrics = parseLyricsToCore(lyricsContent, translatedContent)
       window.electron.ipcRenderer.send('taskbar-lyric:set-lyrics', parsedLyrics)
     },
     { deep: true }
@@ -84,7 +85,9 @@ export function useTaskbarLyric() {
     
     updateSettings()
     if (playerStore.currentSong?.lyrics) {
-      const parsedLyrics = parseLyricsToCore(playerStore.currentSong.lyrics)
+      const lyricsContent = playerStore.currentSong.lyrics
+      const translatedContent = playerStore.currentSong.translatedLyrics || ''
+      const parsedLyrics = parseLyricsToCore(lyricsContent, translatedContent)
       window.electron.ipcRenderer.send('taskbar-lyric:set-lyrics', parsedLyrics)
     }
     window.electron.ipcRenderer.send('taskbar-lyric:set-playing', playerStore.isPlaying)

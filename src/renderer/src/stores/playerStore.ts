@@ -10,6 +10,7 @@ export interface PlayerSong {
   album?: string
   filePath?: string
   lyrics?: string
+  translatedLyrics?: string // 翻译歌词原始文本
    source?: string // 音源平台标识（如 netease、本地等）
    sourceSongId?: string | number // 在对应平台上的原始歌曲 ID
 }
@@ -382,8 +383,22 @@ export const usePlayerStore = defineStore('player', {
         }
       }
     },
-    // 设置当前播放歌曲
+    /**
+     * 设置当前播放歌曲
+     * 自动保留已有的 lyrics 和 translatedLyrics，防止被覆盖为空
+     * @param song 要设置的歌曲对象
+     */
     setCurrentSong(song: PlayerSong | null): void {
+      if (song) {
+        // 如果新对象没有 lyrics 且当前歌曲是同 id 且有 lyrics，则保留
+        if (!song.lyrics && this.currentSong?.lyrics && this.currentSong.id === song.id) {
+          song = { ...song, lyrics: this.currentSong.lyrics }
+        }
+        // 如果新对象没有 translatedLyrics 且当前歌曲是同 id 且有，则保留
+        if (!song.translatedLyrics && this.currentSong?.translatedLyrics && this.currentSong.id === song.id) {
+          song = { ...song, translatedLyrics: this.currentSong.translatedLyrics }
+        }
+      }
       this.currentSong = song
       this.positionMs = 0
 
@@ -434,6 +449,25 @@ export const usePlayerStore = defineStore('player', {
         this.playlist[index] = {
           ...this.playlist[index],
           lyrics
+        }
+      }
+    },
+    /**
+     * 更新当前歌曲的翻译歌词
+     * @param lyrics 翻译歌词原始文本
+     */
+    setTranslatedLyrics(lyrics: string): void {
+      if (!this.currentSong) return
+      this.currentSong = {
+        ...this.currentSong,
+        translatedLyrics: lyrics
+      }
+
+      const index = this.playlist.findIndex((s) => s.id === this.currentSong?.id)
+      if (index !== -1) {
+        this.playlist[index] = {
+          ...this.playlist[index],
+          translatedLyrics: lyrics
         }
       }
     },

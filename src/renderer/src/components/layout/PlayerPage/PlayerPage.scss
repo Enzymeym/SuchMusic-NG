@@ -131,9 +131,9 @@
       flex-shrink: 0;
 
       .song-title {
-        font-size: 24px;
+        font-size: clamp(24px, 2.5vh, 42px);
         font-weight: 800;
-        margin-bottom: 12px;
+        margin-bottom: clamp(10px, 1.2vh, 14px);
         line-height: 1.2;
         color: var(--player-accent-color, #fff); // 歌曲标题使用封面主色
       }
@@ -141,10 +141,10 @@
       .tags-row {
         display: none;
         gap: 8px;
-        margin-bottom: 16px;
+        margin-bottom: clamp(12px, 1.6vh, 18px);
 
         .tag-badge {
-          font-size: 10px;
+          font-size: clamp(10px, 1vh, 12px);
           padding: 2px 6px;
           border: 1px solid rgba(255, 255, 255, 0.4);
           border-radius: 4px;
@@ -157,7 +157,7 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        font-size: 16px;
+        font-size: clamp(15px, 1.8vh, 18px);
         color: var(--player-accent-color, rgba(255, 255, 255, 0.7)); // 歌曲信息文字使用封面主色
         margin-bottom: 2px;
       }
@@ -182,14 +182,14 @@
         :deep(.am-lyric div[class*='lyricMainLine']),
         :deep(.am-lyric div[class*='lyricMainLine'] span),
         :deep(.lyric-line) {
-          font-size: clamp(20px, calc(1.5vh + 1.5vw), 36px) !important;
+          font-size: clamp(24px, calc(1.5vh + 1.5vw), 38px) !important;
           line-height: 1.25;
         }
 
         :deep(.am-lyric div[class*='lyricSubLine']),
         :deep(.am-lyric div[class*='lyricSubLine'] span),
         :deep(.lyric-translation) {
-          font-size: clamp(14px, calc(1vh + 1vw), 24px) !important;
+          font-size: clamp(16px, calc(1vh + 1vw), 24px) !important;
         }
       }
 
@@ -198,14 +198,14 @@
         :deep(.am-lyric div[class*='lyricMainLine']),
         :deep(.am-lyric div[class*='lyricMainLine'] span),
         :deep(.lyric-line) {
-          font-size: clamp(24px, calc(1.8vh + 1.8vw), 42px) !important;
+          font-size: clamp(28px, calc(1.8vh + 1.8vw), 44px) !important;
           line-height: 1.25;
         }
 
         :deep(.am-lyric div[class*='lyricSubLine']),
         :deep(.am-lyric div[class*='lyricSubLine'] span),
         :deep(.lyric-translation) {
-          font-size: clamp(16px, calc(1.2vh + 1.2vw), 28px) !important;
+          font-size: clamp(18px, calc(1.2vh + 1.2vw), 28px) !important;
         }
       }
 

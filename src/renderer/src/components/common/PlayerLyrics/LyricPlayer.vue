@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { parseYrc, parseQrc, parseTTML, decryptQrcHex } from '@applemusic-like-lyrics/lyric'
 import type { LyricLine as CoreLyricLine, LyricWord as CoreLyricWord } from '@applemusic-like-lyrics/core'
 import { LyricsView, parseLyrics } from 'suth-lyric-kit'
 import AMLLLyricPlayer from '../AMLL/LyricPlayer.vue'
-import { parseLrc as parseBetterLrc } from '../../../utils/lyric/ParseLrc'
+import { parseLyricsToCore } from '../../../utils/lyric/lyricParser'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePlayerStore } from '../../../stores/playerStore'
 import { webAudioEngine } from '../../../audio/audio-engine'
@@ -21,6 +20,11 @@ const props = defineProps({
     type: [String, Array, Object],
     description: '歌词数据，apple模式为数组，suth模式为字符串或解析后的对象',
     default: () => []
+  },
+  translatedLyrics: {
+    type: String,
+    description: '翻译歌词文本',
+    default: ''
   },
   currentTime: {
     type: Number,
@@ -43,9 +47,24 @@ const props = defineProps({
 const suthLyrics = computed(() => {
   if (props.mode === 'suth') {
     if (typeof props.lyrics === 'string') {
-      return parseLyrics(props.lyrics)
+      const parsed = parseLyrics(props.lyrics)
+      // 合并翻译歌词到 suth 模式下
+      if (props.translatedLyrics && parsed.lines.length > 0) {
+        try {
+          const translatedParsed = parseLyrics(props.translatedLyrics)
+          const maxLen = Math.min(parsed.lines.length, translatedParsed.lines.length)
+          for (let i = 0; i < maxLen; i++) {
+            const translatedText = translatedParsed.lines[i]!.text
+            if (translatedText) {
+              parsed.lines[i] = { ...parsed.lines[i], translation: translatedText }
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+      return parsed
     }
-    // If it's already an object (ParsedLyrics), return it
     if (typeof props.lyrics === 'object' && !Array.isArray(props.lyrics)) {
       return props.lyrics as any
     }
@@ -59,58 +78,8 @@ const appleLyrics = computed<CoreLyricLine[]>(() => {
       return props.lyrics
     }
     if (typeof props.lyrics === 'string') {
-      const lrc = props.lyrics.trim()
-      // 使用 any 避免直接耦合 amll-lyric 的类型定义
-      let lines: any[] = []
-
-      try {
-        // TTML
-        if (lrc.includes('<tt') && lrc.includes('xmlns="http://www.w3.org/ns/ttml"')) {
-          lines = parseTTML(lrc).lines
-        }
-        // QRC (Hex)
-        else if (/^[0-9a-fA-F]+$/.test(lrc) && lrc.length > 100) {
-          try {
-            const decrypted = decryptQrcHex(lrc)
-            lines = parseQrc(decrypted)
-          } catch {
-            // ignore
-          }
-        }
-        // QRC (XML)
-        else if (lrc.startsWith('<?xml') && lrc.includes('<Qrc')) {
-          lines = parseQrc(lrc)
-        }
-        // YRC (Guess by content)
-        else if (/\(\d+,\d+\)/.test(lrc)) {
-          lines = parseYrc(lrc)
-        }
-        // 其他情况回退为 LRC，使用自定义解析器
-        else {
-          lines = parseBetterLrc(lrc)
-        }
-        // 将 amll-lyric 的行结构转换到 core 定义的行结构
-        return lines.map((line) => ({
-          words: line.words.map(
-            (w): CoreLyricWord => ({
-              word: w.word,
-              romanWord: w.romanWord ?? '',
-              startTime: w.startTime,
-              endTime: w.endTime,
-              obscene: false // 默认按非敏感词处理
-            })
-          ),
-          startTime: line.startTime,
-          endTime: line.endTime,
-          translatedLyric: line.translatedLyric ?? '',
-          romanLyric: line.romanLyric ?? '',
-          isBG: line.isBG ?? false,
-          isDuet: line.isDuet ?? false
-        }))
-      } catch (e) {
-        console.error('Lyric parse failed:', e)
-        return []
-      }
+      const translatedContent = props.translatedLyrics || playerStore.currentSong?.translatedLyrics || ''
+      return parseLyricsToCore(props.lyrics, translatedContent)
     }
   }
   return []

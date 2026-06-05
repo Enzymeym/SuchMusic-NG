@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import {
   NConfigProvider,
   NGlobalStyle,
+  NNotificationProvider,
   NMessageProvider,
   NDialogProvider,
   NButton,
@@ -26,6 +27,7 @@ import {
   runSnowdropLoadAllPlugins,
   type SnowdropTransformTestResult
 } from './apis/snowdrop-transform'
+import PluginUpdateNotifier from './components/common/PluginUpdateNotifier.vue'
 
 const UpdateNotification = defineAsyncComponent(
   () => import('./components/common/UpdateNotification.vue')
@@ -118,6 +120,9 @@ onUnmounted(() => {
     saveInterval = null
   }
 
+  // 确保设置已保存
+  settingsStore.saveSettings()
+
   // 清除事件监听器
   if (!isDesktopLyric.value) {
     window.electron.ipcRenderer.removeAllListeners('player:control')
@@ -172,11 +177,6 @@ onMounted(() => {
 
     // 监听主进程发来的插件热更新完成事件
     window.electron.ipcRenderer.on('plugin:hot-updated', async (_, data: any) => {
-      // 显示更新成功提示
-      new Notification('更新完成', {
-        body: `插件 ${data.pluginName} 已成功热更新。`
-      })
-      // 可以在此处执行刷新操作或重新加载插件等逻辑
       console.log(`Plugin ${data.pluginName} hot updated at ${data.path}`)
       try {
         await runSnowdropLoadAllPlugins()
@@ -306,9 +306,11 @@ onMounted(() => {
     :hljs="hljs"
   >
     <n-global-style v-if="!isDesktopLyric" />
-    <n-message-provider>
+    <n-notification-provider>
+      <n-message-provider>
       <n-dialog-provider>
         <update-notification />
+        <PluginUpdateNotifier />
         <router-view />
         <div class="snowdrop-test-panel">
           <n-card size="small" title="落雪音源插件调试">
@@ -431,6 +433,7 @@ onMounted(() => {
         </div>
       </n-dialog-provider>
     </n-message-provider>
+  </n-notification-provider>
   </n-config-provider>
 </template>
 

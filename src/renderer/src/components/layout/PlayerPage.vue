@@ -91,6 +91,7 @@ const {
 const {
   currentTime,
   lyricsData,
+  translatedLyricsData,
   lyricsMode,
   lyricsBaseFontSize,
   lyricsAreaRatio,
@@ -227,6 +228,7 @@ watch(
                 >
                   <LyricPlayer
                     :lyrics="lyricsData"
+                    :translated-lyrics="translatedLyricsData"
                     :current-time="currentTime"
                     :mode="lyricsMode"
                     :font-size="lyricsBaseFontSize"

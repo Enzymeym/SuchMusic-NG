@@ -67,6 +67,16 @@ export interface LocalSettings {
 export interface SourceSettings {
   preferredPlatform: string
   preferredQuality: string
+  /** 各音源独立偏好设置，key 为音源ID（如 kw/kg/tx/wy/mg） */
+  perSourcePreferences: Record<string, SourcePreference>
+}
+
+/** 单个音源的独立偏好设置 */
+export interface SourcePreference {
+  /** 首选平台，为空表示跟随全局 */
+  platform?: string
+  /** 首选音质，为空表示跟随全局 */
+  quality?: string
 }
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -141,7 +151,8 @@ export const useSettingsStore = defineStore('settings', () => {
 
   const source = ref<SourceSettings>({
     preferredPlatform: 'all',
-    preferredQuality: '128k'
+    preferredQuality: '128k',
+    perSourcePreferences: {}
   })
 
   // 获取系统主题
@@ -302,13 +313,53 @@ export const useSettingsStore = defineStore('settings', () => {
     }, 500)
   }
 
-  // 监听每个设置分组的顶层属性变化，使用浅监听替代 deep watch
-  watch([general, appearance, playback, local, source], () => {
+  // 监听每个设置分组的属性变化，使用深度监听确保嵌套属性变更也能触发保存
+  watch([general, appearance, playback, local], () => {
     debouncedSave()
-  }, { deep: false })
+  }, { deep: true })
+
+  // 对 source 启用深度监听，确保 perSourcePreferences 的嵌套修改也能触发保存
+  watch(source, () => {
+    debouncedSave()
+  }, { deep: true })
 
   // Initialize
   loadSettings()
+
+  // 窗口关闭前立即刷新待保存的设置，避免防抖窗口期内修改丢失
+  if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', () => {
+      if (saveTimer) {
+        clearTimeout(saveTimer)
+        saveTimer = null
+      }
+      saveSettings()
+    })
+  }
+
+  /**
+   * 获取指定音源的有效平台设置
+   * 优先使用音源独立设置，否则回退到全局设置
+   * @param sourceId 音源ID（如 kw、kg、tx等）
+   * @returns 有效的平台偏好值
+   */
+  const getEffectivePlatform = (sourceId: string): string => {
+    const pref = source.value.perSourcePreferences[sourceId]
+    if (pref?.platform) return pref.platform
+    return source.value.preferredPlatform
+  }
+
+  /**
+   * 获取指定音源的有效音质设置
+   * 优先使用音源独立设置，否则回退到全局设置
+   * @param sourceId 音源ID（如 kw、kg、tx等）
+   * @returns 有效的音质偏好值
+   */
+  const getEffectiveQuality = (sourceId: string): string => {
+    const pref = source.value.perSourcePreferences[sourceId]
+    if (pref?.quality) return pref.quality
+    return source.value.preferredQuality
+  }
 
   const updateAppearance = (settings: Partial<AppearanceSettings>) => {
     appearance.value = { ...appearance.value, ...settings }
@@ -320,6 +371,9 @@ export const useSettingsStore = defineStore('settings', () => {
     playback,
     local,
     source,
-    updateAppearance
+    updateAppearance,
+    getEffectivePlatform,
+    getEffectiveQuality,
+    saveSettings
   }
 })

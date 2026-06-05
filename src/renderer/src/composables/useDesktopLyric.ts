@@ -33,7 +33,8 @@ export function useDesktopLyric() {
   const updateLyrics = () => {
     if (!isDesktopLyricOpen.value) return
     const lyricsContent = player.currentSong?.lyrics || ''
-    const parsed = parseLyricsToCore(lyricsContent)
+    const translatedContent = player.currentSong?.translatedLyrics || ''
+    const parsed = parseLyricsToCore(lyricsContent, translatedContent)
     window.electron.ipcRenderer.send('desktop-lyric:set-lyrics', parsed)
     
     // Also update info
@@ -64,7 +65,7 @@ export function useDesktopLyric() {
     window.electron.ipcRenderer.send('desktop-lyric:set-settings', config)
   }
 
-  watch(() => [player.currentSong?.id, player.currentSong?.lyrics], () => {
+  watch(() => [player.currentSong?.id, player.currentSong?.lyrics, player.currentSong?.translatedLyrics], () => {
     updateLyrics()
   })
 

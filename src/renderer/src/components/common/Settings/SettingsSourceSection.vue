@@ -69,6 +69,10 @@ const errorMessage = ref<string | null>(null)
 const showLogsModal = ref(false)
 // 当前查看日志的插件结果
 const currentLogResult = ref<SnowdropTransformTestResult | null>(null)
+// 落雪插件平台配置弹窗状态
+const showPluginPlatformConfigModal = ref(false)
+// 当前正在配置平台的落雪插件索引
+const currentConfigPluginIndex = ref<number | null>(null)
 
 // ============ Such 插件相关状态 ============
 // Such 插件列表
@@ -184,6 +188,127 @@ const platformOptions = computed(() => {
   }
   return uniqueOptions
 })
+
+/**
+ * 获取音源的平台偏好（'' 表示跟随全局）
+ * @param sourceId 音源ID
+ * @returns 平台偏好值
+ */
+const getSourcePlatform = (sourceId: string): string => {
+  return settingsStore.source.perSourcePreferences[sourceId]?.platform || ''
+}
+
+/**
+ * 设置音源的平台偏好
+ * @param sourceId 音源ID
+ * @param platform 平台值，'' 表示跟随全局
+ */
+const setSourcePlatform = (sourceId: string, platform: string): void => {
+  if (!settingsStore.source.perSourcePreferences[sourceId]) {
+    settingsStore.source.perSourcePreferences[sourceId] = {}
+  }
+  settingsStore.source.perSourcePreferences[sourceId].platform = platform || undefined
+  if (!platform && !settingsStore.source.perSourcePreferences[sourceId].quality) {
+    delete settingsStore.source.perSourcePreferences[sourceId]
+  }
+}
+
+/**
+ * 获取音源的音质偏好（'' 表示跟随全局）
+ * @param sourceId 音源ID
+ * @returns 音质偏好值
+ */
+const getSourceQuality = (sourceId: string): string => {
+  return settingsStore.source.perSourcePreferences[sourceId]?.quality || ''
+}
+
+/**
+ * 设置音源的音质偏好
+ * @param sourceId 音源ID
+ * @param quality 音质值，'' 表示跟随全局
+ */
+const setSourceQuality = (sourceId: string, quality: string): void => {
+  if (!settingsStore.source.perSourcePreferences[sourceId]) {
+    settingsStore.source.perSourcePreferences[sourceId] = {}
+  }
+  settingsStore.source.perSourcePreferences[sourceId].quality = quality || undefined
+  if (!quality && !settingsStore.source.perSourcePreferences[sourceId].platform) {
+    delete settingsStore.source.perSourcePreferences[sourceId]
+  }
+}
+
+/**
+ * 打开落雪插件的平台配置弹窗
+ * @param index 插件在列表中的索引
+ */
+const handleOpenPluginPlatformConfig = (index: number): void => {
+  currentConfigPluginIndex.value = index
+  showPluginPlatformConfigModal.value = true
+}
+
+/**
+ * 获取当前正在配置平台的落雪插件数据
+ * @returns 当前插件信息
+ */
+const currentConfigPlugin = computed(() => {
+  if (currentConfigPluginIndex.value === null) return null
+  return plugins.value[currentConfigPluginIndex.value] || null
+})
+
+/**
+ * 为指定插件构建平台选择选项
+ * 包含"跟随全局"及各可用平台
+ * @param plugin 插件数据
+ * @returns 平台选项列表
+ */
+const getPluginPlatformOptions = (plugin: SnowdropTransformTestResult) => {
+  const options: { label: string; value: string }[] = [
+    { label: '跟随全局 (默认)', value: '' }
+  ]
+  const seen = new Set<string>()
+  if (plugin.sources) {
+    for (const src of plugin.sources) {
+      if (!seen.has(src.id)) {
+        seen.add(src.id)
+        options.push({ label: src.name || src.id, value: src.id })
+      }
+    }
+  }
+  return options
+}
+
+/**
+ * 为指定插件构建音质选择选项
+ * 收集该插件所有平台支持的音质
+ * @param plugin 插件数据
+ * @returns 音质选项列表
+ */
+const getPluginQualityOptions = (plugin: SnowdropTransformTestResult) => {
+  const options: { label: string; value: string }[] = [
+    { label: '跟随全局 (默认)', value: '' }
+  ]
+  const qualities = new Set<string>()
+  if (plugin.sources) {
+    for (const src of plugin.sources) {
+      for (const q of src.qualities || []) {
+        qualities.add(q)
+      }
+    }
+  }
+  const priority = ['128k', '320k', 'flac', 'flac24bit', 'hires', 'master', 'atmos']
+  const sorted = Array.from(qualities).sort((a, b) => {
+    const idxA = priority.indexOf(a)
+    const idxB = priority.indexOf(b)
+    if (idxA !== -1 && idxB !== -1) return idxA - idxB
+    if (idxA !== -1) return -1
+    if (idxB !== -1) return 1
+    return a.localeCompare(b)
+  })
+  for (const q of sorted) {
+    options.push({ label: getQualityLabel(q), value: q })
+  }
+  return options
+}
 
 // 初始化时从主进程加载已保存的音源插件
 onMounted(async () => {
@@ -587,6 +712,14 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
                       设为当前
                     </n-button>
                     <n-button
+                      v-if="result.sources && result.sources.length"
+                      size="small"
+                      secondary
+                      @click="handleOpenPluginPlatformConfig(index)"
+                    >
+                      设置
+                    </n-button>
+                    <n-button
                       size="small"
                       tertiary
                       :disabled="
@@ -808,6 +941,46 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
         </n-button>
       </template>
     </n-modal>
+
+    <!-- 落雪插件平台配置二级弹窗 -->
+    <n-modal
+      v-model:show="showPluginPlatformConfigModal"
+      preset="card"
+      :title="currentConfigPlugin ? `${currentConfigPlugin.meta.name} - 平台配置` : '平台配置'"
+      style="width: 420px"
+    >
+      <template v-if="currentConfigPlugin && currentConfigPlugin.filePath">
+        <div class="plugin-platform-config-body">
+          <div class="plugin-line" style="margin-bottom: 16px">
+            为该插件单独指定默认平台和音质：
+          </div>
+          <div class="plugin-platform-config-item">
+            <div class="plugin-platform-config-label">
+              <span class="platform-name">默认平台</span>
+            </div>
+            <n-select
+              :value="getSourcePlatform(currentConfigPlugin.filePath)"
+              :options="getPluginPlatformOptions(currentConfigPlugin)"
+              style="width: 100%"
+              placeholder="跟随全局 (默认)"
+              @update:value="(val: string) => setSourcePlatform(currentConfigPlugin.filePath!, val)"
+            />
+          </div>
+          <div class="plugin-platform-config-item">
+            <div class="plugin-platform-config-label">
+              <span class="platform-name">默认音质</span>
+            </div>
+            <n-select
+              :value="getSourceQuality(currentConfigPlugin.filePath)"
+              :options="getPluginQualityOptions(currentConfigPlugin)"
+              style="width: 100%"
+              placeholder="跟随全局 (默认)"
+              @update:value="(val: string) => setSourceQuality(currentConfigPlugin.filePath!, val)"
+            />
+          </div>
+        </div>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -929,5 +1102,31 @@ const handleUninstallSuchPlugin = async (plugin: Plugin) => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.plugin-platform-config-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plugin-platform-config-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--n-border-color, #e5e5e5);
+  border-radius: 6px;
+}
+
+.plugin-platform-config-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.platform-name {
+  font-size: 14px;
+  font-weight: 600;
 }
 </style>

@@ -70,6 +70,7 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { runSnowdropGetMusicUrl } from '../apis/snowdrop-transform'
 import { AudioPlayerManager } from '../utils/audioPlayerManager'
 import { fetchGMALyric } from '../apis/gma'
+import { fetchQQMusicLyric } from '../apis/vkeys'
 
 interface RecentSong {
   id: string | number
@@ -237,6 +238,9 @@ const handleSongClick = async (song: RecentSong) => {
 
     // 歌词重试获取函数
     const fetchLyricWithRetry = async (id: string, source: string): Promise<string> => {
+      // 标准化 source：将外部格式 qq→tx 统一为内部格式
+      const normalizedSource = source === 'qq' ? 'tx' : source
+
       let attempt = 0
       while (true) {
         // 检查当前播放歌曲是否改变，如果改变则停止重试
@@ -246,7 +250,22 @@ const handleSongClick = async (song: RecentSong) => {
         }
 
         try {
-          const lyricText = await fetchGMALyric(String(id), source)
+          // QQ音乐优先使用 VKeys API
+          if (normalizedSource === 'tx') {
+            try {
+              const result = await fetchQQMusicLyric(String(id))
+              const mainLyric = result.yrc || result.lrc
+              if (mainLyric) {
+                if (result.trans) {
+                  player.setTranslatedLyrics(result.trans)
+                }
+                return mainLyric
+              }
+            } catch (e) {
+              console.warn(`获取歌词失败，第 ${attempt + 1} 次重试:`, e)
+            }
+          }
+          const lyricText = await fetchGMALyric(String(id), normalizedSource)
           if (lyricText) return lyricText
         } catch (e) {
           console.warn(`获取歌词失败，第 ${attempt + 1} 次重试:`, e)

@@ -618,14 +618,16 @@ export function registerPluginManagerHandlers(): void {
   })
 
   /**
-   * 检查更新
+   * 检查插件更新
+   * @param _event IPC 事件
+   * @param pluginId 插件ID
+   * @returns PluginUpdateResult 格式的更新检查结果
    */
   ipcMain.handle('plugin:checkUpdate', async (_event, pluginId: string) => {
     try {
       let host = pluginInstances.get(pluginId)
 
       if (!host) {
-        // 尝试加载插件
         const code = await loadPluginCode(pluginId)
         const logger = new Logger(pluginId)
         host = new SuchMusicPluginHost()
@@ -634,9 +636,20 @@ export function registerPluginManagerHandlers(): void {
       }
 
       const result = await host.checkUpdate()
-      return { result }
+      if (result && result.version) {
+        return {
+          hasUpdate: true,
+          version: result.version,
+          changelog: result.log || result.changelog,
+          downloadUrl: result.url || result.downloadUrl || result.updateUrl
+        }
+      }
+      return { hasUpdate: false }
     } catch (error: any) {
-      return { error: error.message || '检查更新失败' }
+      return {
+        hasUpdate: false,
+        error: error.message || '检查更新失败'
+      }
     }
   })
 
@@ -681,6 +694,23 @@ export function registerPluginManagerHandlers(): void {
       return { result: method === 'musicUrl' ? { url: result } : result }
     } catch (error: any) {
       return { error: error.message || '调用插件方法失败' }
+    }
+  })
+
+  /**
+   * 执行插件热更新（由渲染进程 NaiveUI 通知按钮触发）
+   * @param _event IPC 事件
+   * @param pluginName 插件名称
+   * @param updateUrl 更新下载地址
+   * @returns 热更新结果
+   */
+  ipcMain.handle('plugin:execute-hot-update', async (_event, pluginName: string, updateUrl: string) => {
+    try {
+      const { executeHotUpdate } = await import('../../plugin/manager/pluginNotifier')
+      await executeHotUpdate(pluginName, updateUrl)
+      return { success: true }
+    } catch (error: any) {
+      return { error: error.message || '热更新失败' }
     }
   })
 
@@ -742,13 +772,7 @@ export async function checkAllPluginsForUpdates(): Promise<void> {
         if (updateInfo && updateInfo.version) {
           sendLogToFrontend('log', `插件 ${pluginId} 有更新: ${updateInfo.version}`)
         } else if (updateInfo === null) {
-          // 检查插件类型
-          const isNewStyle = host.isNewStylePlugin
-          if (isNewStyle) {
-            sendLogToFrontend('log', `插件 ${pluginId} 未实现更新检查功能`)
-          } else {
-            sendLogToFrontend('log', `插件 ${pluginId} 为旧版插件，不支持自动更新检查`)
-          }
+          sendLogToFrontend('log', `插件 ${pluginId} 暂无可用更新`)
         } else {
           sendLogToFrontend('log', `插件 ${pluginId} 无更新`)
         }
