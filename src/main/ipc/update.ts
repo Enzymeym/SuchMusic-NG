@@ -22,25 +22,28 @@ export function registerUpdateHandlers(): void {
    * @param channel 更新通道，'stable' 或 'beta'
    * @returns 更新检查结果
    */
-  ipcMain.handle('update:check', async (_event, channel: 'stable' | 'beta'): Promise<UpdateCheckResult> => {
-    try {
-      const result = await checkForUpdate(channel)
-      return result
-    } catch (error: any) {
-      console.error('检查更新 IPC 调用失败:', error)
-      return {
-        hasUpdate: false,
-        currentVersion: getCurrentVersion(),
-        latestVersion: getCurrentVersion(),
-        releaseName: '',
-        releaseNotes: '',
-        downloadUrl: null,
-        publishedAt: '',
-        isPrerelease: false,
-        error: error.message || '检查更新失败'
+  ipcMain.handle(
+    'update:check',
+    async (_event, channel: 'stable' | 'beta'): Promise<UpdateCheckResult> => {
+      try {
+        const result = await checkForUpdate(channel)
+        return result
+      } catch (error: any) {
+        console.error('检查更新 IPC 调用失败:', error)
+        return {
+          hasUpdate: false,
+          currentVersion: getCurrentVersion(),
+          latestVersion: getCurrentVersion(),
+          releaseName: '',
+          releaseNotes: '',
+          downloadUrl: null,
+          publishedAt: '',
+          isPrerelease: false,
+          error: error.message || '检查更新失败'
+        }
       }
     }
-  })
+  )
 
   /**
    * 下载更新包
@@ -48,21 +51,27 @@ export function registerUpdateHandlers(): void {
    * @param url 更新包下载链接
    * @returns 下载后的本地文件路径
    */
-  ipcMain.handle('update:download', async (_event, url: string): Promise<{ success: boolean; filePath?: string; error?: string }> => {
-    try {
-      // 如果之前有下载的文件，先清理
-      if (downloadedFilePath) {
-        await cleanupUpdateFile(downloadedFilePath)
-      }
+  ipcMain.handle(
+    'update:download',
+    async (
+      _event,
+      url: string
+    ): Promise<{ success: boolean; filePath?: string; error?: string }> => {
+      try {
+        // 如果之前有下载的文件，先清理
+        if (downloadedFilePath) {
+          await cleanupUpdateFile(downloadedFilePath)
+        }
 
-      const filePath = await downloadUpdate(url)
-      downloadedFilePath = filePath
-      return { success: true, filePath }
-    } catch (error: any) {
-      console.error('下载更新失败:', error)
-      return { success: false, error: error.message || '下载更新失败' }
+        const filePath = await downloadUpdate(url)
+        downloadedFilePath = filePath
+        return { success: true, filePath }
+      } catch (error: any) {
+        console.error('下载更新失败:', error)
+        return { success: false, error: error.message || '下载更新失败' }
+      }
     }
-  })
+  )
 
   /**
    * 安装更新
@@ -70,20 +79,23 @@ export function registerUpdateHandlers(): void {
    * @param filePath 更新包本地路径（可选，默认使用最近一次下载的文件）
    * @returns 安装是否成功
    */
-  ipcMain.handle('update:install', async (_event, filePath?: string): Promise<{ success: boolean; error?: string }> => {
-    try {
-      const targetPath = filePath || downloadedFilePath
-      if (!targetPath) {
-        return { success: false, error: '未找到下载的更新包' }
-      }
+  ipcMain.handle(
+    'update:install',
+    async (_event, filePath?: string): Promise<{ success: boolean; error?: string }> => {
+      try {
+        const targetPath = filePath || downloadedFilePath
+        if (!targetPath) {
+          return { success: false, error: '未找到下载的更新包' }
+        }
 
-      installUpdate(targetPath)
-      return { success: true }
-    } catch (error: any) {
-      console.error('安装更新失败:', error)
-      return { success: false, error: error.message || '安装更新失败' }
+        installUpdate(targetPath)
+        return { success: true }
+      } catch (error: any) {
+        console.error('安装更新失败:', error)
+        return { success: false, error: error.message || '安装更新失败' }
+      }
     }
-  })
+  )
 
   /**
    * 获取当前应用版本号

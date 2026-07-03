@@ -13,10 +13,8 @@ import {
   NText,
   NIcon,
   NTooltip,
-  NPopover,
   NInput,
   NSelect,
-  NProgress,
   NScrollbar,
   NTag,
   NPopconfirm,
@@ -34,7 +32,7 @@ const emit = defineEmits<{
   (e: 'update:show', value: boolean): void
 }>()
 
-const audioEngine = useAudioEngine()
+const audioEngine = useAudioEngine() as any
 
 const showModal = computed({
   get: () => props.show,
@@ -87,6 +85,22 @@ const loudnessDirectionOptions = [
   { label: '补偿高频', value: 'high' }
 ]
 
+/**
+ * 虚拟低频参数范围
+ */
+const virtualBassRanges = {
+  intensity: { min: 0, max: 100, step: 1 },
+  crossoverFreq: { min: 40, max: 300, step: 1 }
+}
+
+/**
+ * 爆音抑制（软限幅器）参数范围
+ */
+const softClipperRanges = {
+  threshold: { min: 0.5, max: 5.0, step: 0.1 },
+  makeupGain: { min: 0, max: 6, step: 0.1 }
+}
+
 // 预设选项
 const presetOptions = computed(() => {
   return audioEngine.presets.value.map((p) => ({
@@ -124,15 +138,6 @@ const gainReductionStyle = (gr: number) => {
 const formatDb = (val: number) => {
   if (val === 0) return '0 dB'
   return `${val > 0 ? '+' : ''}${val.toFixed(1)} dB`
-}
-
-const formatMs = (val: number) => {
-  if (val < 1) return `${val.toFixed(1)} ms`
-  return `${Math.round(val)} ms`
-}
-
-const formatRatio = (val: number) => {
-  return `${val.toFixed(1)}:1`
 }
 
 /**
@@ -185,7 +190,7 @@ export default {
       role="dialog"
       aria-modal="true"
       :style="{
-        width: '720px',
+        width: '820px',
         maxWidth: '90vw',
         backgroundColor: themeVars.modalColor
       }"
@@ -202,7 +207,7 @@ export default {
 
       <n-scrollbar class="modal-scroll" style="max-height: 520px">
         <div class="modal-content-inner">
-          <n-tabs v-model:value="activeTab" type="segment" animated>
+          <n-tabs v-model:value="activeTab" placement="left" type="line" animated>
             <!-- EQ 均衡器 -->
             <n-tab-pane name="eq" tab="均衡器">
               <div class="tab-content">
@@ -423,7 +428,7 @@ export default {
                           :step="compressorRanges.threshold.step"
                           size="small"
                           style="width: 90px"
-                          @update:value="(v) => audioEngine.setCompressorParams({ threshold: v })"
+                          @update:value="(v: any) => audioEngine.setCompressorParams({ threshold: v })"
                         />
                       </div>
                       <n-slider
@@ -432,7 +437,7 @@ export default {
                         :max="compressorRanges.threshold.max"
                         :step="compressorRanges.threshold.step"
                         :tooltip="false"
-                        @update:value="(v) => audioEngine.setCompressorParams({ threshold: v })"
+                        @update:value="(v: any) => audioEngine.setCompressorParams({ threshold: v })"
                       />
                       <div class="param-range">
                         <span>{{ compressorRanges.threshold.min }} dB</span>
@@ -451,7 +456,7 @@ export default {
                           :step="compressorRanges.ratio.step"
                           size="small"
                           style="width: 90px"
-                          @update:value="(v) => audioEngine.setCompressorParams({ ratio: v })"
+                          @update:value="(v: any) => audioEngine.setCompressorParams({ ratio: v })"
                         />
                       </div>
                       <n-slider
@@ -460,7 +465,7 @@ export default {
                         :max="compressorRanges.ratio.max"
                         :step="compressorRanges.ratio.step"
                         :tooltip="false"
-                        @update:value="(v) => audioEngine.setCompressorParams({ ratio: v })"
+                        @update:value="(v: any) => audioEngine.setCompressorParams({ ratio: v })"
                       />
                       <div class="param-range">
                         <span>{{ compressorRanges.ratio.min }}:1</span>
@@ -479,7 +484,7 @@ export default {
                           :step="compressorRanges.attack.step"
                           size="small"
                           style="width: 90px"
-                          @update:value="(v) => audioEngine.setCompressorParams({ attack: v })"
+                          @update:value="(v: any) => audioEngine.setCompressorParams({ attack: v })"
                         />
                       </div>
                       <n-slider
@@ -488,7 +493,7 @@ export default {
                         :max="compressorRanges.attack.max"
                         :step="compressorRanges.attack.step"
                         :tooltip="false"
-                        @update:value="(v) => audioEngine.setCompressorParams({ attack: v })"
+                        @update:value="(v: any) => audioEngine.setCompressorParams({ attack: v })"
                       />
                       <div class="param-range">
                         <span>{{ compressorRanges.attack.min }} ms</span>
@@ -507,7 +512,7 @@ export default {
                           :step="compressorRanges.release.step"
                           size="small"
                           style="width: 90px"
-                          @update:value="(v) => audioEngine.setCompressorParams({ release: v })"
+                          @update:value="(v: any) => audioEngine.setCompressorParams({ release: v })"
                         />
                       </div>
                       <n-slider
@@ -516,7 +521,7 @@ export default {
                         :max="compressorRanges.release.max"
                         :step="compressorRanges.release.step"
                         :tooltip="false"
-                        @update:value="(v) => audioEngine.setCompressorParams({ release: v })"
+                        @update:value="(v: any) => audioEngine.setCompressorParams({ release: v })"
                       />
                       <div class="param-range">
                         <span>{{ compressorRanges.release.min }} ms</span>
@@ -535,7 +540,7 @@ export default {
                           :step="compressorRanges.knee.step"
                           size="small"
                           style="width: 90px"
-                          @update:value="(v) => audioEngine.setCompressorParams({ knee: v })"
+                          @update:value="(v: any) => audioEngine.setCompressorParams({ knee: v })"
                         />
                       </div>
                       <n-slider
@@ -544,7 +549,7 @@ export default {
                         :max="compressorRanges.knee.max"
                         :step="compressorRanges.knee.step"
                         :tooltip="false"
-                        @update:value="(v) => audioEngine.setCompressorParams({ knee: v })"
+                        @update:value="(v: any) => audioEngine.setCompressorParams({ knee: v })"
                       />
                       <div class="param-range">
                         <span>{{ compressorRanges.knee.min }} dB</span>
@@ -605,7 +610,7 @@ export default {
                           :step="limiterRanges.ceiling.step"
                           size="small"
                           style="width: 90px"
-                          @update:value="(v) => audioEngine.setLimiterParams({ ceiling: v })"
+                          @update:value="(v: any) => audioEngine.setLimiterParams({ ceiling: v })"
                         />
                       </div>
                       <n-slider
@@ -614,7 +619,7 @@ export default {
                         :max="limiterRanges.ceiling.max"
                         :step="limiterRanges.ceiling.step"
                         :tooltip="false"
-                        @update:value="(v) => audioEngine.setLimiterParams({ ceiling: v })"
+                        @update:value="(v: any) => audioEngine.setLimiterParams({ ceiling: v })"
                       />
                       <div class="param-range">
                         <span>{{ limiterRanges.ceiling.min }} dB</span>
@@ -633,7 +638,7 @@ export default {
                           :step="limiterRanges.release.step"
                           size="small"
                           style="width: 90px"
-                          @update:value="(v) => audioEngine.setLimiterParams({ release: v })"
+                          @update:value="(v: any) => audioEngine.setLimiterParams({ release: v })"
                         />
                       </div>
                       <n-slider
@@ -642,7 +647,7 @@ export default {
                         :max="limiterRanges.release.max"
                         :step="limiterRanges.release.step"
                         :tooltip="false"
-                        @update:value="(v) => audioEngine.setLimiterParams({ release: v })"
+                        @update:value="(v: any) => audioEngine.setLimiterParams({ release: v })"
                       />
                       <div class="param-range">
                         <span>{{ limiterRanges.release.min }} ms</span>
@@ -668,7 +673,7 @@ export default {
                       <span class="switch-label">启用等响度补偿</span>
                       <n-switch
                         :value="audioEngine.loudness.value.enabled"
-                        @update:value="(v) => audioEngine.setLoudnessParams({ enabled: v })"
+                        @update:value="(v: any) => audioEngine.setLoudnessParams({ enabled: v })"
                       />
                     </div>
                   </div>
@@ -699,7 +704,7 @@ export default {
                           :step="loudnessRanges.compensation.step"
                           size="small"
                           style="width: 90px"
-                          @update:value="(v) => audioEngine.setLoudnessParams({ compensation: v })"
+                          @update:value="(v: any) => audioEngine.setLoudnessParams({ compensation: v })"
                         />
                       </div>
                       <n-slider
@@ -708,7 +713,7 @@ export default {
                         :max="loudnessRanges.compensation.max"
                         :step="loudnessRanges.compensation.step"
                         :tooltip="false"
-                        @update:value="(v) => audioEngine.setLoudnessParams({ compensation: v })"
+                        @update:value="(v: any) => audioEngine.setLoudnessParams({ compensation: v })"
                       />
                       <div class="param-range">
                         <span>{{ (loudnessRanges.compensation.min * 100).toFixed(0) }}%</span>
@@ -727,7 +732,7 @@ export default {
                           :step="loudnessRanges.referenceLoudness.step"
                           size="small"
                           style="width: 90px"
-                          @update:value="(v) => audioEngine.setLoudnessParams({ referenceLoudness: v })"
+                          @update:value="(v: any) => audioEngine.setLoudnessParams({ referenceLoudness: v })"
                         />
                       </div>
                       <n-slider
@@ -736,7 +741,7 @@ export default {
                         :max="loudnessRanges.referenceLoudness.max"
                         :step="loudnessRanges.referenceLoudness.step"
                         :tooltip="false"
-                        @update:value="(v) => audioEngine.setLoudnessParams({ referenceLoudness: v })"
+                        @update:value="(v: any) => audioEngine.setLoudnessParams({ referenceLoudness: v })"
                       />
                       <div class="param-range">
                         <span>{{ loudnessRanges.referenceLoudness.min }} LUFS</span>
@@ -754,7 +759,7 @@ export default {
                         :options="loudnessDirectionOptions"
                         size="small"
                         style="width: 100%"
-                        @update:value="(v) => audioEngine.setLoudnessParams({ direction: v })"
+                        @update:value="(v: any) => audioEngine.setLoudnessParams({ direction: v })"
                       />
                       <div class="param-range">
                         <span>双向补偿同时提升低频和高频</span>
@@ -765,6 +770,194 @@ export default {
 
                 <div v-else class="disabled-hint">
                   <n-text depth="3">等响度补偿已关闭</n-text>
+                </div>
+              </div>
+            </n-tab-pane>
+
+            <!-- 虚拟低频 -->
+            <n-tab-pane name="virtualBass" tab="虚拟低频">
+              <div class="tab-content">
+                <!-- 虚拟低频总开关 -->
+                <n-card class="control-card" size="small" :bordered="true">
+                  <div class="eq-header">
+                    <div class="switch-row">
+                      <span class="switch-label">启用虚拟低频</span>
+                      <n-switch
+                        :value="audioEngine.virtualBass.value.enabled"
+                        @update:value="(v: any) => audioEngine.setVirtualBassParams({ enabled: v })"
+                      />
+                    </div>
+                  </div>
+                </n-card>
+
+                <n-card
+                  v-if="audioEngine.virtualBass.value.enabled"
+                  class="control-card"
+                  size="small"
+                  :bordered="true"
+                  title="参数调节"
+                >
+                  <div class="loudness-info">
+                    <n-text depth="3" style="font-size: 12px">
+                      基于心理声学「基音缺失」原理，通过生成谐波让小型扬声器也能感知到低频，适合笔记本、手机等设备。
+                    </n-text>
+                  </div>
+
+                  <div class="param-grid">
+                    <!-- 力度 -->
+                    <div class="param-item">
+                      <div class="param-header">
+                        <span class="param-label">力度 (Intensity)</span>
+                        <n-input-number
+                          :value="audioEngine.virtualBass.value.intensity"
+                          :min="virtualBassRanges.intensity.min"
+                          :max="virtualBassRanges.intensity.max"
+                          :step="virtualBassRanges.intensity.step"
+                          size="small"
+                          style="width: 90px"
+                          @update:value="(v: any) => audioEngine.setVirtualBassParams({ intensity: v })"
+                        />
+                      </div>
+                      <n-slider
+                        :value="audioEngine.virtualBass.value.intensity"
+                        :min="virtualBassRanges.intensity.min"
+                        :max="virtualBassRanges.intensity.max"
+                        :step="virtualBassRanges.intensity.step"
+                        :tooltip="false"
+                        @update:value="(v: any) => audioEngine.setVirtualBassParams({ intensity: v })"
+                      />
+                      <div class="param-range">
+                        <span>{{ virtualBassRanges.intensity.min }}</span>
+                        <span>{{ virtualBassRanges.intensity.max }}</span>
+                      </div>
+                    </div>
+
+                    <!-- 分频点 -->
+                    <div class="param-item">
+                      <div class="param-header">
+                        <span class="param-label">分频点 (Crossover)</span>
+                        <n-input-number
+                          :value="audioEngine.virtualBass.value.crossoverFreq"
+                          :min="virtualBassRanges.crossoverFreq.min"
+                          :max="virtualBassRanges.crossoverFreq.max"
+                          :step="virtualBassRanges.crossoverFreq.step"
+                          size="small"
+                          style="width: 90px"
+                          @update:value="(v: any) => audioEngine.setVirtualBassParams({ crossoverFreq: v })"
+                        />
+                      </div>
+                      <n-slider
+                        :value="audioEngine.virtualBass.value.crossoverFreq"
+                        :min="virtualBassRanges.crossoverFreq.min"
+                        :max="virtualBassRanges.crossoverFreq.max"
+                        :step="virtualBassRanges.crossoverFreq.step"
+                        :tooltip="false"
+                        @update:value="(v: any) => audioEngine.setVirtualBassParams({ crossoverFreq: v })"
+                      />
+                      <div class="param-range">
+                        <span>{{ virtualBassRanges.crossoverFreq.min }} Hz</span>
+                        <span>{{ virtualBassRanges.crossoverFreq.max }} Hz</span>
+                      </div>
+                    </div>
+                  </div>
+                </n-card>
+
+                <div v-else class="disabled-hint">
+                  <n-text depth="3">虚拟低频已关闭</n-text>
+                </div>
+              </div>
+            </n-tab-pane>
+
+            <!-- 爆音抑制 -->
+            <n-tab-pane name="softClipper" tab="爆音抑制">
+              <div class="tab-content">
+                <!-- 爆音抑制总开关 -->
+                <n-card class="control-card" size="small" :bordered="true">
+                  <div class="eq-header">
+                    <div class="switch-row">
+                      <span class="switch-label">启用爆音抑制</span>
+                      <n-switch
+                        :value="audioEngine.softClipper.value.enabled"
+                        @update:value="(v: any) => audioEngine.setSoftClipperParams({ enabled: v })"
+                      />
+                    </div>
+                  </div>
+                </n-card>
+
+                <n-card
+                  v-if="audioEngine.softClipper.value.enabled"
+                  class="control-card"
+                  size="small"
+                  :bordered="true"
+                  title="参数调节"
+                >
+                  <div class="loudness-info">
+                    <n-text depth="3" style="font-size: 12px">
+                      使用 tanh 软限幅曲线防止数字削波（Clipping），在保持动态范围的同时减少大音量下的爆音和破音。
+                    </n-text>
+                  </div>
+
+                  <div class="param-grid">
+                    <!-- 阈值强度 -->
+                    <div class="param-item">
+                      <div class="param-header">
+                        <span class="param-label">阈值强度 (Threshold)</span>
+                        <n-input-number
+                          :value="audioEngine.softClipper.value.threshold"
+                          :min="softClipperRanges.threshold.min"
+                          :max="softClipperRanges.threshold.max"
+                          :step="softClipperRanges.threshold.step"
+                          size="small"
+                          style="width: 90px"
+                          @update:value="(v: any) => audioEngine.setSoftClipperParams({ threshold: v })"
+                        />
+                      </div>
+                      <n-slider
+                        :value="audioEngine.softClipper.value.threshold"
+                        :min="softClipperRanges.threshold.min"
+                        :max="softClipperRanges.threshold.max"
+                        :step="softClipperRanges.threshold.step"
+                        :tooltip="false"
+                        @update:value="(v: any) => audioEngine.setSoftClipperParams({ threshold: v })"
+                      />
+                      <div class="param-range">
+                        <span>{{ softClipperRanges.threshold.min }}（硬限幅）</span>
+                        <span>{{ softClipperRanges.threshold.max }}（软限幅）</span>
+                      </div>
+                    </div>
+
+                    <!-- 补偿增益 -->
+                    <div class="param-item">
+                      <div class="param-header">
+                        <span class="param-label">补偿增益 (Makeup Gain)</span>
+                        <n-input-number
+                          :value="audioEngine.softClipper.value.makeupGain"
+                          :min="softClipperRanges.makeupGain.min"
+                          :max="softClipperRanges.makeupGain.max"
+                          :step="softClipperRanges.makeupGain.step"
+                          size="small"
+                          style="width: 90px"
+                          @update:value="(v: any) => audioEngine.setSoftClipperParams({ makeupGain: v })"
+                        />
+                      </div>
+                      <n-slider
+                        :value="audioEngine.softClipper.value.makeupGain"
+                        :min="softClipperRanges.makeupGain.min"
+                        :max="softClipperRanges.makeupGain.max"
+                        :step="softClipperRanges.makeupGain.step"
+                        :tooltip="false"
+                        @update:value="(v: any) => audioEngine.setSoftClipperParams({ makeupGain: v })"
+                      />
+                      <div class="param-range">
+                        <span>{{ softClipperRanges.makeupGain.min }} dB</span>
+                        <span>{{ softClipperRanges.makeupGain.max }} dB</span>
+                      </div>
+                    </div>
+                  </div>
+                </n-card>
+
+                <div v-else class="disabled-hint">
+                  <n-text depth="3">爆音抑制已关闭</n-text>
                 </div>
               </div>
             </n-tab-pane>
@@ -918,11 +1111,53 @@ export default {
 
 .modal-content-inner {
   padding: 8px 16px 16px;
+
+  // 侧边 Tab 布局
+  :deep(.n-tabs) {
+    min-height: 420px;
+
+    .n-tabs-nav {
+      width: 110px;
+      min-width: 110px;
+      padding-top: 8px;
+
+      .n-tabs-nav--left & {
+        margin-right: 0;
+      }
+
+      .n-tabs-tab {
+        padding: 10px 14px;
+        margin: 2px 4px;
+        border-radius: 8px;
+        font-size: 13px;
+        justify-content: flex-start;
+        transition: all 0.2s;
+
+        &:hover {
+          background: var(--n-tab-color, rgba(128, 128, 128, 0.08));
+        }
+
+        &.n-tabs-tab--active {
+          background: var(--primary-color-opacity-1, rgba(24, 160, 88, 0.08));
+          color: var(--primary-color);
+          font-weight: 500;
+        }
+      }
+
+      .n-tabs-bar {
+        display: none;
+      }
+    }
+
+    .n-tabs-pane-wrapper {
+      padding-left: 8px;
+    }
+  }
 }
 
 .tab-content {
-  padding: 8px 0;
-  min-height: 300px;
+  padding: 4px 0;
+  min-height: 380px;
 }
 
 .control-card {

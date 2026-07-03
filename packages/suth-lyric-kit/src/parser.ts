@@ -22,8 +22,11 @@ export interface ParsedLyrics {
  * or simple word grouping if available.
  */
 export function parseLyrics(content: string): ParsedLyrics {
+  // 将歌词标签中的字面 \n 转义序列转换为实际换行符
+  const normalizedContent = content.replace(/\\n/g, '\n')
+
   const lines: LyricLine[] = [];
-  const rawLines = content.split(/\r?\n/);
+  const rawLines = normalizedContent.split(/\r?\n/);
   const timeExp = /\[(\d{2}):(\d{2})(\.(\d{2,3}))?\]/;
   
   // Regex for word tags like <00:01.50> or (00:01.50)
@@ -99,6 +102,20 @@ export function parseLyrics(content: string): ParsedLyrics {
         text: textPart.replace(/<[^>]+>/g, ''), // Clean text for fallback
         words: words.length > 0 ? words : undefined
       });
+    }
+  }
+
+  // 纯文本歌词降级：无 LRC 时间戳时，按换行拆分并均匀分配时间
+  if (lines.length === 0) {
+    const plainLines = rawLines
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0)
+    const lineDuration = 5 // 每行 5 秒
+    for (let i = 0; i < plainLines.length; i++) {
+      lines.push({
+        time: i * lineDuration,
+        text: plainLines[i]!
+      })
     }
   }
 

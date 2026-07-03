@@ -9,9 +9,6 @@ class PerformanceMonitor {
   /** 存储所有 measure 和 event 记录 */
   private records: Array<{ name: string; duration: number; timestamp: number }> = []
 
-  /** 是否已初始化 Web Vitals 监听 */
-  private vitalsInitialized = false
-
   /**
    * 记录自定义时间标记
    * @param name - 标记名称，用于后续与另一个标记配对 measure
@@ -113,7 +110,7 @@ class PerformanceMonitor {
         // 监听 CLS（累积布局偏移）
         const clsObserver = new PerformanceObserver((list) => {
           for (const entry of list.getEntries()) {
-            const layoutShiftEntry = entry as LayoutShiftAttribution & PerformanceEntry
+            const layoutShiftEntry = entry as any
             if (!layoutShiftEntry.hadRecentInput) {
               result.cls += layoutShiftEntry.value
             }
@@ -124,13 +121,13 @@ class PerformanceMonitor {
         // 监听 INP（交互到下一次绘制），通过 longtask 和 event timing 近似估算
         const inpObserver = new PerformanceObserver((list) => {
           for (const entry of list.getEntries()) {
-            const interactionEntry = entry as PerformanceEventTiming
+            const interactionEntry = entry as any
             if (interactionEntry.interactionId) {
               result.inp = Math.max(result.inp, interactionEntry.duration)
             }
           }
         })
-        inpObserver.observe({ type: 'event', buffered: true, durationThreshold: 16 })
+        inpObserver.observe({ type: 'event', buffered: true } as any)
 
         // 获取 TTFB（首字节时间）
         const navEntries = performance.getEntriesByType('navigation')

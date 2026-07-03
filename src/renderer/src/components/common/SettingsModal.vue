@@ -7,8 +7,6 @@ import SettingsAppearanceSection from './Settings/SettingsAppearanceSection.vue'
 import SettingsPlaybackSection from './Settings/SettingsPlaybackSection.vue'
 import SettingsLyricsSection from './Settings/SettingsLyricsSection.vue'
 import SettingsLocalSection from './Settings/SettingsLocalSection.vue'
-import SettingsSourceSection from './Settings/SettingsSourceSection.vue'
-import SettingsAccountSection from './Settings/SettingsAccountSection.vue'
 import SettingsAboutSection from './Settings/SettingsAboutSection.vue'
 
 const themeVars = useThemeVars()
@@ -46,8 +44,6 @@ const menuOptions = [
   { label: '播放设置', key: 'playback', icon: renderIcon('mgc_play_circle_line') },
   { label: '歌词设置', key: 'lyrics', icon: renderIcon('mgc_music_line') },
   { label: '本地与缓存', key: 'local', icon: renderIcon('mgc_folder_line') },
-  { label: '音源与插件', key: 'source', icon: renderIcon('mgc_music_2_line') },
-  { label: '账户', key: 'account', icon: renderIcon('mgc_user_2_line') },
   { label: '关于', key: 'about', icon: renderIcon('mgc_information_line') }
 ]
 
@@ -77,12 +73,6 @@ const decodeMojibake = (str: string): string => {
 // 设置搜索选项定义，每一项对应具体设置条目与描述
 const searchOptions = [
   {
-    label: '在线服务',
-    value: 'general.onlineServices',
-    section: 'general',
-    desc: '是否开启软件的在线服务'
-  },
-  {
     label: '关闭软件时',
     value: 'general.closeAction',
     section: 'general',
@@ -101,12 +91,6 @@ const searchOptions = [
     desc: '是否在任务栏显示歌曲播放进度'
   },
   {
-    label: '通过 Orpheus 协议唤起本应用',
-    value: 'general.orpheusProtocol',
-    section: 'general',
-    desc: '用于网页端唤起本应用，可能影响官方客户端唤起'
-  },
-  {
     label: '自动检查更新',
     value: 'general.autoCheckUpdate',
     section: 'general',
@@ -117,18 +101,6 @@ const searchOptions = [
     value: 'general.updateChannel',
     section: 'general',
     desc: '切换更新通道（测试版可体验最新功能，但不保证稳定性）'
-  },
-  {
-    label: '首选搜索平台',
-    value: 'source.preferredPlatform',
-    section: 'source',
-    desc: '搜索歌曲时默认使用的音源平台'
-  },
-  {
-    label: '首选播放音质',
-    value: 'source.preferredQuality',
-    section: 'source',
-    desc: '播放时优先尝试使用的音质'
   },
   {
     label: '全局字体',
@@ -193,7 +165,7 @@ const searchOptions = [
   {
     label: '播放页布局',
     value: 'playback.lyricsAreaRatio',
-    section: 'lyrics',
+    section: 'appearance',
     desc: '调整封面与歌词在播放页中的宽度占比'
   },
   {
@@ -215,28 +187,64 @@ const searchOptions = [
     desc: '控制 Apple 风格歌词的弹簧滚动动效'
   },
   {
+    label: '显示翻译歌词',
+    value: 'playback.lyricsShowTranslation',
+    section: 'lyrics',
+    desc: '控制在播放页和桌面歌词中是否显示翻译内容'
+  },
+  {
+    label: '显示音译歌词',
+    value: 'playback.lyricsShowTransliteration',
+    section: 'lyrics',
+    desc: '控制在播放页和桌面歌词中是否显示罗马音等音译内容'
+  },
+  {
+    label: '翻译字号',
+    value: 'playback.lyricsTranslationSize',
+    section: 'lyrics',
+    desc: '调节翻译和音译歌词的显示字号'
+  },
+  {
+    label: '隐藏已播放歌词',
+    value: 'playback.amllHidePassedLines',
+    section: 'lyrics',
+    desc: '播放过的歌词行自动隐藏，仅显示当前及后续歌词'
+  },
+  {
+    label: '逐字歌词渐变宽度',
+    value: 'playback.amllWordFadeWidth',
+    section: 'lyrics',
+    desc: '控制 AMLL 逐字高亮的颜色渐变过渡宽度'
+  },
+  {
+    label: '排除 TTML 歌词',
+    value: 'playback.lyricsExcludeTTML',
+    section: 'lyrics',
+    desc: '过滤 TTML 格式歌词，使用其他格式替代'
+  },
+  {
+    label: '排除本地音乐歌词',
+    value: 'playback.lyricsExcludeLocal',
+    section: 'lyrics',
+    desc: '过滤本地音乐内嵌歌词，优先使用在线歌词'
+  },
+  {
+    label: '歌词元数据关键词过滤',
+    value: 'playback.lyricsExcludeKeywords',
+    section: 'lyrics',
+    desc: '匹配歌词元数据冒号前的内容进行过滤'
+  },
+  {
+    label: '强制对唱模式',
+    value: 'playback.desktopLyricsForceDuet',
+    section: 'lyrics',
+    desc: '强制开启桌面歌词左右交替的对唱展示效果'
+  },
+  {
     label: '本地音乐扫描目录',
     value: 'local.scanDirs',
     section: 'local',
     desc: '配置本地音乐扫描时需要遍历的目录列表'
-  },
-  {
-    label: '音源插件管理',
-    value: 'source.plugins',
-    section: 'source',
-    desc: '导入洛雪音源插件并查看支持的音源与日志'
-  },
-  {
-    label: '网易云账户登录',
-    value: 'account.login',
-    section: 'account',
-    desc: '登录网易云音乐账户以访问私人歌单和收藏'
-  },
-  {
-    label: '账户信息',
-    value: 'account.info',
-    section: 'account',
-    desc: '查看当前登录的网易云账户信息'
   }
 ]
 
@@ -250,8 +258,6 @@ const autoCompleteOptions = computed(() => {
     playback: '播放',
     lyrics: '歌词',
     local: '本地',
-    source: '音源',
-    account: '账户',
     about: '关于'
   }
 
@@ -342,14 +348,17 @@ onMounted(async () => {
         .filter((f) => !!f)
         .map((f: string) => {
           const raw = String(f).trim()
+          // 解码可能的乱码字体名，同时用于 label 和 value
+          // 确保下拉菜单中字体预览和实际应用都使用正确的字体名
           const label = decodeMojibake(raw)
-          return { label, value: raw }
+          const decodedValue = decodeMojibake(raw)
+          return { label, value: decodedValue }
         })
-      
+
       if (!systemFonts.find(f => f.value === 'Microsoft YaHei UI')) {
         systemFonts.unshift({ label: 'Microsoft YaHei UI', value: 'Microsoft YaHei UI' })
       }
-      
+
       fontOptions.value = [
         { label: '跟随全局设置', value: 'follow_global' },
         ...systemFonts
@@ -459,7 +468,7 @@ watch(
             <div style="padding: 0 4px;">
                <n-menu v-model:value="activeKey" :options="menuOptions" />
             </div>
-           
+
           </n-layout-sider>
           <n-layout-content
             content-style="padding: 6px 32px;"
@@ -508,20 +517,6 @@ watch(
                   :highlight-key="highlightedKey"
                 />
 
-                <settings-source-section
-                  v-else-if="activeKey === 'source'"
-                  :setting-item-bg-color="settingItemBgColor"
-                  :setting-item-border-color="settingItemBorderColor"
-                  :highlight-key="highlightedKey"
-                />
-
-                <settings-account-section
-                  v-else-if="activeKey === 'account'"
-                  :setting-item-bg-color="settingItemBgColor"
-                  :setting-item-border-color="settingItemBorderColor"
-                  :highlight-key="highlightedKey"
-                />
-
                 <settings-about-section v-else-if="activeKey === 'about'" />
               </div>
             </transition>
@@ -534,5 +529,5 @@ watch(
 </template>
 
 <style lang="scss">
-@import '../../styles/settings-modal.scss';
+@use '../../styles/settings-modal.scss';
 </style>

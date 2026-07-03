@@ -1,18 +1,13 @@
 import { resolve } from 'path'
-import { defineConfig, externalizeDepsPlugin, loadEnv } from 'electron-vite'
+import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import vue from '@vitejs/plugin-vue'
 import wasm from 'vite-plugin-wasm'
 import topLevelAwait from 'vite-plugin-top-level-await'
 
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
+export default defineConfig(() => {
   return {
     main: {
-      plugins: [externalizeDepsPlugin()],
-      define: {
-        'import.meta.env.VITE_SUPABASE_URL': JSON.stringify(env.VITE_SUPABASE_URL),
-        'import.meta.env.VITE_SUPABASE_KEY': JSON.stringify(env.VITE_SUPABASE_KEY)
-      }
+      plugins: [externalizeDepsPlugin()]
     },
     preload: {
       plugins: [externalizeDepsPlugin()]
@@ -26,7 +21,7 @@ export default defineConfig(({ mode }) => {
       },
       plugins: [vue(), wasm(), topLevelAwait()],
       build: {
-        cssCodeSplit: true,
+        cssCodeSplit: false,
         chunkSizeWarningLimit: 500,
         rollupOptions: {
           output: {
@@ -45,15 +40,6 @@ export default defineConfig(({ mode }) => {
               highlight: ['highlight.js'],
               markdown: ['markdown-it']
             }
-          }
-        }
-      },
-      server: {
-        proxy: {
-          '/api': {
-            target: 'https://api.enzymeym.top',
-            changeOrigin: true,
-            rewrite: (path) => path.replace(/^\/api/, '')
           }
         }
       }

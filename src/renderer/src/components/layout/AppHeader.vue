@@ -9,8 +9,6 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { usePlayerStore } from '../../stores/playerStore'
 import { usePlaylistStore } from '../../stores/playlistStore'
 import { useLocalMusicStore } from '../../stores/localMusicStore'
-import { searchSuggest } from '../../apis/netease/search/suggest'
-
 const router = useRouter()
 const route = useRoute()
 const settingsStore = useSettingsStore()
@@ -24,17 +22,13 @@ const showSettings = ref(false)
 const settingsSection = ref('general')
 const settingsHighlightKey = ref<string | null>(null)
 
-const headerRef = ref<HTMLElement | null>(null)
-
 // Search Suggestion State
 const showSuggestions = ref(false)
 const suggestions = ref<{
-  online: { songs: any[]; artists: any[]; playlists: any[] }
   localSongs: any[]
   localPlaylists: any[]
   recent: any[]
 }>({
-  online: { songs: [], artists: [], playlists: [] },
   localSongs: [],
   localPlaylists: [],
   recent: []
@@ -74,19 +68,10 @@ watch(searchText, (newVal) => {
         p.artist.toLowerCase().includes(keyword)
       ).slice(0, 5)
 
-      // 4. Online Suggestions
-      const res = await searchSuggest(newVal)
-      const online = {
-        songs: res.result.songs || [],
-        artists: res.result.artists || [],
-        playlists: res.result.playlists || []
-      }
-
       suggestions.value = {
         localSongs,
         localPlaylists,
-        recent,
-        online
+        recent
       }
       showSuggestions.value = true
     } catch (e) {
@@ -146,22 +131,6 @@ const handleSuggestionClick = (type: string, item: any) => {
     // Just play it
     playerStore.setCurrentSong(song)
     playerStore.setPlaying(true)
-  } else if (type === 'online-song') {
-    // Play online song
-    // We need to fetch details or just play if we have enough info
-    // suggest api returns minimal info.
-    // Usually we navigate to search page or try to play.
-    // Let's navigate to search page with the song name for now, OR play it if we can.
-    // The online song item usually has id, name, artists.
-    // Let's just fill search text and search
-    searchText.value = item.name + ' ' + (item.artists?.[0]?.name || '')
-    handleSearch()
-  } else if (type === 'online-artist') {
-    searchText.value = item.name
-    handleSearch()
-  } else if (type === 'online-playlist') {
-    searchText.value = item.name
-    handleSearch()
   }
 }
 
@@ -293,37 +262,6 @@ const isTransparent = computed(() => {
         </template>
         <div class="search-suggestions">
           <n-scrollbar style="max-height: 400px">
-             <!-- Online Songs -->
-            <template v-if="suggestions.online.songs.length">
-              <div class="suggestion-header">在线歌曲</div>
-              <div
-                v-for="item in suggestions.online.songs"
-                :key="'online-s-'+item.id"
-                class="suggestion-item"
-                @click="handleSuggestionClick('online-song', item)"
-              >
-                 <!-- Use first artist pic if available or online playlist cover logic, but online songs usually don't have direct cover in suggest result.
-                      Actually search/suggest result for songs usually has artists.
-                      If we want cover, we might need album.picUrl if available.
-                      Let's check API response structure. Usually suggest API returns `songs` with `album`.
-                      If not, we use icon or placeholder.
-                      Figma shows cover. Let's assume we can get it or use placeholder.
-                 -->
-                <div class="suggestion-icon-wrapper" v-if="!item.album?.picId && !item.album?.artist?.img1v1Url">
-                   <n-icon><i class="mgc_music_fill"></i></n-icon>
-                </div>
-                 <!-- Try to use album pic if available (netease api usually provides al or album) -->
-                <img v-else :src="item.album?.picUrl || item.album?.artist?.img1v1Url" class="suggestion-cover" />
-
-                <div class="suggestion-info">
-                  <div class="suggestion-title">
-                    {{ item.name }}
-                  </div>
-                  <div class="suggestion-desc">{{ item.artists?.[0]?.name }}</div>
-                </div>
-              </div>
-            </template>
-
             <!-- Local & Recent (Merged) -->
             <template v-if="suggestions.recent.length || suggestions.localSongs.length">
               <div class="suggestion-header">本地&最近</div>
@@ -359,8 +297,8 @@ const isTransparent = computed(() => {
               </div>
             </template>
 
-            <!-- Playlists (Local & Online) -->
-            <template v-if="suggestions.localPlaylists.length || suggestions.online.playlists.length">
+            <!-- Playlists (Local) -->
+            <template v-if="suggestions.localPlaylists.length">
               <div class="suggestion-header">歌单</div>
               <div class="playlist-grid">
                 <!-- Local Playlists -->
@@ -375,37 +313,10 @@ const isTransparent = computed(() => {
                   </div>
                   <div class="playlist-title">{{ item.name }}</div>
                 </div>
-
-                <!-- Online Playlists -->
-                <div
-                  v-for="item in suggestions.online.playlists"
-                  :key="'online-p-'+item.id"
-                  class="playlist-item"
-                  @click="handleSuggestionClick('online-playlist', item)"
-                >
-                  <img :src="item.coverImgUrl" class="playlist-cover" />
-                  <div class="playlist-title">{{ item.name }}</div>
-                </div>
               </div>
             </template>
 
-            <!-- Online Artists (Keep them but maybe at bottom or merged? Design didn't show them. Let's keep at bottom for now) -->
-            <template v-if="suggestions.online.artists.length">
-                <div class="suggestion-header">相关歌手</div>
-                <div
-                  v-for="item in suggestions.online.artists"
-                  :key="'online-a-'+item.id"
-                  class="suggestion-item"
-                  @click="handleSuggestionClick('online-artist', item)"
-                >
-                  <img :src="item.picUrl || item.img1v1Url" class="suggestion-cover round" />
-                  <div class="suggestion-info">
-                    <div class="suggestion-title">{{ item.name }}</div>
-                  </div>
-                </div>
-            </template>
-
-            <div v-if="!suggestions.recent.length && !suggestions.localSongs.length && !suggestions.localPlaylists.length && !suggestions.online.songs.length && !suggestions.online.artists.length && !suggestions.online.playlists.length" class="no-suggestions">
+            <div v-if="!suggestions.recent.length && !suggestions.localSongs.length && !suggestions.localPlaylists.length" class="no-suggestions">
                 未找到相关结果
             </div>
           </n-scrollbar>

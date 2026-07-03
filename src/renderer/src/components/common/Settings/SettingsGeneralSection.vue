@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NCard, NSwitch, NSelect, NList, NListItem, NButton } from 'naive-ui'
+import { NCard, NSwitch, NSelect } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 
 // 使用设置仓库，驱动常规设置选项
@@ -17,33 +17,6 @@ const updateChannelOptions = [
   { label: '测试版', value: 'beta' }
 ]
 
-const getPlatformName = (key: string) => {
-  const map: Record<string, string> = {
-    tx: 'QQ音乐',
-    kg: '酷狗音乐',
-    wy: '网易云音乐',
-    kw: '酷我音乐',
-    mg: '咪咕音乐'
-  }
-  return map[key] || key
-}
-
-const moveUp = (index: number) => {
-  if (index <= 0) return
-  const list = settingsStore.general.searchResultOrder
-  const temp = list[index]
-  list[index] = list[index - 1]
-  list[index - 1] = temp
-}
-
-const moveDown = (index: number) => {
-  const list = settingsStore.general.searchResultOrder
-  if (index >= list.length - 1) return
-  const temp = list[index]
-  list[index] = list[index + 1]
-  list[index + 1] = temp
-}
-
 defineProps<{
   settingItemBgColor: string
   settingItemBorderColor: string
@@ -55,23 +28,6 @@ defineProps<{
 <template>
   <div class="settings-content">
     <div class="section-group-title">系统行为</div>
-
-    <n-card
-      class="setting-item"
-      :class="{ 'setting-item--highlight': highlightKey === 'general.onlineServices' }"
-      data-setting-key="general.onlineServices"
-      :bordered="true"
-      size="small"
-      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
-    >
-      <div class="setting-row">
-        <div class="setting-label">
-          <div class="main-label">在线服务</div>
-          <div class="sub-label">是否开启软件的在线服务</div>
-        </div>
-        <n-switch v-model:value="settingsStore.general.onlineServices" />
-      </div>
-    </n-card>
 
     <n-card
       class="setting-item"
@@ -129,25 +85,6 @@ defineProps<{
 
     <n-card
       class="setting-item"
-      :class="{ 'setting-item--highlight': highlightKey === 'general.orpheusProtocol' }"
-      data-setting-key="general.orpheusProtocol"
-      :bordered="true"
-      size="small"
-      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
-    >
-      <div class="setting-row">
-        <div class="setting-label">
-          <div class="main-label">通过 Orpheus 协议唤起本应用</div>
-          <div class="sub-label">
-            该协议通常用于官方网页端唤起官方客户端，启用后可能导致官方客户端无法被唤起
-          </div>
-        </div>
-        <n-switch v-model:value="settingsStore.general.orpheusProtocol" />
-      </div>
-    </n-card>
-
-    <n-card
-      class="setting-item"
       :class="{ 'setting-item--highlight': highlightKey === 'general.autoCheckUpdate' }"
       data-setting-key="general.autoCheckUpdate"
       :bordered="true"
@@ -182,28 +119,6 @@ defineProps<{
           style="width: 120px"
         />
       </div>
-    </n-card>
-    <div class="section-group-title" style="margin-top: 24px;">搜索结果排序</div>
-
-    <n-card
-      class="setting-item"
-      :class="{ 'setting-item--highlight': highlightKey === 'general.searchResultOrder' }"
-      data-setting-key="general.searchResultOrder"
-      :bordered="true"
-      size="small"
-      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
-    >
-      <n-list hoverable clickable>
-        <n-list-item v-for="(item, index) in settingsStore.general.searchResultOrder" :key="item">
-          <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 0;">
-            <span>{{ getPlatformName(item) }}</span>
-            <div style="display: flex; gap: 8px;">
-              <n-button size="tiny" @click="moveUp(index)" :disabled="index === 0">上移</n-button>
-              <n-button size="tiny" @click="moveDown(index)" :disabled="index === settingsStore.general.searchResultOrder.length - 1">下移</n-button>
-            </div>
-          </div>
-        </n-list-item>
-      </n-list>
     </n-card>
   </div>
 </template>

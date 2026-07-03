@@ -33,9 +33,28 @@
   }
 }
 
+.visualizer-layer {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 60px;
+  z-index: 11;
+  pointer-events: none;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+
+  canvas {
+    width: 100%;
+    height: 100%;
+  }
+}
+
 .player-content {
   position: relative;
-  z-index: 11;
+  z-index: 12;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -176,6 +195,7 @@
       height: 85vh;
       min-height: 0; /* Ensure flex item can shrink */
       overflow: hidden;
+      font-family: v-bind('lyricsFontFamily');
 
       &.lyrics-auto-size {
         /* 非全屏时的自适应模式：结合 vh 和 vw，避免高度极端变化时字号过大或过小 */
@@ -240,6 +260,68 @@
         }
       }
     }
+  }
+}
+
+/* 歌词模式：隐藏封面，歌信息居中于顶部，歌词全宽居中 */
+.main-area.lyrics-mode {
+  justify-content: center;
+}
+
+.right-panel.lyrics-mode {
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+
+  /* 居中模式下歌词左右内边距对称，避免因右侧工具区预留空间导致的偏移 */
+  .lyrics-placeholder {
+    text-align: center;
+
+    :deep(.lyric-am .am-lyric) {
+      padding-left: 80px;
+      padding-right: 80px;
+
+      /* AMLL 歌词库默认 transform-origin: 0（左边缘），导致非当前行偏左。
+         居中模式改为 center，使缩放变换也从中心开始；
+         对唱歌词行（_lyricDuetLine）单独处理，保持右对齐原点不变 */
+      [class*='_lyricLine_']:not([class*='_lyricDuetLine_']):not([class*='_lyricBgLine_']) {
+        text-align: center;
+        transform-origin: center;
+      }
+
+      /* 覆盖 LyricPlayer 中的 text-align: start，使所有歌词行（含已播放行）居中 */
+      div[class*='lyricMainLine'] span {
+        text-align: center;
+      }
+    }
+  }
+}
+
+.lyrics-mode-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  flex-shrink: 0;
+  margin-bottom: 24px;
+
+  .song-title {
+    font-size: clamp(20px, 2.2vh, 34px);
+    font-weight: 800;
+    margin-bottom: 6px;
+    line-height: 1.2;
+    color: var(--player-accent-color, #fff);
+  }
+
+  .artist-row {
+    font-size: clamp(14px, 1.6vh, 18px);
+    color: var(--player-accent-color, rgba(255, 255, 255, 0.7));
+    margin-bottom: 2px;
+  }
+
+  .album-row {
+    font-size: clamp(12px, 1.4vh, 15px);
+    color: var(--player-accent-color, rgba(255, 255, 255, 0.5));
   }
 }
 
@@ -329,6 +411,33 @@
     scroll-snap-align: start;
     padding: 0 24px;
     box-sizing: border-box;
+  }
+
+  /* 歌词模式移动端适配 */
+  .main-area.lyrics-mode {
+    overflow-x: hidden;
+    scroll-snap-type: none;
+  }
+
+  .right-panel.lyrics-mode {
+    scroll-snap-align: none;
+    padding: 0 16px;
+  }
+
+  .lyrics-mode-info {
+    margin-bottom: 16px;
+
+    .song-title {
+      font-size: clamp(16px, 3.5vw, 24px);
+    }
+
+    .artist-row {
+      font-size: clamp(12px, 2.8vw, 15px);
+    }
+
+    .album-row {
+      font-size: clamp(11px, 2.5vw, 13px);
+    }
   }
 }
 

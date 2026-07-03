@@ -1,5 +1,7 @@
-import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
+import { ref, reactive, watch } from 'vue'
 import { rustAudioAdapter } from '../audio/rust-audio-adapter'
+import type { VirtualBassParams } from '../audio/virtual-bass'
+import type { SoftClipperParams } from '../audio/soft-clipper'
 
 /**
  * EQ 频段设置
@@ -43,21 +45,6 @@ export interface LoudnessParams {
 }
 
 /**
- * 音效预设
- */
-export interface SoundEffectPreset {
-  id: string;
-  name: string;
-  eqEnabled: boolean;
-  eqBands: EqBandSettings[];
-  compressorEnabled: boolean;
-  compressor: CompressorParams;
-  limiterEnabled: boolean;
-  limiter: LimiterParams;
-  loudness: LoudnessParams;
-}
-
-/**
  * 音频引擎状态
  */
 export interface AudioEngineState {
@@ -71,125 +58,38 @@ export interface AudioEngineState {
 }
 
 /**
- * 音效预设存储键名
+ * 预设数据结构
  */
-const PRESETS_STORAGE_KEY = 'sound-effect-presets';
+export interface Preset {
+  id: string;
+  name: string;
+  builtin: boolean;
+  /** EQ 设置 */
+  eqEnabled: boolean;
+  eqBands: EqBandSettings[];
+  /** 压缩器设置 */
+  compressorEnabled: boolean;
+  compressor: CompressorParams;
+  /** 限制器设置 */
+  limiterEnabled: boolean;
+  limiter: LimiterParams;
+  /** 等响度设置 */
+  loudness: LoudnessParams;
+  /** 虚拟低频设置 */
+  virtualBass: VirtualBassParams;
+  /** 软限幅器设置 */
+  softClipper: SoftClipperParams;
+}
 
 /**
- * 默认预设列表
+ * 音效引擎状态存储键名
  */
-const DEFAULT_PRESETS: SoundEffectPreset[] = [
-  {
-    id: 'flat',
-    name: '平坦',
-    eqEnabled: false,
-    eqBands: [
-      { frequency: 31, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 62, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 125, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 250, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 500, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 1000, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 2000, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 4000, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 8000, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 16000, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' }
-    ],
-    compressorEnabled: true,
-    compressor: { threshold: -24, ratio: 4, attack: 10, release: 100, knee: 6 },
-    limiterEnabled: true,
-    limiter: { ceiling: -0.3, release: 50 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' }
-  },
-  {
-    id: 'pop',
-    name: '流行',
-    eqEnabled: true,
-    eqBands: [
-      { frequency: 31, preGain: 2, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 62, preGain: 3, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 125, preGain: 3, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 250, preGain: 1, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 500, preGain: -1, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 1000, preGain: -1, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 2000, preGain: 2, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 4000, preGain: 3, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 8000, preGain: 3, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 16000, preGain: 2, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' }
-    ],
-    compressorEnabled: true,
-    compressor: { threshold: -20, ratio: 3, attack: 5, release: 150, knee: 8 },
-    limiterEnabled: true,
-    limiter: { ceiling: -0.5, release: 80 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' }
-  },
-  {
-    id: 'rock',
-    name: '摇滚',
-    eqEnabled: true,
-    eqBands: [
-      { frequency: 31, preGain: 3, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 62, preGain: 4, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 125, preGain: 2, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 250, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 500, preGain: -1, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 1000, preGain: -1, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 2000, preGain: 1, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 4000, preGain: 3, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 8000, preGain: 4, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 16000, preGain: 3, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' }
-    ],
-    compressorEnabled: true,
-    compressor: { threshold: -18, ratio: 6, attack: 2, release: 80, knee: 4 },
-    limiterEnabled: true,
-    limiter: { ceiling: -0.3, release: 50 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' }
-  },
-  {
-    id: 'vocal',
-    name: '人声',
-    eqEnabled: true,
-    eqBands: [
-      { frequency: 31, preGain: -2, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 62, preGain: -1, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 125, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 250, preGain: 2, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 500, preGain: 3, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 1000, preGain: 3, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 2000, preGain: 2, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 4000, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 8000, preGain: -1, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 16000, preGain: -2, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' }
-    ],
-    compressorEnabled: true,
-    compressor: { threshold: -20, ratio: 3.5, attack: 5, release: 120, knee: 6 },
-    limiterEnabled: true,
-    limiter: { ceiling: -0.5, release: 70 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' }
-  },
-  {
-    id: 'bass',
-    name: '低音增强',
-    eqEnabled: true,
-    eqBands: [
-      { frequency: 31, preGain: 5, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 62, preGain: 4, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 125, preGain: 3, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 250, preGain: 1, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 500, preGain: 0, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 1000, preGain: -1, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 2000, preGain: -2, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 4000, preGain: -3, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 8000, preGain: -4, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' },
-      { frequency: 16000, preGain: -5, postGain: 0, preQ: 1.0, postQ: 1.0, bandType: 'peaking' }
-    ],
-    compressorEnabled: true,
-    compressor: { threshold: -22, ratio: 4, attack: 8, release: 100, knee: 5 },
-    limiterEnabled: true,
-    limiter: { ceiling: -0.3, release: 50 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' }
-  }
-];
+const ENGINE_STATE_STORAGE_KEY = 'sound-effect-state';
+
+/**
+ * 预设数据存储键名
+ */
+const PRESETS_STORAGE_KEY = 'sound-effect-presets';
 
 /**
  * 获取全局 audioEngine API
@@ -197,6 +97,227 @@ const DEFAULT_PRESETS: SoundEffectPreset[] = [
 function getAudioEngineAPI() {
   return (window as any).api?.audioEngine;
 }
+
+/**
+ * 内置预设列表
+ * 提供常用的 EQ + 音效组合预设
+ */
+const BUILTIN_PRESETS: Preset[] = [
+  {
+    id: 'flat',
+    name: '平坦',
+    builtin: true,
+    eqEnabled: false,
+    eqBands: [],
+    compressorEnabled: false,
+    compressor: { threshold: -24, ratio: 4, attack: 10, release: 100, knee: 6 },
+    limiterEnabled: false,
+    limiter: { ceiling: -0.3, release: 50 },
+    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
+  },
+  {
+    id: 'rock',
+    name: '摇滚',
+    builtin: true,
+    eqEnabled: true,
+    eqBands: [
+      { frequency: 32, preGain: 4, postGain: 4, preQ: 0.5, postQ: 0.5, bandType: 'lowShelf' },
+      { frequency: 64, preGain: 3, postGain: 3, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 125, preGain: -2, postGain: -2, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 250, preGain: -3, postGain: -3, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 500, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 1000, preGain: 2, postGain: 2, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 2000, preGain: 4, postGain: 4, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 4000, preGain: -1, postGain: -1, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 8000, preGain: 3, postGain: 3, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 16000, preGain: 4, postGain: 4, preQ: 1, postQ: 1, bandType: 'highShelf' }
+    ],
+    compressorEnabled: true,
+    compressor: { threshold: -18, ratio: 4, attack: 5, release: 80, knee: 4 },
+    limiterEnabled: true,
+    limiter: { ceiling: -0.3, release: 50 },
+    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
+  },
+  {
+    id: 'pop',
+    name: '流行',
+    builtin: true,
+    eqEnabled: true,
+    eqBands: [
+      { frequency: 32, preGain: -1, postGain: -1, preQ: 0.5, postQ: 0.5, bandType: 'lowShelf' },
+      { frequency: 64, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 125, preGain: 2, postGain: 2, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 250, preGain: 1, postGain: 1, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 500, preGain: -2, postGain: -2, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 1000, preGain: 2, postGain: 2, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 2000, preGain: 4, postGain: 4, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 4000, preGain: 3, postGain: 3, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 8000, preGain: 2, postGain: 2, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 16000, preGain: -1, postGain: -1, preQ: 1, postQ: 1, bandType: 'highShelf' }
+    ],
+    compressorEnabled: true,
+    compressor: { threshold: -20, ratio: 3, attack: 8, release: 120, knee: 6 },
+    limiterEnabled: true,
+    limiter: { ceiling: -0.3, release: 50 },
+    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
+  },
+  {
+    id: 'jazz',
+    name: '爵士',
+    builtin: true,
+    eqEnabled: true,
+    eqBands: [
+      { frequency: 32, preGain: 3, postGain: 3, preQ: 0.5, postQ: 0.5, bandType: 'lowShelf' },
+      { frequency: 64, preGain: 2, postGain: 2, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 125, preGain: 1, postGain: 1, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 250, preGain: -2, postGain: -2, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 500, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 1000, preGain: 1, postGain: 1, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 2000, preGain: 2, postGain: 2, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 4000, preGain: 3, postGain: 3, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 8000, preGain: 2, postGain: 2, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 16000, preGain: 1, postGain: 1, preQ: 1, postQ: 1, bandType: 'highShelf' }
+    ],
+    compressorEnabled: false,
+    compressor: { threshold: -24, ratio: 4, attack: 10, release: 100, knee: 6 },
+    limiterEnabled: false,
+    limiter: { ceiling: -0.3, release: 50 },
+    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
+  },
+  {
+    id: 'classical',
+    name: '古典',
+    builtin: true,
+    eqEnabled: true,
+    eqBands: [
+      { frequency: 32, preGain: 2, postGain: 2, preQ: 0.5, postQ: 0.5, bandType: 'lowShelf' },
+      { frequency: 64, preGain: 1, postGain: 1, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 125, preGain: 1, postGain: 1, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 250, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 500, preGain: -1, postGain: -1, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 1000, preGain: 0, postGain: 0, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 2000, preGain: 1, postGain: 1, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 4000, preGain: 2, postGain: 2, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 8000, preGain: 3, postGain: 3, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 16000, preGain: 2, postGain: 2, preQ: 1, postQ: 1, bandType: 'highShelf' }
+    ],
+    compressorEnabled: false,
+    compressor: { threshold: -24, ratio: 4, attack: 10, release: 100, knee: 6 },
+    limiterEnabled: false,
+    limiter: { ceiling: -0.3, release: 50 },
+    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
+  },
+  {
+    id: 'electronic',
+    name: '电子',
+    builtin: true,
+    eqEnabled: true,
+    eqBands: [
+      { frequency: 32, preGain: 5, postGain: 5, preQ: 0.5, postQ: 0.5, bandType: 'lowShelf' },
+      { frequency: 64, preGain: 4, postGain: 4, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 125, preGain: -3, postGain: -3, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 250, preGain: -4, postGain: -4, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 500, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 1000, preGain: -2, postGain: -2, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 2000, preGain: 1, postGain: 1, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 4000, preGain: 3, postGain: 3, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 8000, preGain: 4, postGain: 4, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 16000, preGain: 5, postGain: 5, preQ: 1, postQ: 1, bandType: 'highShelf' }
+    ],
+    compressorEnabled: true,
+    compressor: { threshold: -12, ratio: 6, attack: 3, release: 60, knee: 2 },
+    limiterEnabled: true,
+    limiter: { ceiling: -0.5, release: 30 },
+    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    virtualBass: { enabled: true, intensity: 60, crossoverFreq: 100 },
+    softClipper: { enabled: true, threshold: 1.5, makeupGain: 2 }
+  },
+  {
+    id: 'vocal',
+    name: '人声增强',
+    builtin: true,
+    eqEnabled: true,
+    eqBands: [
+      { frequency: 32, preGain: -2, postGain: -2, preQ: 0.5, postQ: 0.5, bandType: 'lowShelf' },
+      { frequency: 64, preGain: -1, postGain: -1, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 125, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 250, preGain: 3, postGain: 3, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 500, preGain: 3, postGain: 3, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 1000, preGain: 2, postGain: 2, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 2000, preGain: 4, postGain: 4, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 4000, preGain: 3, postGain: 3, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 8000, preGain: 1, postGain: 1, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 16000, preGain: -1, postGain: -1, preQ: 1, postQ: 1, bandType: 'highShelf' }
+    ],
+    compressorEnabled: true,
+    compressor: { threshold: -18, ratio: 3, attack: 10, release: 150, knee: 8 },
+    limiterEnabled: false,
+    limiter: { ceiling: -0.3, release: 50 },
+    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
+  },
+  {
+    id: 'bass_boost',
+    name: '低音增强',
+    builtin: true,
+    eqEnabled: true,
+    eqBands: [
+      { frequency: 32, preGain: 6, postGain: 6, preQ: 0.5, postQ: 0.5, bandType: 'lowShelf' },
+      { frequency: 64, preGain: 5, postGain: 5, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 125, preGain: 3, postGain: 3, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 250, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 500, preGain: -2, postGain: -2, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 1000, preGain: -1, postGain: -1, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 2000, preGain: 0, postGain: 0, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 4000, preGain: 0, postGain: 0, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 8000, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 16000, preGain: -1, postGain: -1, preQ: 1, postQ: 1, bandType: 'highShelf' }
+    ],
+    compressorEnabled: false,
+    compressor: { threshold: -24, ratio: 4, attack: 10, release: 100, knee: 6 },
+    limiterEnabled: true,
+    limiter: { ceiling: -1.0, release: 50 },
+    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    virtualBass: { enabled: true, intensity: 80, crossoverFreq: 150 },
+    softClipper: { enabled: true, threshold: 1.0, makeupGain: 3 }
+  },
+  {
+    id: 'treble_boost',
+    name: '高音增强',
+    builtin: true,
+    eqEnabled: true,
+    eqBands: [
+      { frequency: 32, preGain: -1, postGain: -1, preQ: 0.5, postQ: 0.5, bandType: 'lowShelf' },
+      { frequency: 64, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 125, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 250, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 500, preGain: 1, postGain: 1, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 1000, preGain: 2, postGain: 2, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 2000, preGain: 3, postGain: 3, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 4000, preGain: 4, postGain: 4, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 8000, preGain: 5, postGain: 5, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 16000, preGain: 6, postGain: 6, preQ: 1, postQ: 1, bandType: 'highShelf' }
+    ],
+    compressorEnabled: false,
+    compressor: { threshold: -24, ratio: 4, attack: 10, release: 100, knee: 6 },
+    limiterEnabled: false,
+    limiter: { ceiling: -0.3, release: 50 },
+    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
+  }
+]
 
 /**
  * 转换压缩器参数为 Rust 引擎格式
@@ -295,8 +416,7 @@ export function useAudioEngine() {
   });
   const limiterGR = ref(0);
 
-  // 等响度状态
-  const loudnessEnabled = ref(false);
+  // 等响度状态（enabled 已合并到 loudness.value.enabled 中，不再使用独立 ref）
   const loudness = ref<LoudnessParams>({
     enabled: false,
     compensation: 1.0,
@@ -304,9 +424,223 @@ export function useAudioEngine() {
     direction: 'both'
   });
 
-  // 预设相关
-  const presets = ref<SoundEffectPreset[]>([]);
+  // 虚拟低频状态
+  const virtualBass = ref<VirtualBassParams>({
+    enabled: false,
+    intensity: 50,
+    crossoverFreq: 120
+  });
+
+  // 软限幅爆音抑制状态
+  const softClipper = ref<SoftClipperParams>({
+    enabled: false,
+    threshold: 2.0,
+    makeupGain: 0
+  });
+
+  // 预设管理
+  const presets = ref<Preset[]>([]);
   const currentPresetId = ref<string>('flat');
+
+  /**
+   * 加载所有预设（内置 + 自定义）
+   */
+  function loadPresets() {
+    const customPresets = loadCustomPresets();
+    presets.value = [...BUILTIN_PRESETS, ...customPresets];
+  }
+
+  /**
+   * 从 localStorage 加载自定义预设
+   * @returns 自定义预设数组
+   */
+  function loadCustomPresets(): Preset[] {
+    try {
+      const stored = localStorage.getItem(PRESETS_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          return parsed.map((p: any) => ({ ...p, builtin: false }));
+        }
+      }
+    } catch (error) {
+      console.error('[useAudioEngine] 加载自定义预设失败:', error);
+    }
+    return [];
+  }
+
+  /**
+   * 保存自定义预设到 localStorage
+   * @param customPresets - 自定义预设数组
+   */
+  function saveCustomPresets(customPresets: Preset[]) {
+    try {
+      localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(customPresets));
+    } catch (error) {
+      console.error('[useAudioEngine] 保存自定义预设失败:', error);
+    }
+  }
+
+  /**
+   * 判断预设是否为内置预设
+   * @param presetId - 预设 ID
+   * @returns 是否为内置预设
+   */
+  function isBuiltinPreset(presetId: string): boolean {
+    return BUILTIN_PRESETS.some((p) => p.id === presetId);
+  }
+
+  /**
+   * 获取当前音效设置快照
+   * @returns 当前所有音效参数
+   */
+  function getCurrentSnapshot(): Omit<Preset, 'id' | 'name' | 'builtin'> {
+    return {
+      eqEnabled: eqEnabled.value,
+      eqBands: JSON.parse(JSON.stringify(eqBands.value)),
+      compressorEnabled: compressorEnabled.value,
+      compressor: JSON.parse(JSON.stringify(compressor.value)),
+      limiterEnabled: limiterEnabled.value,
+      limiter: JSON.parse(JSON.stringify(limiter.value)),
+      loudness: JSON.parse(JSON.stringify(loudness.value)),
+      virtualBass: JSON.parse(JSON.stringify(virtualBass.value)),
+      softClipper: JSON.parse(JSON.stringify(softClipper.value))
+    };
+  }
+
+  /**
+   * 应用预设快照到当前音效
+   * @param snapshot - 预设快照数据
+   */
+  async function applySnapshot(snapshot: Omit<Preset, 'id' | 'name' | 'builtin'>) {
+    // 应用 EQ
+    if (snapshot.eqBands && snapshot.eqBands.length > 0) {
+      eqBands.value = snapshot.eqBands;
+      for (let i = 0; i < snapshot.eqBands.length; i++) {
+        const band = snapshot.eqBands[i];
+        await setEqBand(i, band);
+      }
+    }
+    await setEqEnabled(snapshot.eqEnabled ?? false);
+
+    // 应用压缩器
+    if (snapshot.compressor) {
+      await setCompressorParams(snapshot.compressor);
+    }
+    await setCompressorEnabled(snapshot.compressorEnabled ?? false);
+
+    // 应用限制器
+    if (snapshot.limiter) {
+      await setLimiterParams(snapshot.limiter);
+    }
+    await setLimiterEnabled(snapshot.limiterEnabled ?? false);
+
+    // 应用等响度
+    if (snapshot.loudness) {
+      await setLoudnessParams(snapshot.loudness);
+    }
+
+    // 应用虚拟低频
+    if (snapshot.virtualBass) {
+      await setVirtualBassParams(snapshot.virtualBass);
+    }
+
+    // 应用软限幅器
+    if (snapshot.softClipper) {
+      await setSoftClipperParams(snapshot.softClipper);
+    }
+  }
+
+  /**
+   * 应用预设
+   * @param presetId - 预设 ID
+   */
+  async function applyPreset(presetId: string) {
+    const allPresets = [...BUILTIN_PRESETS, ...loadCustomPresets()];
+    const preset = allPresets.find((p) => p.id === presetId);
+    if (!preset) {
+      console.warn('[useAudioEngine] 未找到预设:', presetId);
+      return;
+    }
+
+    await applySnapshot(preset);
+    currentPresetId.value = presetId;
+    debouncedSaveEngineState();
+  }
+
+  /**
+   * 将当前设置保存为自定义预设
+   * @param name - 预设名称
+   */
+  async function saveCurrentAsPreset(name: string) {
+    const snapshot = getCurrentSnapshot();
+    const id = `custom_${Date.now()}`;
+    const newPreset: Preset = {
+      id,
+      name,
+      builtin: false,
+      ...snapshot
+    };
+
+    const customPresets = loadCustomPresets();
+    customPresets.push(newPreset);
+    saveCustomPresets(customPresets);
+
+    // 重新加载预设列表
+    loadPresets();
+    currentPresetId.value = id;
+    debouncedSaveEngineState();
+  }
+
+  /**
+   * 删除自定义预设
+   * @param presetId - 预设 ID
+   */
+  function deletePreset(presetId: string) {
+    // 不允许删除内置预设
+    if (isBuiltinPreset(presetId)) return;
+
+    const customPresets = loadCustomPresets();
+    const filtered = customPresets.filter((p) => p.id !== presetId);
+    saveCustomPresets(filtered);
+
+    // 重新加载预设列表
+    loadPresets();
+
+    // 如果删除的是当前预设，切换到平坦预设
+    if (currentPresetId.value === presetId) {
+      currentPresetId.value = 'flat';
+    }
+  }
+
+  /**
+   * 加载保存的 currentPresetId
+   */
+  function loadCurrentPresetId(): string {
+    try {
+      const stored = localStorage.getItem('sound-effect-current-preset');
+      return stored || 'flat';
+    } catch {
+      return 'flat';
+    }
+  }
+
+  /**
+   * 保存 currentPresetId
+   */
+  function saveCurrentPresetId() {
+    try {
+      localStorage.setItem('sound-effect-current-preset', currentPresetId.value);
+    } catch (error) {
+      console.error('[useAudioEngine] 保存当前预设 ID 失败:', error);
+    }
+  }
+
+  // 初始化预设列表
+  loadPresets();
+  currentPresetId.value = loadCurrentPresetId();
+  // 监听 currentPresetId 变化并持久化
+  watch(currentPresetId, () => saveCurrentPresetId());
 
   // 增益减少量轮询定时器
   let gainReductionTimer: number | null = null;
@@ -335,6 +669,11 @@ export function useAudioEngine() {
       if (result && typeof result === 'object' && result.success) {
         state.isInitialized = true;
         await refreshAllParams();
+        // 恢复上次保存的音效状态
+        const savedState = loadEngineState();
+        if (savedState) {
+          await applySavedState(savedState);
+        }
         startGainReductionPolling();
         console.log('[useAudioEngine] 引擎初始化成功');
         return true;
@@ -342,6 +681,11 @@ export function useAudioEngine() {
         // 直接返回 true 的情况
         state.isInitialized = true;
         await refreshAllParams();
+        // 恢复上次保存的音效状态
+        const savedState = loadEngineState();
+        if (savedState) {
+          await applySavedState(savedState);
+        }
         startGainReductionPolling();
         console.log('[useAudioEngine] 引擎初始化成功');
         return true;
@@ -406,10 +750,18 @@ export function useAudioEngine() {
       };
 
       // 刷新等响度
-      loudnessEnabled.value = typeof api.isLoudnessEnabled === 'function'
+      const isLoudnessEnabled = typeof api.isLoudnessEnabled === 'function'
         ? await api.isLoudnessEnabled()
         : false;
       loudness.value = await api.getLoudness();
+      loudness.value.enabled = isLoudnessEnabled;
+      // 同步到 Web Audio API 音效链
+      rustAudioAdapter.setLoudnessParams({
+        enabled: isLoudnessEnabled,
+        compensation: loudness.value.compensation,
+        referenceLoudness: loudness.value.referenceLoudness,
+        direction: loudness.value.direction
+      });
 
       // 刷新音量
       state.volume = await api.getVolume();
@@ -454,6 +806,147 @@ export function useAudioEngine() {
     if (gainReductionTimer !== null) {
       window.clearInterval(gainReductionTimer);
       gainReductionTimer = null;
+    }
+  }
+
+  // === 状态持久化 ===
+
+  /**
+   * 保存音效引擎当前状态到 localStorage
+   */
+  function saveEngineState() {
+    try {
+      const stateData = {
+        eqEnabled: eqEnabled.value,
+        eqBands: eqBands.value,
+        compressorEnabled: compressorEnabled.value,
+        compressor: compressor.value,
+        limiterEnabled: limiterEnabled.value,
+        limiter: limiter.value,
+        loudness: loudness.value,
+        virtualBass: virtualBass.value,
+        softClipper: softClipper.value
+      };
+      localStorage.setItem(ENGINE_STATE_STORAGE_KEY, JSON.stringify(stateData));
+    } catch (error) {
+      console.error('[useAudioEngine] 保存引擎状态失败:', error);
+    }
+  }
+
+  /**
+   * 防抖保存音效引擎状态
+   * @param delay - 防抖延迟时间（毫秒）
+   */
+  let engineSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  function debouncedSaveEngineState(delay: number = 300) {
+    if (engineSaveTimer) clearTimeout(engineSaveTimer);
+    engineSaveTimer = setTimeout(() => {
+      saveEngineState();
+    }, delay);
+  }
+
+  /**
+   * 从 localStorage 加载音效引擎状态
+   * @returns 保存的状态，若无则返回 null
+   */
+  function loadEngineState() {
+    try {
+      const stored = localStorage.getItem(ENGINE_STATE_STORAGE_KEY);
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch (error) {
+      console.error('[useAudioEngine] 加载引擎状态失败:', error);
+    }
+    return null;
+  }
+
+  /**
+   * 应用保存的音效引擎状态
+   * @param savedState - 保存的状态对象
+   */
+  async function applySavedState(savedState: any) {
+    if (!savedState) return;
+
+    try {
+      // 应用 EQ 状态
+      if (savedState.eqEnabled !== undefined) {
+        await setEqEnabled(savedState.eqEnabled);
+      }
+      if (savedState.eqBands && Array.isArray(savedState.eqBands)) {
+        // 通过 setEqBand 逐个恢复，确保同时同步到 Rust API 和 Web Audio 适配器
+        for (let i = 0; i < savedState.eqBands.length; i++) {
+          const band = savedState.eqBands[i];
+          try {
+            await setEqBand(i, band);
+          } catch (e) {
+            console.error(`[useAudioEngine] 恢复 EQ 频段 ${i} 失败:`, e);
+          }
+        }
+      }
+
+      // 应用压缩器状态
+      if (savedState.compressorEnabled !== undefined) {
+        await setCompressorEnabled(savedState.compressorEnabled);
+      }
+      if (savedState.compressor) {
+        // 通过 setCompressorParams 恢复，确保同时同步到 Rust API 和 Web Audio 适配器
+        try {
+          await setCompressorParams(savedState.compressor);
+        } catch (e) {
+          console.error('[useAudioEngine] 恢复压缩器参数失败:', e);
+        }
+      }
+
+      // 应用限制器状态
+      if (savedState.limiterEnabled !== undefined) {
+        await setLimiterEnabled(savedState.limiterEnabled);
+      }
+      if (savedState.limiter) {
+        try {
+          await setLimiterParams(savedState.limiter);
+        } catch (e) {
+          console.error('[useAudioEngine] 恢复限制器参数失败:', e);
+        }
+      }
+
+      // 应用等响度状态
+      if (savedState.loudness) {
+        loudness.value = { ...savedState.loudness };
+        if (state.isInitialized && api) {
+          try {
+            if (typeof api.setLoudnessEnabled === 'function') {
+              await api.setLoudnessEnabled(savedState.loudness.enabled ?? false);
+            }
+            await api.setLoudness({ ...savedState.loudness });
+          } catch (e) {
+            console.error('[useAudioEngine] 恢复等响度参数失败:', e);
+          }
+        }
+        // 应用到 Web Audio API 音效链
+        rustAudioAdapter.setLoudnessParams({
+          enabled: loudness.value.enabled,
+          compensation: loudness.value.compensation,
+          referenceLoudness: loudness.value.referenceLoudness,
+          direction: loudness.value.direction
+        });
+      }
+
+      // 应用虚拟低频状态
+      if (savedState.virtualBass) {
+        virtualBass.value = { ...savedState.virtualBass };
+        rustAudioAdapter.setVirtualBassParams(virtualBass.value);
+      }
+
+      // 应用软限幅器状态
+      if (savedState.softClipper) {
+        softClipper.value = { ...savedState.softClipper };
+        rustAudioAdapter.setSoftClipperParams(softClipper.value);
+      }
+
+      console.log('[useAudioEngine] 已恢复保存的音效状态');
+    } catch (error) {
+      console.error('[useAudioEngine] 应用保存的状态失败:', error);
     }
   }
 
@@ -616,13 +1109,19 @@ export function useAudioEngine() {
       try {
         if (params.enabled !== undefined && typeof api.setLoudnessEnabled === 'function') {
           await api.setLoudnessEnabled(params.enabled);
-          loudnessEnabled.value = params.enabled;
         }
         await api.setLoudness({ ...loudness.value });
       } catch (error) {
         console.error('[useAudioEngine] 设置等响度参数失败:', error);
       }
     }
+    // 应用到 Web Audio API 音效链
+    rustAudioAdapter.setLoudnessParams({
+      enabled: loudness.value.enabled,
+      compensation: loudness.value.compensation,
+      referenceLoudness: loudness.value.referenceLoudness,
+      direction: loudness.value.direction
+    });
   }
 
   /**
@@ -630,7 +1129,6 @@ export function useAudioEngine() {
    * @param enabled - 是否启用
    */
   async function setLoudnessEnabled(enabled: boolean) {
-    loudnessEnabled.value = enabled;
     loudness.value.enabled = enabled;
     if (state.isInitialized && api) {
       try {
@@ -642,158 +1140,60 @@ export function useAudioEngine() {
         console.error('[useAudioEngine] 设置等响度启用状态失败:', error);
       }
     }
+    // 应用到 Web Audio API 音效链
+    rustAudioAdapter.setLoudnessEnabled(enabled);
   }
 
-  // === 预设管理 ===
+  // === 虚拟低频控制 ===
 
   /**
-   * 加载预设
+   * 设置虚拟低频参数
+   * @param params - 虚拟低频参数（部分更新）
    */
-  function loadPresets() {
-    try {
-      const stored = localStorage.getItem(PRESETS_STORAGE_KEY);
-      if (stored) {
-        const userPresets = JSON.parse(stored);
-        presets.value = [...DEFAULT_PRESETS, ...userPresets];
-      } else {
-        presets.value = [...DEFAULT_PRESETS];
-      }
-    } catch {
-      presets.value = [...DEFAULT_PRESETS];
-    }
+  async function setVirtualBassParams(params: Partial<VirtualBassParams>) {
+    const current = JSON.parse(JSON.stringify(virtualBass.value));
+    virtualBass.value = { ...current, ...params };
+
+    // 应用到 Web Audio API（Rust 引擎暂不支持虚拟低频）
+    rustAudioAdapter.setVirtualBassParams(virtualBass.value);
   }
+
+  // === 软限幅器控制 ===
 
   /**
-   * 保存用户预设到 localStorage
+   * 设置软限幅器参数
+   * @param params - 软限幅器参数（部分更新）
    */
-  function saveUserPresets() {
-    const userPresets = presets.value.filter(p => !DEFAULT_PRESETS.find(dp => dp.id === p.id));
-    localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(userPresets));
+  async function setSoftClipperParams(params: Partial<SoftClipperParams>) {
+    const current = JSON.parse(JSON.stringify(softClipper.value));
+    softClipper.value = { ...current, ...params };
+
+    // 应用到 Web Audio API
+    rustAudioAdapter.setSoftClipperParams(softClipper.value);
   }
 
-  /**
-   * 应用预设
-   * @param presetId - 预设 ID
-   */
-  async function applyPreset(presetId: string) {
-    const preset = presets.value.find(p => p.id === presetId);
-    if (!preset) return;
+  // === 监听音效参数变化，自动保存到 localStorage ===
 
-    currentPresetId.value = presetId;
+  // 监听 EQ 状态变化
+  watch(eqEnabled, () => debouncedSaveEngineState());
+  watch(eqBands, () => debouncedSaveEngineState(), { deep: true });
 
-    console.log('[useAudioEngine] 应用预设:', presetId, preset);
+  // 监听压缩器状态变化
+  watch(compressorEnabled, () => debouncedSaveEngineState());
+  watch(compressor, () => debouncedSaveEngineState(), { deep: true });
 
-    // 应用 EQ
-    eqBands.value = JSON.parse(JSON.stringify(preset.eqBands));
-    await setEqEnabled(preset.eqEnabled);
-    // 逐个频段应用到后端
-    for (let i = 0; i < preset.eqBands.length; i++) {
-      const band = preset.eqBands[i];
-      const rustSettings = convertEqBandSettings(band);
-      console.log(`[useAudioEngine] 设置 EQ 频段 ${i}:`, rustSettings);
-      try {
-        await api?.setEqBand(i, rustSettings);
-      } catch (error) {
-        console.error(`[useAudioEngine] 设置 EQ 频段 ${i} 失败:`, error);
-      }
-    }
+  // 监听限制器状态变化
+  watch(limiterEnabled, () => debouncedSaveEngineState());
+  watch(limiter, () => debouncedSaveEngineState(), { deep: true });
 
-    // 应用压缩器
-    compressor.value = { ...preset.compressor };
-    await setCompressorEnabled(preset.compressorEnabled);
-    const compParams = convertCompressorParams(preset.compressor);
-    console.log('[useAudioEngine] 设置压缩器:', compParams);
-    try {
-      await api?.setCompressor(compParams);
-    } catch (error) {
-      console.error('[useAudioEngine] 设置压缩器失败:', error);
-    }
+  // 监听等响度状态变化（deep 模式已覆盖 loudness.value.enabled 变更）
+  watch(loudness, () => debouncedSaveEngineState(), { deep: true });
 
-    // 应用限制器
-    limiter.value = { ...preset.limiter };
-    await setLimiterEnabled(preset.limiterEnabled);
-    const limParams = convertLimiterParams(preset.limiter);
-    console.log('[useAudioEngine] 设置限制器:', limParams);
-    try {
-      await api?.setLimiter(limParams);
-    } catch (error) {
-      console.error('[useAudioEngine] 设置限制器失败:', error);
-    }
+  // 监听虚拟低频状态变化
+  watch(virtualBass, () => debouncedSaveEngineState(), { deep: true });
 
-    // 应用等响度
-    loudness.value = { ...preset.loudness };
-    loudnessEnabled.value = preset.loudness.enabled;
-    console.log('[useAudioEngine] 设置等响度:', preset.loudness);
-    try {
-      if (typeof api?.setLoudnessEnabled === 'function') {
-        await api?.setLoudnessEnabled(preset.loudness.enabled);
-      }
-      await api?.setLoudness({ ...preset.loudness });
-    } catch (error) {
-      console.error('[useAudioEngine] 设置等响度失败:', error);
-    }
-
-    console.log('[useAudioEngine] 预设应用完成:', presetId);
-  }
-
-  /**
-   * 保存当前设置为新预设
-   */
-  function saveCurrentAsPreset(name: string): string {
-    const id = `custom-${Date.now()}`;
-    const preset: SoundEffectPreset = {
-      id,
-      name,
-      eqEnabled: eqEnabled.value,
-      eqBands: [...eqBands.value],
-      compressorEnabled: compressorEnabled.value,
-      compressor: { ...compressor.value },
-      limiterEnabled: limiterEnabled.value,
-      limiter: { ...limiter.value },
-      loudness: { ...loudness.value }
-    };
-
-    presets.value.push(preset);
-    saveUserPresets();
-    currentPresetId.value = id;
-
-    return id;
-  }
-
-  /**
-   * 删除用户预设
-   */
-  function deletePreset(presetId: string) {
-    const index = presets.value.findIndex(p => p.id === presetId);
-    if (index === -1) return;
-
-    const preset = presets.value[index];
-    if (DEFAULT_PRESETS.find(dp => dp.id === preset.id)) return;
-
-    presets.value.splice(index, 1);
-    saveUserPresets();
-
-    if (currentPresetId.value === presetId) {
-      currentPresetId.value = 'flat';
-    }
-  }
-
-  /**
-   * 重置为默认设置
-   */
-  async function resetToDefault() {
-    await applyPreset('flat');
-  }
-
-  /**
-   * 计算属性：是否为内置预设
-   */
-  function isBuiltinPreset(presetId: string): boolean {
-    return DEFAULT_PRESETS.some(p => p.id === presetId);
-  }
-
-  // 初始化时加载预设
-  loadPresets();
+  // 监听软限幅器状态变化
+  watch(softClipper, () => debouncedSaveEngineState(), { deep: true });
 
   return {
     // 状态
@@ -822,18 +1222,24 @@ export function useAudioEngine() {
     setLimiterParams,
 
     // 等响度
-    loudnessEnabled,
     loudness,
     setLoudnessEnabled,
     setLoudnessParams,
 
-    // 预设
+    // 虚拟低频
+    virtualBass,
+    setVirtualBassParams,
+
+    // 软限幅器
+    softClipper,
+    setSoftClipperParams,
+
+    // 预设管理
     presets,
     currentPresetId,
     applyPreset,
     saveCurrentAsPreset,
     deletePreset,
-    resetToDefault,
     isBuiltinPreset,
 
     // 生命周期

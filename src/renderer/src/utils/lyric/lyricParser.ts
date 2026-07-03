@@ -41,7 +41,7 @@ function mergeTranslatedLyrics(mainLines: CoreLyricLine[], translatedContent?: s
 
   let translatedLines: CoreLyricLine[] = []
   try {
-    translatedLines = parseBetterLrc(cleanedTranslated)
+    translatedLines = parseBetterLrc(cleanedTranslated) as CoreLyricLine[]
   } catch {
     return mainLines
   }
@@ -150,6 +150,10 @@ export function parseLyricsToCore(content: string, translatedContent?: string): 
   if (!content) return []
 
   let lrc = typeof content === 'string' ? content : String(content)
+
+  // 将歌词标签中的字面 \n 转义序列转换为实际换行符
+  lrc = lrc.replace(/\\n/g, '\n')
+
   lrc = lrc.trim()
 
   if (!lrc) return []
@@ -189,11 +193,37 @@ export function parseLyricsToCore(content: string, translatedContent?: string): 
       lines = parseYrcCustom(lrc)
       console.log(`[lyricParser] YRC 解析完成: ${lines.length} 行, 首行词数: ${lines[0]?.words?.length || 0}`)
     }
-    // Other cases fallback to LRC
-    else {
+    // 检测是否包含 LRC 时间戳 [mm:ss.xx]
+    else if (/\[\d{1,2}:\d{1,2}/.test(lrc)) {
       console.log('[lyricParser] 未检测到特殊格式，回退到 LRC 解析')
       console.log(`[lyricParser] 内容首行预览: ${lrc.split('\n')[0]?.substring(0, 100)}`)
       lines = parseBetterLrc(lrc)
+    }
+    // 纯文本歌词（无 LRC 时间戳）：按换行拆分，均匀分配时间
+    else {
+      console.log('[lyricParser] 检测到纯文本歌词，按行拆分')
+      const plainLines = lrc
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+      const lineDuration = 5000 // 每行 5 秒
+      lines = plainLines.map((text, i) => ({
+        words: [
+          {
+            word: text,
+            romanWord: '',
+            startTime: i * lineDuration,
+            endTime: (i + 1) * lineDuration,
+            obscene: false
+          }
+        ],
+        startTime: i * lineDuration,
+        endTime: (i + 1) * lineDuration,
+        translatedLyric: '',
+        romanLyric: '',
+        isBG: false,
+        isDuet: false
+      }))
     }
 
     const coreLines: CoreLyricLine[] = lines.map((line) => ({

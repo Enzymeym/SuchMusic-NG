@@ -275,6 +275,108 @@ class AudioEngineManager {
 
 const audioEngineManager = new AudioEngineManager();
 
+// FFmpeg 引擎管理器
+class AudioEngineFfmpegManager {
+  private currentEngineId: string | null = null;
+
+  async create(): Promise<{ success: boolean; engineId?: string; error?: string }> {
+    const result = await ipcRenderer.invoke('ffmpeg-engine:create');
+    if (result.success) {
+      this.currentEngineId = result.engineId;
+      return { success: true, engineId: result.engineId };
+    }
+    return { success: false, error: result.error };
+  }
+
+  getEngineId(): string | null {
+    return this.currentEngineId;
+  }
+
+  async destroy(): Promise<boolean> {
+    if (!this.currentEngineId) return false;
+    const result = await ipcRenderer.invoke('ffmpeg-engine:destroy', this.currentEngineId);
+    if (result.success) {
+      this.currentEngineId = null;
+    }
+    return result.success;
+  }
+
+  private ensureEngineId(): string {
+    if (!this.currentEngineId) {
+      throw new Error('FFmpeg 引擎未初始化，请先调用 create()');
+    }
+    return this.currentEngineId;
+  }
+
+  async load(filePath: string): Promise<{ success: boolean; streamInfo?: any; error?: string }> {
+    return ipcRenderer.invoke('ffmpeg-engine:load', this.ensureEngineId(), filePath);
+  }
+
+  async loadData(buffer: ArrayBuffer): Promise<{ success: boolean; streamInfo?: any; error?: string }> {
+    return ipcRenderer.invoke('ffmpeg-engine:load-data', this.ensureEngineId(), buffer);
+  }
+
+  async decodeFrame(): Promise<{ success: boolean; frame?: any; error?: string }> {
+    return ipcRenderer.invoke('ffmpeg-engine:decode-frame', this.ensureEngineId());
+  }
+
+  async decodeAll(): Promise<{ success: boolean; samples?: number[]; error?: string }> {
+    return ipcRenderer.invoke('ffmpeg-engine:decode-all', this.ensureEngineId());
+  }
+
+  async seek(positionMs: number): Promise<{ success: boolean; error?: string }> {
+    return ipcRenderer.invoke('ffmpeg-engine:seek', this.ensureEngineId(), positionMs);
+  }
+
+  async play(): Promise<{ success: boolean; error?: string }> {
+    return ipcRenderer.invoke('ffmpeg-engine:play', this.ensureEngineId());
+  }
+
+  async pause(): Promise<{ success: boolean; error?: string }> {
+    return ipcRenderer.invoke('ffmpeg-engine:pause', this.ensureEngineId());
+  }
+
+  async stop(): Promise<{ success: boolean; error?: string }> {
+    return ipcRenderer.invoke('ffmpeg-engine:stop', this.ensureEngineId());
+  }
+
+  async reset(): Promise<{ success: boolean; error?: string }> {
+    return ipcRenderer.invoke('ffmpeg-engine:reset', this.ensureEngineId());
+  }
+
+  async getState(): Promise<string> {
+    const result = await ipcRenderer.invoke('ffmpeg-engine:get-state', this.ensureEngineId());
+    return result.state ?? 'idle';
+  }
+
+  async getStreamInfo(): Promise<any | null> {
+    const result = await ipcRenderer.invoke('ffmpeg-engine:get-stream-info', this.ensureEngineId());
+    return result.info ?? null;
+  }
+
+  async getDsdParams(): Promise<any | null> {
+    const result = await ipcRenderer.invoke('ffmpeg-engine:get-dsd-params', this.ensureEngineId());
+    return result.params ?? null;
+  }
+
+  async isFormatSupported(extension: string): Promise<boolean> {
+    const result = await ipcRenderer.invoke('ffmpeg-engine:is-format-supported', extension);
+    return result.supported ?? false;
+  }
+
+  async isFfmpegExclusive(extension: string): Promise<boolean> {
+    const result = await ipcRenderer.invoke('ffmpeg-engine:is-exclusive', extension);
+    return result.exclusive ?? false;
+  }
+
+  async getVersion(): Promise<string> {
+    const result = await ipcRenderer.invoke('ffmpeg-engine:get-version');
+    return result.version ?? '';
+  }
+}
+
+const audioEngineFfmpegManager = new AudioEngineFfmpegManager();
+
 const api = {
   rustAudio: audioEngineManager,
 
@@ -336,6 +438,59 @@ const api = {
     }),
 
     getVersion: () => AudioEngineManager.getVersion(),
+  },
+
+  // FFmpeg 音频引擎 (第二个引擎，用于 DSF/DSD/DFF 等格式)
+  ffmpegEngine: {
+    create: () => audioEngineFfmpegManager.create(),
+    destroy: () => audioEngineFfmpegManager.destroy(),
+    load: (filePath: string) => audioEngineFfmpegManager.load(filePath),
+    loadData: (buffer: ArrayBuffer) => audioEngineFfmpegManager.loadData(buffer),
+    decodeFrame: () => audioEngineFfmpegManager.decodeFrame(),
+    decodeAll: () => audioEngineFfmpegManager.decodeAll(),
+    seek: (positionMs: number) => audioEngineFfmpegManager.seek(positionMs),
+    play: () => audioEngineFfmpegManager.play(),
+    pause: () => audioEngineFfmpegManager.pause(),
+    stop: () => audioEngineFfmpegManager.stop(),
+    reset: () => audioEngineFfmpegManager.reset(),
+    getState: () => audioEngineFfmpegManager.getState(),
+    getStreamInfo: () => audioEngineFfmpegManager.getStreamInfo(),
+    getDsdParams: () => audioEngineFfmpegManager.getDsdParams(),
+    isFormatSupported: (extension: string) => audioEngineFfmpegManager.isFormatSupported(extension),
+    isFfmpegExclusive: (extension: string) => audioEngineFfmpegManager.isFfmpegExclusive(extension),
+    getVersion: () => audioEngineFfmpegManager.getVersion(),
+  },
+
+  // WASAPI 音频输出 (独占/共享模式)
+  wasapi: {
+    enumerateDevices: () => ipcRenderer.invoke('wasapi:enumerate-devices'),
+    create: (sampleRate: number, channels: number, mode: 'Shared' | 'Exclusive', deviceId?: string) =>
+      ipcRenderer.invoke('wasapi:create', sampleRate, channels, mode, deviceId),
+    destroy: (engineId: string) => ipcRenderer.invoke('wasapi:destroy', engineId),
+    start: (engineId: string) => ipcRenderer.invoke('wasapi:start', engineId),
+    stop: (engineId: string) => ipcRenderer.invoke('wasapi:stop', engineId),
+    outputAudio: (engineId: string, data: number[], channels: number, sampleRate: number) =>
+      ipcRenderer.invoke('wasapi:output-audio', engineId, data, channels, sampleRate),
+    flush: (engineId: string) => ipcRenderer.invoke('wasapi:flush', engineId),
+    getState: (engineId: string) => ipcRenderer.invoke('wasapi:get-state', engineId),
+    getVersion: () => ipcRenderer.invoke('wasapi:get-version'),
+  },
+
+  // FFmpeg 解码器安装管理
+  ffmpegInstaller: {
+    check: () => ipcRenderer.invoke('ffmpeg-installer:check'),
+    install: () => ipcRenderer.send('ffmpeg-installer:install'),
+    getDir: () => ipcRenderer.invoke('ffmpeg-installer:get-dir'),
+    onProgress: (callback: (progress: any) => void) => {
+      const handler = (_event: any, progress: any) => callback(progress);
+      ipcRenderer.on('ffmpeg-installer:progress', handler);
+      return () => { ipcRenderer.removeListener('ffmpeg-installer:progress', handler); };
+    },
+    onResult: (callback: (result: any) => void) => {
+      const handler = (_event: any, result: any) => callback(result);
+      ipcRenderer.on('ffmpeg-installer:result', handler);
+      return () => { ipcRenderer.removeListener('ffmpeg-installer:result', handler); };
+    },
   },
 
   updater: {

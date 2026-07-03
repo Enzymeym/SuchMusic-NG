@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
-import { NCard, NSwitch, NSlider, NButton, NSelect } from 'naive-ui'
+import { computed, watch, ref, onMounted } from 'vue'
+import { NCard, NSwitch, NSlider, NSelect, NButton, NAlert, NSpace, NProgress } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePlayerStore } from '../../../stores/playerStore'
 import { useAudioEngine } from '../../../composables/useAudioEngine'
+import { AudioOutputModeManager, type AudioOutputMode, type AudioDevice } from '../../../utils/audioOutputModeManager'
+import { useFfmpegInstaller } from '../../../composables/useFfmpegInstaller'
 
 // 使用设置仓库，驱动播放设置选项
 const settingsStore = useSettingsStore()
@@ -51,35 +53,6 @@ const eqBands = [
   { key: '16k', label: '超高频', freqLabel: '16kHz', index: 9 }
 ]
 
-// 预设曲线（示例）：每个包含 10 段增益值（单位 dB）
-const eqPresets = [
-  {
-    id: 'flat',
-    name: '平坦',
-    gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-  },
-  {
-    id: 'pop',
-    name: '流行',
-    gains: [2, 3, 3, 1, -1, -1, 2, 3, 3, 2]
-  },
-  {
-    id: 'rock',
-    name: '摇滚',
-    gains: [3, 4, 2, 0, -1, -1, 1, 3, 4, 3]
-  },
-  {
-    id: 'vocal',
-    name: '人声',
-    gains: [-2, -1, 0, 2, 3, 3, 2, 0, -1, -2]
-  },
-  {
-    id: 'bass',
-    name: '低音增强',
-    gains: [5, 4, 3, 1, 0, -1, -2, -3, -4, -5]
-  }
-]
-
 // 为每个 EQ 频段创建双向绑定的计算属性
 const eqBandValues = eqBands.map((band) =>
   computed({
@@ -89,8 +62,6 @@ const eqBandValues = eqBands.map((band) =>
       const next = [...settingsStore.playback.eqGains]
       next[band.index] = clamped
       settingsStore.playback.eqGains = next
-      // 手动调整时标记为自定义预设
-      settingsStore.playback.eqPreset = 'custom'
       // 同步到 Rust 引擎
       updateEqFromSettings()
     }
@@ -129,20 +100,6 @@ function updateLimiterFromSettings() {
   }
 }
 
-// 应用选中的 EQ 预设
-const applyEqPreset = (id: string) => {
-  const preset = eqPresets.find((p) => p.id === id)
-  if (!preset) return
-
-  // 启用均衡器并写入预设增益
-  settingsStore.playback.eqEnabled = true
-  settingsStore.playback.eqGains = [...preset.gains]
-  settingsStore.playback.eqPreset = id
-  
-  // 同步到 Rust 引擎
-  updateEqFromSettings()
-}
-
 // 监听设置变化并同步到 Rust 引擎
 watch(() => settingsStore.playback.eqEnabled, () => {
   updateEqFromSettings()
@@ -150,6 +107,157 @@ watch(() => settingsStore.playback.eqEnabled, () => {
 
 watch(() => settingsStore.playback.limiterStrength, () => {
   updateLimiterFromSettings()
+})
+
+// ======== 音频输出设备管理 ========
+
+/// 输出模式管理器实例
+const outputManager = new AudioOutputModeManager()
+
+/// 可用音频设备列表
+const audioDevices = ref<AudioDevice[]>([])
+
+/// 设备列表加载状态
+const devicesLoading = ref(false)
+
+/// 模式切换状态
+const modeSwitching = ref(false)
+
+/// 当前引擎描述
+const engineDescription = ref('Web Audio API (默认)')
+
+/// WASAPI 是否可用（默认 false，需通过 probe 确认）
+const wasapiAvailable = ref(false)
+
+/// WASAPI 不可用原因
+const wasapiUnavailableReason = ref('正在检测...')
+
+/// 输出模式选项（根据 WASAPI 可用性动态过滤）
+const outputModeOptions = computed(() => {
+  const options = [
+    { label: '默认 (WebAudio)', value: 'webaudio' as AudioOutputMode },
+  ];
+  if (wasapiAvailable.value) {
+    options.push(
+      { label: 'WASAPI 共享模式', value: 'wasapi-shared' as AudioOutputMode },
+      { label: 'WASAPI 独占模式', value: 'wasapi-exclusive' as AudioOutputMode },
+    );
+  }
+  return options;
+})
+
+/// 当前选中的输出模式（双向绑定到 store）
+const selectedOutputMode = computed<AudioOutputMode>({
+  get: () => settingsStore.playback.audioOutputMode,
+  set: (val: AudioOutputMode) => {
+    applyOutputMode(val, settingsStore.playback.audioOutputDeviceId)
+  }
+})
+
+/// 当前选中的输出设备名称（用于显示）
+const selectedDeviceName = computed({
+  get: () => {
+    if (settingsStore.playback.audioOutputDeviceName) {
+      return settingsStore.playback.audioOutputDeviceName
+    }
+    return '默认设备'
+  },
+  set: (_val: string) => {} // 只读显示，通过设备选择列表修改
+})
+
+/// 刷新设备列表
+/**
+ * 枚举系统中所有活动的音频输出设备
+ */
+async function refreshDevices() {
+  devicesLoading.value = true
+  try {
+    const devices = await outputManager.enumerateDevices()
+    audioDevices.value = devices
+  } catch (err) {
+    // 静默处理，不影响主流程
+  } finally {
+    devicesLoading.value = false
+  }
+}
+
+/// 应用输出模式切换
+/**
+ * 切换到指定的音频输出模式并更新引擎
+ * @param mode 目标输出模式
+ * @param deviceId 目标设备 ID（WASAPI 模式使用）
+ */
+async function applyOutputMode(mode: AudioOutputMode, deviceId?: string) {
+  // 非 WebAudio 模式需要先确认 WASAPI 可用
+  if (mode !== 'webaudio' && !wasapiAvailable.value) {
+    return
+  }
+
+  modeSwitching.value = true
+  try {
+    const result = await outputManager.switchMode(mode, {
+      sampleRate: 44100,
+      channels: 2,
+      deviceId: deviceId || settingsStore.playback.audioOutputDeviceId || undefined,
+    })
+
+    if (result.success) {
+      settingsStore.playback.audioOutputMode = mode
+      engineDescription.value = outputManager.getEngineDescription()
+      wasapiAvailable.value = true
+    } else {
+      console.warn('[Settings] 模式切换失败:', result.error)
+      wasapiUnavailableReason.value = result.error || '未知'
+      // 回退到 WebAudio
+      settingsStore.playback.audioOutputMode = 'webaudio'
+      engineDescription.value = 'Web Audio API (默认)'
+      wasapiAvailable.value = false
+    }
+  } catch (err) {
+    const msg = String(err)
+    console.warn('[Settings] 模式切换异常:', msg)
+    wasapiUnavailableReason.value = msg
+    settingsStore.playback.audioOutputMode = 'webaudio'
+    engineDescription.value = 'Web Audio API (默认)'
+    wasapiAvailable.value = false
+  } finally {
+    modeSwitching.value = false
+  }
+}
+
+/// 选择设备
+/**
+ * 用户选择音频输出设备后的处理
+ * @param deviceId 设备 ID
+ */
+function selectDevice(deviceId: string) {
+  const device = audioDevices.value.find(d => d.id === deviceId)
+  const deviceName = device?.name ?? '默认设备'
+  settingsStore.playback.audioOutputDeviceId = deviceId
+  settingsStore.playback.audioOutputDeviceName = deviceName
+
+  // 如果在 WASAPI 模式下，重新应用
+  if (settingsStore.playback.audioOutputMode !== 'webaudio') {
+    applyOutputMode(settingsStore.playback.audioOutputMode, deviceId)
+  }
+}
+
+// ======== FFmpeg 解码器安装管理 ========
+
+/// FFmpeg 安装器实例
+const ffmpegInstaller = useFfmpegInstaller()
+
+/// 组件挂载时刷新设备列表
+onMounted(async () => {
+  // 先探测 WASAPI 是否可用
+  const probe = await outputManager.probeWasapiAvailability()
+  wasapiAvailable.value = probe.available
+  if (!probe.available) {
+    wasapiUnavailableReason.value = probe.reason
+  }
+  refreshDevices()
+  // 检查 FFmpeg 安装状态
+  ffmpegInstaller.checkStatus()
 })
 
 const props = defineProps<{
@@ -162,6 +270,175 @@ const props = defineProps<{
 
 <template>
   <div class="settings-content">
+    <div class="section-group-title">音频输出</div>
+
+    <!-- FFmpeg 解码器状态 -->
+    <n-card
+      class="setting-item"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row" style="flex-direction: column; align-items: flex-start; gap: 12px">
+        <div class="setting-label">
+          <div class="main-label">FFmpeg 解码器</div>
+          <div class="sub-label">
+            FFmpeg 用于解码 DSD/DSF/DFF/WavPack/APE 等特殊音频格式。
+            状态：<strong>{{ ffmpegInstaller.isInstalled.value ? '✅ 已安装' : '❌ 未安装' }}</strong>
+          </div>
+        </div>
+
+        <!-- 未安装时显示下载按钮 -->
+        <template v-if="!ffmpegInstaller.isInstalled.value">
+          <n-space v-if="!ffmpegInstaller.isInstalling.value" align="center">
+            <n-button
+              type="primary"
+              size="small"
+              :loading="ffmpegInstaller.isChecking.value"
+              @click="ffmpegInstaller.startInstallation()"
+            >
+              自动下载安装 FFmpeg
+            </n-button>
+            <span class="time-text" v-if="ffmpegInstaller.missingDlls.value.length > 0">
+              缺失: {{ ffmpegInstaller.missingDlls.value.join(', ') }}
+            </span>
+          </n-space>
+
+          <!-- 安装进度 -->
+          <div v-if="ffmpegInstaller.isInstalling.value" style="width: 100%">
+            <n-progress
+              type="line"
+              :percentage="ffmpegInstaller.progress.value.percent"
+              :indicator-placement="'inside'"
+              :height="24"
+              :status="ffmpegInstaller.progress.value.status === 'error' ? 'error' : 'default'"
+            />
+            <div class="time-text" style="margin-top: 8px">
+              {{
+                ffmpegInstaller.progress.value.status === 'downloading'
+                  ? `下载中: ${ffmpegInstaller.formatBytes(ffmpegInstaller.progress.value.downloadedBytes)} / ${ffmpegInstaller.formatBytes(ffmpegInstaller.progress.value.totalBytes)} (${ffmpegInstaller.formatSpeed(ffmpegInstaller.progress.value.speedBps)})`
+                  : ffmpegInstaller.progress.value.status === 'extracting'
+                    ? '正在解压安装...'
+                    : ffmpegInstaller.progress.value.status === 'ready'
+                      ? '安装完成！'
+                      : ''
+              }}
+              <template v-if="ffmpegInstaller.progress.value.status === 'downloading' && ffmpegInstaller.progress.value.estimatedSeconds > 0">
+                · 预计剩余: {{ ffmpegInstaller.formatEta(ffmpegInstaller.progress.value.estimatedSeconds) }}
+              </template>
+            </div>
+          </div>
+
+          <!-- 错误信息 -->
+          <n-alert
+            v-if="ffmpegInstaller.error.value"
+            type="error"
+            :title="ffmpegInstaller.error.value"
+            style="width: 100%"
+          />
+        </template>
+
+        <!-- 已安装时显示 DLL 列表 -->
+        <div
+          v-if="ffmpegInstaller.isInstalled.value && ffmpegInstaller.dllsFound.value.length > 0"
+          class="time-text"
+        >
+          已加载: {{ ffmpegInstaller.dllsFound.value.join(', ') }}
+        </div>
+      </div>
+    </n-card>
+
+    <!-- WASAPI 不可用提示 -->
+    <n-alert
+      v-if="!wasapiAvailable"
+      type="info"
+      title="WASAPI 不可用"
+      style="margin-bottom: 12px"
+    >
+      WASAPI 音频输出功能当前不可用。原因：{{ wasapiUnavailableReason }}
+    </n-alert>
+
+    <!-- 输出模式选择 -->
+    <n-card
+      class="setting-item"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row" style="flex-direction: column; align-items: flex-start; gap: 12px">
+        <div class="setting-label">
+          <div class="main-label">音频输出模式</div>
+          <div class="sub-label">
+            选择音频输出引擎。
+            <strong>WebAudio</strong> 兼容性最好；
+            <strong>WASAPI 独占</strong> 可绕过系统混音器实现最低延迟和 bit-perfect 输出，适合 USB DAC
+          </div>
+        </div>
+        <n-select
+          v-model:value="selectedOutputMode"
+          :options="outputModeOptions"
+          :loading="modeSwitching"
+          style="width: 260px"
+        />
+        <div class="time-text">
+          当前引擎：{{ engineDescription }}
+        </div>
+      </div>
+    </n-card>
+
+    <!-- 设备选择 (WASAPI 模式下显示) -->
+    <n-card
+      v-if="settingsStore.playback.audioOutputMode !== 'webaudio'"
+      class="setting-item"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row" style="flex-direction: column; align-items: flex-start; gap: 12px">
+        <div class="setting-label">
+          <div class="main-label">输出设备</div>
+          <div class="sub-label">
+            选择 WASAPI 输出目标设备。支持 USB DAC、HDMI 音频、内置声卡等。
+            独占模式下该设备将被独占，其他应用无法使用。
+          </div>
+        </div>
+        <n-space align="center" style="width: 100%">
+          <n-select
+            v-model:value="selectedDeviceName"
+            :loading="devicesLoading"
+            :options="audioDevices.map(d => ({
+              label: `${d.name}${d.isDefault ? ' (默认)' : ''}`,
+              value: d.id
+            }))"
+            style="flex: 1; max-width: 400px"
+            placeholder="选择音频输出设备..."
+            @update:value="(val: string) => selectDevice(val)"
+          />
+          <n-button
+            size="small"
+            :loading="devicesLoading"
+            @click="refreshDevices"
+          >
+            刷新
+          </n-button>
+        </n-space>
+        <div class="time-text">
+          {{ audioDevices.length > 0
+            ? `已发现 ${audioDevices.length} 个音频设备`
+            : '正在搜索设备...' }}
+        </div>
+      </div>
+    </n-card>
+
     <div class="section-group-title">播放行为</div>
 
     <n-card
@@ -207,6 +484,26 @@ const props = defineProps<{
           <div class="sub-label">播放页底栏在无操作时自动隐藏，移动鼠标后重新显示</div>
         </div>
         <n-switch v-model:value="settingsStore.playback.autoHidePlayerPageFooter" />
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
+      :class="{ 'setting-item--highlight': props.highlightKey === 'playback.visualizerEnabled' }"
+      data-setting-key="playback.visualizerEnabled"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">音频可视化</div>
+          <div class="sub-label">在播放页底栏显示实时频谱柱状图动画</div>
+        </div>
+        <n-switch v-model:value="settingsStore.playback.visualizerEnabled" />
       </div>
     </n-card>
 
@@ -261,31 +558,6 @@ const props = defineProps<{
           <span class="time-text">{{
             settingsStore.playback.eqEnabled ? '已启用' : '已关闭'
           }}</span>
-        </div>
-        <div
-          style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 4px"
-        >
-          <span class="time-text" style="min-width: 40px">预设</span>
-          <div style="display: flex; flex-wrap: wrap; gap: 6px">
-            <n-button
-              v-for="preset in eqPresets"
-              :key="preset.id"
-              size="tiny"
-              quaternary
-              :type="settingsStore.playback.eqPreset === preset.id ? 'primary' : 'default'"
-              @click="applyEqPreset(preset.id)"
-            >
-              {{ preset.name }}
-            </n-button>
-            <n-button
-              size="tiny"
-              quaternary
-              :type="settingsStore.playback.eqPreset === 'custom' ? 'primary' : 'default'"
-              disabled
-            >
-              自定义
-            </n-button>
-          </div>
         </div>
         <div
           v-if="settingsStore.playback.eqEnabled"
@@ -382,5 +654,5 @@ const props = defineProps<{
 </template>
 
 <style lang="scss" scoped>
-@import '../../../styles/settings-modal.scss';
+/* settings-modal.scss 已由 SettingsModal.vue 全局导入，此处无需重复导入 */
 </style>

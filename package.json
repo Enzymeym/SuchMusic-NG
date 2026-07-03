@@ -1,10 +1,10 @@
 {
   "name": "such-pc-ng",
-  "version": "0.2.1",
-  "description": "An Electron application with Vue and TypeScript",
+  "version": "1.0.0-beta.1",
+  "description": "一款简洁，美观的音乐播放器",
   "main": "./out/main/index.js",
-  "author": "example.com",
-  "homepage": "https://electron-vite.org",
+  "author": "Enzymeym",
+  "homepage": "https://such.enzymeym.top",
   "scripts": {
     "format": "prettier --write .",
     "lint": "eslint --cache .",
@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@applemusic-like-lyrics/amll-lyric": "link:packages/amll-lyric/pkg",
+    "@applemusic-like-lyrics/core": "^0.5.1",
     "@applemusic-like-lyrics/lyric": "^0.3.0",
     "@applemusic-like-lyrics/vue": "^0.2.0",
     "@electron-toolkit/preload": "^3.0.2",
@@ -35,7 +36,6 @@
     "@pixi/filter-bulge-pinch": "^5.1.1",
     "@pixi/filter-color-matrix": "^7.4.3",
     "@pixi/sprite": "^7.4.3",
-    "@supabase/supabase-js": "^2.98.0",
     "axios": "^1.13.5",
     "electron-icon-builder": "^2.0.1",
     "electron-updater": "^6.3.9",

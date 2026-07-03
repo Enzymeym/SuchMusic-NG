@@ -25,7 +25,8 @@ export function registerSystemHandlers(): void {
 
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { exec } = require('child_process')
-      const cmd = `powershell -command "Add-Type -AssemblyName System.Drawing; (New-Object System.Drawing.Text.InstalledFontCollection).Families.Name"`
+      // 强制 PowerShell 输出为 UTF-8 编码，避免中文字体名乱码
+      const cmd = `powershell -command "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Add-Type -AssemblyName System.Drawing; (New-Object System.Drawing.Text.InstalledFontCollection).Families.Name"`
       
       return new Promise((resolve) => {
         exec(cmd, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
@@ -72,6 +73,51 @@ export function registerSystemHandlers(): void {
       return result.filePaths[0]
     }
     return ''
+  })
+
+  /**
+   * 选择图片文件
+   * 打开系统文件对话框，支持 png/jpg/jpeg/webp/bmp/gif 格式
+   * @returns 选中的文件路径，取消时返回空字符串
+   */
+  ipcMain.handle('system:choose-image', async () => {
+    const result = await dialog.showOpenDialog({
+      title: '选择封面图片',
+      filters: [
+        { name: '图片文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif'] }
+      ],
+      properties: ['openFile']
+    })
+    if (!result.canceled && result.filePaths.length > 0) {
+      return result.filePaths[0]
+    }
+    return ''
+  })
+
+  /**
+   * 读取文件并返回 base64 Data URL
+   * @param filePath 文件的绝对路径
+   * @returns base64 编码的 Data URL 字符串
+   */
+  ipcMain.handle('system:read-file-base64', async (_event, filePath: string) => {
+    try {
+      const buffer = await fs.readFile(filePath)
+      const ext = path.extname(filePath).toLowerCase().replace('.', '') || 'png'
+      const mimeMap: Record<string, string> = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        webp: 'image/webp',
+        bmp: 'image/bmp',
+        gif: 'image/gif'
+      }
+      const mime = mimeMap[ext] || 'image/png'
+      const base64 = buffer.toString('base64')
+      return `data:${mime};base64,${base64}`
+    } catch (error) {
+      console.error('读取文件为 base64 失败:', error)
+      return ''
+    }
   })
 
   // 下载音乐文件

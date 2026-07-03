@@ -3,7 +3,7 @@
  * 用于 Electron 主进程中调用 Rust NAPI 模块
  */
 
-import { app, ipcMain } from 'electron';
+import { ipcMain } from 'electron';
 import { join } from 'path';
 
 
@@ -83,16 +83,13 @@ function loadNativeModule(): any {
 
   // 尝试多个路径（使用 .node 后缀，Node.js 才能正确加载）
   const possiblePaths = [
-    // 路径 1: 基于 process.cwd()
-    join(process.cwd(), 'resources', 'native', 'audio_napi.node'),
-    // 路径 2: 基于 __dirname
+    // 路径 1: 生产环境 - electron-builder extraResources 将 native/ 拷贝到 resources/native/
+    join(process.resourcesPath!, 'native', 'audio_napi.node'),
+    // 路径 2: 开发环境 - 基于 __dirname
     join(__dirname, '..', '..', '..', 'resources', 'native', 'audio_napi.node'),
-    // 路径 3: 基于 app.getAppPath()
-    join(app.getAppPath(), '..', 'resources', 'native', 'audio_napi.node'),
-    join(app.getAppPath(), 'resources', 'native', 'audio_napi.node'),
-    // 路径 4: 硬编码的绝对路径
-    'D:\\Projects\\such-pc-ng\\resources\\native\\audio_napi.node',
-    // 路径 5: Rust 构建目录
+    // 路径 3: 开发环境 - 基于 process.cwd()
+    join(process.cwd(), 'resources', 'native', 'audio_napi.node'),
+    // 路径 4: 开发环境 - Rust 构建目录
     join(process.cwd(), 'native', 'rust-audio-engine', 'target', 'release', 'audio_napi.node'),
     join(process.cwd(), 'native', 'rust-audio-engine', 'target', 'debug', 'audio_napi.node'),
   ];
@@ -219,22 +216,6 @@ function convertEqSettings(settings: Partial<EqBandSettingsJs>) {
  * 注册音频引擎 IPC 处理器
  */
 export function registerAudioEngineHandlers(): void {
-  // 启动时预检测文件
-  const fs = require('fs');
-  const testPath = 'D:\\Projects\\such-pc-ng\\resources\\native\\audio_napi.dll';
-  console.log('[AudioEngine] Checking file at startup:', testPath);
-  console.log('[AudioEngine] File exists:', fs.existsSync(testPath));
-  console.log('[AudioEngine] __dirname:', __dirname);
-  console.log('[AudioEngine] process.cwd():', process.cwd());
-  
-  // 尝试预加载模块
-  try {
-    const native = loadNativeModule();
-    console.log('[AudioEngine] Pre-load successful, exports:', Object.keys(native));
-  } catch (e: any) {
-    console.error('[AudioEngine] Pre-load failed:', e.message);
-  }
-  
   // 创建引擎
   ipcMain.handle('audio-engine:create', async (_event, config?: AudioEngineConfig) => {
     try {
@@ -594,11 +575,14 @@ export function registerAudioEngineHandlers(): void {
 
   /**
    * 设置等响度启用状态
+   * Rust 引擎未单独实现 setLoudnessEnabled，通过 setLoudness 传递 enabled 参数
    */
   ipcMain.handle('audio-engine:set-loudness-enabled', async (_event, engineId: string, enabled: boolean) => {
     try {
       const engine = getEngine(engineId);
-      engine.setLoudnessEnabled(enabled);
+      // 获取当前参数，更新 enabled 字段后写回
+      const currentParams = engine.getLoudness();
+      engine.setLoudness({ ...currentParams, enabled });
       return { success: true };
     } catch (error) {
       console.error('[AudioEngine] 设置等响度启用状态失败:', error);
@@ -608,12 +592,13 @@ export function registerAudioEngineHandlers(): void {
 
   /**
    * 获取等响度是否启用
+   * Rust 引擎未单独实现 isLoudnessEnabled，通过 getLoudness 获取 enabled 字段
    */
   ipcMain.handle('audio-engine:is-loudness-enabled', async (_event, engineId: string) => {
     try {
       const engine = getEngine(engineId);
-      const enabled = engine.isLoudnessEnabled();
-      return { success: true, enabled };
+      const params = engine.getLoudness();
+      return { success: true, enabled: params?.enabled ?? false };
     } catch (error) {
       console.error('[AudioEngine] 获取等响度启用状态失败:', error);
       return { success: false, error: String(error), enabled: false };

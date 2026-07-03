@@ -6,6 +6,7 @@ import {
   NText,
   NButton,
   NPopover,
+  NDropdown,
   useThemeVars,
   NDrawer,
   NDrawerContent,
@@ -21,17 +22,13 @@ import PlayerPage from './PlayerPage.vue'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useDesktopLyric } from '../../composables/useDesktopLyric'
 import { useTaskbarLyric } from '../../composables/useTaskbarLyric'
-import { runSnowdropGetMusicUrl } from '../../apis/snowdrop-transform'
 import { AudioPlayerManager } from '../../utils/audioPlayerManager'
-import { searchMusic, fetchGMALyric } from '../../apis/gma'
-import { fetchQQMusicLyric } from '../../apis/vkeys'
-import { useDownloadMusic } from '../../composables/useDownloadMusic'
 import SoundEffectsModal from '../common/SoundEffectsModal.vue'
+import { useRouter } from 'vue-router'
 
 const themeVars = useThemeVars()
 const message = useMessage()
-
-const { downloadMusic } = useDownloadMusic()
+const router = useRouter()
 
 // 简单混合两个十六进制颜色，用于活跃列表项背景过渡
 const mixHexColor = (color1: string, color2: string, weight: number): string => {
@@ -56,16 +53,6 @@ const mixHexColor = (color1: string, color2: string, weight: number): string => 
   const bVal = clamp(a.b * t + b.b * (1 - t))
   const toHex = (n: number) => Math.round(n).toString(16).padStart(2, '0')
   return `#${toHex(r)}${toHex(g)}${toHex(bVal)}`
-}
-
-/**
- * 判断歌词是否为 YRC 逐字格式
- * YRC 格式特征：每行包含形如 (词,开始时间,持续时长) 的词级时间戳
- * @param lyrics 歌词字符串
- * @returns 是否为 YRC 逐字格式
- */
-const isYrcFormat = (lyrics: string): boolean => {
-  return lyrics.includes('(') && /\d+,\d+,\d+/.test(lyrics)
 }
 
 // 获取全局播放器 store
@@ -100,65 +87,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   webAudioEngine.removeOnEndedCallback()
 })
-
-// 歌词重试获取函数（辅助：实际发起请求）
-const doFetchBarLyric = async (id: string, source: string): Promise<{ lyrics: string; translatedLyrics: string }> => {
-  // 标准化 source：将外部格式 qq→tx 统一为内部格式
-  const normalizedSource = source === 'qq' ? 'tx' : source
-
-  // QQ音乐音源：优先使用 VKeys API 获取完整歌词（含YRC逐字歌词和翻译）
-  if (normalizedSource === 'tx') {
-    console.log(`[PlayerBar] 检测到 QQ 音乐音源(source=${source})，使用 VKeys API 获取歌词...`)
-    try {
-      const result = await fetchQQMusicLyric(String(id))
-      if (result.yrc || result.lrc) {
-        const mainLyric = result.yrc || result.lrc
-        const lyricType = result.yrc ? 'YRC(逐字)' : 'LRC(标准)'
-        const transStatus = result.trans ? '✓' : '✗'
-        console.log(`[PlayerBar] VKeys 歌词获取成功 | 主歌词: ${lyricType} (${mainLyric.length} 字符) | 翻译: ${transStatus}`)
-        return { lyrics: mainLyric, translatedLyrics: result.trans }
-      }
-      console.warn(`[PlayerBar] VKeys 返回空歌词，回退到 GMA API`)
-    } catch (e) {
-      console.warn('[PlayerBar] VKeys API 获取歌词失败，回退到 GMA API:', e)
-    }
-  }
-
-  // 其他音源或 VKeys 失败：使用 GMA API
-  console.log(`[PlayerBar] 使用 GMA API 获取歌词 (source=${source})...`)
-  const lyricText = await fetchGMALyric(String(id), normalizedSource)
-  return { lyrics: lyricText, translatedLyrics: '' }
-}
-
-// 歌词重试获取函数
-const fetchLyricWithRetry = async (id: string, source: string): Promise<string> => {
-  let attempt = 0
-  while (true) {
-    // 检查当前播放歌曲是否改变，如果改变则停止重试
-    const currentId = player.currentSong?.sourceSongId ?? player.currentSong?.id
-    if (String(currentId) !== String(id)) {
-      return ''
-    }
-
-    try {
-      const { lyrics, translatedLyrics } = await doFetchBarLyric(String(id), source)
-      if (lyrics) {
-        // 同时存储翻译歌词
-        if (translatedLyrics) {
-          player.setTranslatedLyrics(translatedLyrics)
-        }
-        return lyrics
-      }
-    } catch (e) {
-      console.warn(`[PlayerBar] 获取歌词失败，第 ${attempt + 1} 次重试:`, e)
-    }
-
-    attempt++
-    // 指数退避策略，最大延迟 5 秒
-    const delay = Math.min(500 + attempt * 500, 5000)
-    await new Promise((resolve) => setTimeout(resolve, delay))
-  }
-}
 
 // 播放锁，防止并发播放
 let isLoadingSong = false
@@ -233,9 +161,9 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
             filePath: (song as any).filePath,
             volume: player.volume
           })
-          // 恢复进度
+          // 恢复进度（仅定位不播放）
           if (player.positionMs > 0) {
-            webAudioEngine.seek(player.positionMs)
+            webAudioEngine.seek(player.positionMs, false)
           }
         }
 
@@ -252,450 +180,16 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
       }
     } else {
       console.warn(
-        '[PlayerBar] Local file not found, falling back to online:',
+        '[PlayerBar] Local file not found:',
         (song as any).filePath
       )
-      // 关键修正：文件不存在时，清除 filePath，以便后续逻辑能进入在线/搜索流程
-      ;(song as any).filePath = undefined
+      message.error('本地文件不存在，无法播放')
+      return
     }
   }
 
-  if (!(song as any).filePath) {
-    try {
-      const songId = song.sourceSongId ?? song.id
-      const musicInfo = {
-        id: String(songId),
-        name: song.title,
-        singer: song.artist || '未知歌手',
-        albumName: song.album || '未知专辑',
-        pic: song.cover || '',
-        songmid: String(songId),
-        mediaId: String(songId)
-      }
-
-      // 确定源平台和音质：
-      // 优先级：歌曲自带 source → 音源独立设置 → 全局设置
-      let source = 'wy' // 默认为网易云 (wy)
-      let quality = settingsStore.source.preferredQuality || '128k'
-      if (song.source) {
-        // 映射歌曲 source 到插件支持的标识（netease → wy, qq → tx 等）
-        switch (song.source) {
-          case 'netease':
-            source = 'wy'
-            break
-          case 'qq':
-            source = 'tx'
-            break
-          case 'kugou':
-            source = 'kg'
-            break
-          case 'kuwo':
-            source = 'kw'
-            break
-          case 'migu':
-            source = 'mg'
-            break
-          default:
-            source = song.source
-            break
-        }
-
-        const originalSource = source // 保存原始音源，用于查询独立设置
-
-        // 应用该音源的独立平台设置（如 kw 独立设为 tx 平台）
-        const effectivePlatform = settingsStore.getEffectivePlatform(originalSource)
-        if (effectivePlatform && effectivePlatform !== 'all') {
-          source = effectivePlatform
-        }
-
-        // 应用该音源的独立音质设置（基于原始音源查询）
-        quality = settingsStore.getEffectiveQuality(originalSource) || quality
-      } else if (
-        settingsStore.source.preferredPlatform &&
-        settingsStore.source.preferredPlatform !== 'all'
-      ) {
-        // 歌曲无 source 信息时，回退到全局设置
-        const pref = settingsStore.source.preferredPlatform
-        if (pref === 'netease') source = 'wy'
-        else if (pref === 'qq') source = 'tx'
-        else if (pref === 'kugou') source = 'kg'
-        else if (pref === 'kuwo') source = 'kw'
-        else if (pref === 'migu') source = 'mg'
-        else source = pref
-      }
-      const cacheKey = `${source}:${songId}:${quality}`
-
-      // 尝试在获取在线 URL 之前，先检查本地缓存
-      let cacheFilePath: string | null = null
-      if (window.electron && window.electron.ipcRenderer) {
-        try {
-          const cachePath = await window.electron.ipcRenderer.invoke('online-cache:check', {
-            dir: settingsStore.local.cacheDir || null,
-            key: cacheKey
-          })
-
-          if (player.currentSong?.id !== currentProcessId) return
-
-          if (cachePath) {
-            console.log('[PlayerBar] 主动检测到缓存文件存在，跳过在线获取', cachePath)
-            cacheFilePath = cachePath
-          }
-        } catch (e) {
-          console.warn('[PlayerBar] 主动检测缓存失败:', e)
-        }
-      }
-
-      // 如果检测到缓存，直接播放缓存，跳过 fetchGMALyric 和 runSnowdropGetMusicUrl
-      // 但为了保证歌词显示，如果本地没有歌词，还是需要尝试获取歌词
-      if (cacheFilePath) {
-        // 判断是否需要获取歌词：没有歌词，或者QQ音乐只有LRC没有YRC逐字
-        const normalizedSourceForCache = source === 'qq' ? 'tx' : source
-        const needsYrcForCache = normalizedSourceForCache === 'tx' && song.lyrics && !isYrcFormat(song.lyrics)
-        if (!song.lyrics || needsYrcForCache) {
-          if (needsYrcForCache) {
-            console.log('[PlayerBar][Cache] 检测到 QQ 音乐 LRC 歌词，尝试获取 YRC 逐字歌词...')
-          }
-          fetchLyricWithRetry(String(songId), source)
-            .then((lyric) => {
-              if (lyric && player.currentSong?.id === song.id) {
-                player.setLyrics(lyric)
-              }
-            })
-            .catch((e) => console.error('Failed to fetch lyric in PlayerBar:', e))
-        }
-
-        try {
-          if (shouldPlay) {
-            await AudioPlayerManager.play({
-              filePath: cacheFilePath,
-              volume: player.volume
-            })
-          } else {
-            await AudioPlayerManager.load({
-              filePath: cacheFilePath,
-              volume: player.volume
-            })
-            // 恢复进度
-            if (player.positionMs > 0) {
-              webAudioEngine.seek(player.positionMs)
-            }
-          }
-
-          if (player.currentSong?.id !== currentProcessId) {
-            webAudioEngine.stop()
-            return
-          }
-
-          // 更新当前歌曲的 filePath，以便后续使用
-          const updatedSong: PlayerSong = {
-            ...song,
-            filePath: cacheFilePath,
-            source: song.source,
-            sourceSongId: song.sourceSongId
-          }
-          player.setCurrentSong(updatedSong)
-          if (shouldPlay) {
-            player.setPlaying(true)
-          }
-          return // 成功播放缓存，直接返回，不再执行后续在线获取逻辑
-        } catch (e) {
-          console.error('[PlayerBar] 播放缓存文件失败，回退到在线流程:', e)
-          // 播放失败，继续走下面的在线获取流程
-          cacheFilePath = null
-        }
-      }
-
-      // 判断是否需要获取歌词：没有歌词，或者QQ音乐只有LRC没有YRC逐字
-      const normalizedSourceForOnline = source === 'qq' ? 'tx' : source
-      const needsYrcForOnline = normalizedSourceForOnline === 'tx' && song.lyrics && !isYrcFormat(song.lyrics)
-      if (!song.lyrics || needsYrcForOnline) {
-        if (needsYrcForOnline) {
-          console.log('[PlayerBar] 检测到 QQ 音乐 LRC 歌词，尝试获取 YRC 逐字歌词...')
-        }
-        // 使用重试机制获取歌词
-        fetchLyricWithRetry(String(songId), source)
-          .then((lyric) => {
-            console.log('[PlayerBar] Fetched lyric with retry:', lyric ? 'Success' : 'Empty')
-            if (lyric && player.currentSong?.id === song.id) {
-              player.setLyrics(lyric)
-            }
-          })
-          .catch((e) => console.error('Failed to fetch lyric in PlayerBar:', e))
-      }
-
-      const { url } = await runSnowdropGetMusicUrl(source, musicInfo, quality)
-      if (player.currentSong?.id !== currentProcessId) return
-
-      if (!url) {
-        throw new Error('未获取到播放链接')
-      }
-
-      // const cacheKey = ... (上面已定义)
-      let finalUrl = url
-      // let cacheFilePath = null (上面已定义)
-
-      if (window.electron && window.electron.ipcRenderer) {
-        try {
-          const cacheResult = (await window.electron.ipcRenderer.invoke('online-cache:prepare', {
-            dir: settingsStore.local.cacheDir || null,
-            key: cacheKey,
-            url
-          })) as { usedCache: boolean; filePath: string | null; url: string }
-
-          if (player.currentSong?.id !== currentProcessId) return
-
-          if (cacheResult.filePath) {
-            cacheFilePath = cacheResult.filePath
-            finalUrl = cacheResult.url || url
-            console.log('[PlayerBar][OnlineCache] 使用缓存文件播放', {
-              cacheKey,
-              filePath: cacheFilePath,
-              usedCache: cacheResult.usedCache,
-              url: cacheResult.url
-            })
-          }
-        } catch (e) {
-          console.error('[PlayerBar] 准备在线播放缓存失败:', e)
-        }
-      }
-
-      if (cacheFilePath && window.electron && window.electron.ipcRenderer) {
-        try {
-          if (shouldPlay) {
-            await AudioPlayerManager.play({
-              filePath: cacheFilePath,
-              volume: player.volume
-            })
-          } else {
-            await AudioPlayerManager.load({
-              filePath: cacheFilePath,
-              volume: player.volume
-            })
-            // 恢复进度
-            if (player.positionMs > 0) {
-              webAudioEngine.seek(player.positionMs)
-            }
-          }
-        } catch (e) {
-          console.error('[PlayerBar] 从缓存文件播放失败，回退到在线播放:', e)
-          if (player.currentSong?.id !== currentProcessId) {
-            webAudioEngine.stop()
-            return
-          }
-          if (shouldPlay) {
-            await AudioPlayerManager.play({
-              url: finalUrl,
-              volume: player.volume
-            })
-          } else {
-            await AudioPlayerManager.load({
-              url: finalUrl,
-              volume: player.volume
-            })
-            // 恢复进度
-            if (player.positionMs > 0) {
-              webAudioEngine.seek(player.positionMs)
-            }
-          }
-        }
-      } else {
-        if (shouldPlay) {
-          await AudioPlayerManager.play({
-            url: finalUrl,
-            volume: player.volume
-          })
-        } else {
-          await AudioPlayerManager.load({
-            url: finalUrl,
-            volume: player.volume
-          })
-          // 恢复进度
-          if (player.positionMs > 0) {
-            webAudioEngine.seek(player.positionMs)
-          }
-        }
-      }
-
-      if (player.currentSong?.id !== currentProcessId) {
-        webAudioEngine.stop()
-        return
-      }
-
-      const updatedSong: PlayerSong = {
-        id: song.id,
-        title: song.title,
-        artist: song.artist,
-        album: song.album,
-        cover: song.cover,
-        durationMs: song.durationMs,
-        filePath: cacheFilePath || undefined,
-        source: song.source,
-        sourceSongId: song.sourceSongId,
-        // 保留已有的歌词，防止被覆盖为空
-        lyrics: song.lyrics || player.currentSong?.lyrics,
-        translatedLyrics: song.translatedLyrics || player.currentSong?.translatedLyrics
-      }
-      player.setCurrentSong(updatedSong)
-      if (shouldPlay) {
-        player.setPlaying(true)
-      }
-    } catch (e) {
-      console.error('[PlayerBar] 获取并播放在线歌曲失败:', e)
-    }
-  }
-
-  if (!(song as any).filePath && !song.source && !song.sourceSongId) {
-    try {
-      const platform = settingsStore.source.preferredPlatform
-      // 仅当首选平台为网易云或所有平台时，才使用网易云搜索回退
-      if (platform !== 'wy' && platform !== 'netease' && platform !== 'all') {
-        return
-      }
-
-      const name = song.title || ''
-      const artist = (song as any).artist || ''
-      const keyword = name
-
-      // 使用 GMA API 进行搜索
-      const result = await searchMusic(keyword, 1, 10)
-
-      if (player.currentSong?.id !== currentProcessId) return
-
-      const allSongs = result.songs || []
-
-      if (allSongs.length === 0) {
-        return
-      }
-
-      // 尝试精确匹配
-      const norm = (s: string) => s.toLowerCase().trim()
-      const target =
-        allSongs.find((s: any) => {
-          const sName = norm(s.name || '')
-          const sArtist = norm(s.artist || '')
-          const tName = norm(name)
-          const tArtist = norm(artist)
-          return sName === tName && (!tArtist || sArtist === tArtist)
-        }) || allSongs[0]
-
-      if (!target) {
-        return
-      }
-
-      const musicInfo = {
-        id: String(target.id),
-        name: target.name,
-        singer: target.artist || '未知歌手',
-        albumName: target.album || '未知专辑',
-        pic: target.cover || '',
-        songmid: String(target.id),
-        mediaId: String(target.id)
-      }
-
-      // 使用搜索结果的source
-      const source = target.source
-      const quality = settingsStore.source.preferredQuality || '128k'
-
-      const { url } = await runSnowdropGetMusicUrl(source, musicInfo, quality)
-      if (player.currentSong?.id !== currentProcessId) return
-      if (!url) {
-        throw new Error('未获取到播放链接')
-      }
-
-      const cacheKey = `wy:${neteaseId}:${quality}`
-      let finalUrl = url
-      let cacheFilePath: string | null = null
-
-      if (window.electron && window.electron.ipcRenderer) {
-        try {
-          const cacheResult = (await window.electron.ipcRenderer.invoke('online-cache:prepare', {
-            dir: settingsStore.local.cacheDir || null,
-            key: cacheKey,
-            url
-          })) as { usedCache: boolean; filePath: string | null; url: string }
-
-          if (player.currentSong?.id !== currentProcessId) return
-
-          if (cacheResult.filePath) {
-            cacheFilePath = cacheResult.filePath
-            finalUrl = cacheResult.url || url
-            console.log('[PlayerBar][SearchFallback][OnlineCache] 使用缓存文件播放', {
-              cacheKey,
-              filePath: cacheFilePath,
-              usedCache: cacheResult.usedCache,
-              url: cacheResult.url
-            })
-          }
-        } catch (e) {
-          console.error('[PlayerBar][SearchFallback] 准备在线播放缓存失败:', e)
-        }
-      }
-
-      if (cacheFilePath && window.electron && window.electron.ipcRenderer) {
-        try {
-          const data = (await window.electron.ipcRenderer.invoke(
-            'audio:load-file',
-            cacheFilePath
-          )) as ArrayBuffer
-
-          if (player.currentSong?.id !== currentProcessId) return
-
-          webAudioEngine.setVolume(player.volume)
-          if (shouldPlay) {
-            await webAudioEngine.playFromFileData(data)
-          } else {
-            await webAudioEngine.loadFromFileData(data)
-            if (player.positionMs > 0) webAudioEngine.seek(player.positionMs)
-          }
-        } catch (e) {
-          console.error('[PlayerBar][SearchFallback] 从缓存文件播放失败，回退到在线播放:', e)
-          if (player.currentSong?.id !== currentProcessId) {
-            webAudioEngine.stop()
-            return
-          }
-          if (shouldPlay) {
-            await webAudioEngine.playFromUrl(finalUrl)
-          } else {
-            await webAudioEngine.loadFromUrl(finalUrl)
-            if (player.positionMs > 0) webAudioEngine.seek(player.positionMs)
-          }
-        }
-      } else {
-        if (shouldPlay) {
-          await webAudioEngine.playFromUrl(finalUrl)
-        } else {
-          await webAudioEngine.loadFromUrl(finalUrl)
-          if (player.positionMs > 0) webAudioEngine.seek(player.positionMs)
-        }
-      }
-
-      if (player.currentSong?.id !== currentProcessId) {
-        webAudioEngine.stop()
-        return
-      }
-
-      const updatedSong: PlayerSong = {
-        id: song.id,
-        title: song.title || target.name,
-        artist: song.artist || target.artist || '未知歌手',
-        album: song.album || target.album || '未知专辑',
-        cover: song.cover || target.cover || '',
-        durationMs: song.durationMs || (target.duration ? target.duration * 1000 : 0),
-        filePath: cacheFilePath || undefined,
-        source: source,
-        sourceSongId: target.id,
-        // 保留已有的歌词，防止被覆盖为空
-        lyrics: song.lyrics || player.currentSong?.lyrics,
-        translatedLyrics: song.translatedLyrics || player.currentSong?.translatedLyrics
-      }
-      player.setCurrentSong(updatedSong)
-      if (shouldPlay) {
-        player.setPlaying(true)
-      }
-    } catch (e) {
-      console.error('[PlayerBar][SearchFallback] 搜索并播放歌曲失败:', e)
-    }
-  }
+  // 没有本地文件路径，无法播放
+  message.warning('没有可用的本地文件路径，无法播放')
 }
 
 // 监听 currentSong 变化，触发播放
@@ -766,6 +260,93 @@ const showPlaylist = ref(false)
 
 // 显示音量控制
 const showVolumePopover = ref(false)
+
+// 更多菜单显示状态
+const showMoreMenu = ref(false)
+
+/**
+ * 歌词偏移预设选项
+ */
+const lyricsOffsetOptions = computed(() => {
+  const offsets = [-2.0, -1.0, -0.5, 0, 0.5, 1.0, 2.0]
+  return offsets.map((offset) => ({
+    label: offset === 0 ? '0s（默认）' : (offset > 0 ? `+${offset}s` : `${offset}s`),
+    key: `lyrics-offset-${offset}`,
+    offset
+  }))
+})
+
+/**
+ * 播放速度预设选项
+ */
+const playbackRateOptions = computed(() => {
+  const rates = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+  return rates.map((rate) => ({
+    label: rate === 1.0 ? `${rate}x（正常）` : `${rate}x`,
+    key: `playback-rate-${rate}`,
+    rate
+  }))
+})
+
+/**
+ * 更多菜单选项
+ */
+const moreMenuOptions = computed(() => [
+  {
+    label: '歌词偏移',
+    key: 'lyrics-offset-header',
+    icon: () => null,
+    children: lyricsOffsetOptions.value
+  },
+  {
+    label: '播放速度',
+    key: 'playback-rate-header',
+    icon: () => null,
+    children: playbackRateOptions.value
+  },
+  {
+    type: 'divider' as const,
+    key: 'divider-1'
+  },
+  {
+    label: '搜索同名歌曲',
+    key: 'search-same-name',
+    disabled: !player.currentSong?.title
+  }
+])
+
+/**
+ * 处理更多菜单选择
+ * @param key 选项键值
+ */
+const handleMoreMenuSelect = (key: string) => {
+  showMoreMenu.value = false
+
+  // 歌词偏移选项
+  if (key.startsWith('lyrics-offset-')) {
+    const offset = parseFloat(key.replace('lyrics-offset-', ''))
+    settingsStore.playback.lyricsOffset = offset
+    return
+  }
+
+  // 播放速度选项
+  if (key.startsWith('playback-rate-')) {
+    const rate = parseFloat(key.replace('playback-rate-', ''))
+    settingsStore.playback.playbackRate = rate
+    webAudioEngine.setPlaybackRate(rate)
+    updateMediaPositionState()
+    return
+  }
+
+  // 搜索同名歌曲
+  if (key === 'search-same-name') {
+    const title = player.currentSong?.title
+    if (title) {
+      router.push({ path: '/search', query: { q: title } })
+    }
+    return
+  }
+}
 
 const togglePlaylist = () => {
   showPlaylist.value = !showPlaylist.value
@@ -1270,6 +851,19 @@ watch(
         <n-icon size="22" style="margin-left: -5px"><i class="mgc_settings_2_line"></i></n-icon>
       </n-button>
 
+      <n-dropdown
+        trigger="click"
+        :options="moreMenuOptions"
+        :show="showMoreMenu"
+        :to="drawerTarget"
+        @select="handleMoreMenuSelect"
+        @update:show="(val: boolean) => showMoreMenu = val"
+      >
+        <n-button quaternary class="action-btn">
+          <n-icon size="22" style="margin-left: -5px"><i class="mgc_more_2_line"></i></n-icon>
+        </n-button>
+      </n-dropdown>
+
       <div class="volume-control">
         <n-popover
           v-model:show="showVolumePopover"
@@ -1369,7 +963,7 @@ watch(
               <div class="item-artist">{{ song.artist }}</div>
             </div>
             <div class="item-actions">
-              <n-button text class="download-btn" @click.stop="downloadMusic(song)">
+              <n-button text class="download-btn" style="display: none">
                 <n-icon size="18"><i class="mgc_download_line"></i></n-icon>
               </n-button>
               <n-button text class="delete-btn" @click.stop="handleRemove(song)">

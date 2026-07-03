@@ -308,6 +308,12 @@ export const usePlayerStore = defineStore('player', {
       if (stateStr) {
         try {
           const state = JSON.parse(stateStr)
+
+          // 关键：必须在设置 currentSong 之前将 shouldAutoPlay 设为 false，
+          // 否则 PlayerBar 的 watch(currentSong) 触发时会误判为需要自动播放
+          this.shouldAutoPlay = false // 恢复状态时不自动播放
+          this.isPlaying = false // 确保不处于播放状态
+
           if (state.currentSong) this.currentSong = state.currentSong
           if (state.playlist) this.playlist = state.playlist
           if (state.playMode) this.playMode = state.playMode
@@ -317,9 +323,6 @@ export const usePlayerStore = defineStore('player', {
           if (typeof state.transitionEnabled === 'boolean') this.transitionEnabled = state.transitionEnabled
           if (typeof state.transitionDuration === 'number') this.transitionDuration = state.transitionDuration
           if (state.transitionType) this.transitionType = state.transitionType
-
-          this.shouldAutoPlay = false // 恢复状态时不自动播放
-          this.isPlaying = false // 确保不处于播放状态
         } catch (e) {
           console.error('Failed to parse player state', e)
         }
@@ -353,7 +356,7 @@ export const usePlayerStore = defineStore('player', {
         // 保留文件路径，便于“最近播放”等页面按需重新提取本地封面
         filePath: song.filePath,
         timestamp: Date.now(),
-        source: song.source || (song.filePath ? 'local' : 'netease') // 记录来源
+        source: song.source || (song.filePath ? 'local' : 'local') // 记录来源
       }
 
       this.playHistory.unshift(record)
@@ -386,9 +389,17 @@ export const usePlayerStore = defineStore('player', {
     /**
      * 设置当前播放歌曲
      * 自动保留已有的 lyrics 和 translatedLyrics，防止被覆盖为空
+     * 仅当歌曲 ID 变化时才重置 positionMs，同歌曲更新时保留现有进度
      * @param song 要设置的歌曲对象
      */
     setCurrentSong(song: PlayerSong | null): void {
+      if (!song) {
+        this.currentSong = null
+        return
+      }
+
+      const isSameSong = !!(this.currentSong && song.id === this.currentSong.id)
+
       if (song) {
         // 如果新对象没有 lyrics 且当前歌曲是同 id 且有 lyrics，则保留
         if (!song.lyrics && this.currentSong?.lyrics && this.currentSong.id === song.id) {
@@ -400,18 +411,19 @@ export const usePlayerStore = defineStore('player', {
         }
       }
       this.currentSong = song
-      this.positionMs = 0
+      // 仅当歌曲不同时才重置进度，同歌曲更新时保留现有进度
+      if (!isSameSong) {
+        this.positionMs = 0
+      }
 
       // 更新 currentIndex
-      if (song) {
-        const index = this.playlist.findIndex((s) => s.id === song.id)
-        if (index !== -1) {
-          this.currentIndex = index
-        } else {
-          this.playlistSessionStart = this.playlist.length
-          this.playlist.push(song)
-          this.currentIndex = this.playlist.length - 1
-        }
+      const index = this.playlist.findIndex((s) => s.id === song.id)
+      if (index !== -1) {
+        this.currentIndex = index
+      } else {
+        this.playlistSessionStart = this.playlist.length
+        this.playlist.push(song)
+        this.currentIndex = this.playlist.length - 1
       }
     },
     // 更新播放状态
@@ -427,21 +439,24 @@ export const usePlayerStore = defineStore('player', {
     setPosition(positionMs: number): void {
       this.positionMs = Math.max(positionMs, 0)
     },
-    // 更新当前歌曲总时长（毫秒）
+    /**
+     * 更新当前歌曲总时长（毫秒）
+     * 直接修改 currentSong 对象的 durationMs 属性，避免创建新对象引用触发 watcher
+     * @param durationMs 音轨总时长（毫秒）
+     */
     setDuration(durationMs: number): void {
       if (!this.currentSong) return
-      this.currentSong = {
-        ...this.currentSong,
-        durationMs
-      }
+      // 直接修改属性而非创建新对象，避免触发 currentSong 的 watcher 导致重复加载
+      this.currentSong.durationMs = durationMs
     },
-    // 更新当前歌曲歌词
+    /**
+     * 更新当前歌曲歌词
+     * 直接修改属性而非创建新对象，避免触发 currentSong 的 watcher 导致重复加载
+     * @param lyrics 歌词字符串
+     */
     setLyrics(lyrics: string): void {
       if (!this.currentSong) return
-      this.currentSong = {
-        ...this.currentSong,
-        lyrics
-      }
+      this.currentSong.lyrics = lyrics
 
       // 同时更新播放列表中对应歌曲的歌词
       const index = this.playlist.findIndex((s) => s.id === this.currentSong?.id)
@@ -454,14 +469,12 @@ export const usePlayerStore = defineStore('player', {
     },
     /**
      * 更新当前歌曲的翻译歌词
+     * 直接修改属性而非创建新对象，避免触发 currentSong 的 watcher 导致重复加载
      * @param lyrics 翻译歌词原始文本
      */
     setTranslatedLyrics(lyrics: string): void {
       if (!this.currentSong) return
-      this.currentSong = {
-        ...this.currentSong,
-        translatedLyrics: lyrics
-      }
+      this.currentSong.translatedLyrics = lyrics
 
       const index = this.playlist.findIndex((s) => s.id === this.currentSong?.id)
       if (index !== -1) {

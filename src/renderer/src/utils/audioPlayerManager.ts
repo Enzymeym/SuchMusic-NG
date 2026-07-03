@@ -142,7 +142,8 @@ export class AudioPlayerManager {
           if (autoPlay) {
             await rustAudioAdapter.playFromFileData(data)
           } else {
-            await rustAudioAdapter.loadFromFileData(data)
+            // 仅加载但不播放，避免在恢复状态等场景下自动开始播放
+            await rustAudioAdapter.loadFromFileData(data, false)
           }
           return
         } else {
@@ -162,7 +163,8 @@ export class AudioPlayerManager {
         if (autoPlay) {
           await rustAudioAdapter.playFromUrl(url)
         } else {
-          await rustAudioAdapter.loadFromUrl(url)
+          // 仅加载但不播放，避免在恢复状态等场景下自动开始播放
+          await rustAudioAdapter.loadFromUrl(url, false)
         }
       } catch (e) {
         console.error('[AudioPlayerManager] Failed to handle URL:', e)

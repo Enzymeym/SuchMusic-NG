@@ -19,7 +19,7 @@ export function useDownloadMusic() {
         case 'kuwo': source = 'kw'; break;
         case 'migu': source = 'mg'; break;
       }
-      
+
       const songId = song.sourceSongId ?? song.id
       if (!songId) {
         message.error('无法获取歌曲 ID，下载失败')
@@ -36,7 +36,7 @@ export function useDownloadMusic() {
         mediaId: String(songId)
       }
 
-      const quality = settingsStore.source.preferredQuality || '128k'
+      const quality = settingsStore.playback.preloadQualityLevel || '128k'
 
       const loadingMsg = message.loading('正在获取下载链接...', { duration: 0 })
 

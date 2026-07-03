@@ -1,41 +1,38 @@
 <script setup lang="ts">
-import { ref, watch, nextTick } from 'vue'
+import { ref, watch, nextTick, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { usePlayerStore } from '../../stores/playerStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { webAudioEngine } from '../../audio/audio-engine'
+import SoundEffectsModal from '../common/SoundEffectsModal.vue'
 import defaultCover from '@renderer/assets/icon.png'
 import {
   NIcon,
   NSlider,
   NButton,
-  NDrawer,
-  NDrawerContent,
-  NScrollbar,
-  NSpin,
-  NEmpty,
   NDropdown,
   NPopover
 } from 'naive-ui'
 import LyricPlayer from '../common/PlayerLyrics/LyricPlayer.vue'
 import BackgroundRender from '../common/AMLL/BackgroundRender.vue'
+import AudioVisualizer from '../common/AudioVisualizer.vue'
+import AudioVisualizerControls from '../common/AudioVisualizerControls.vue'
 
 // 导入拆分后的模块
 import { usePlayerControls } from './PlayerPage/usePlayerControls'
 import { usePlayerProgress } from './PlayerPage/usePlayerProgress'
 import { usePlayerVolume } from './PlayerPage/usePlayerVolume'
 import { usePlayerTheme } from './PlayerPage/usePlayerTheme'
-import { usePlayerComments } from './PlayerPage/usePlayerComments'
 import { usePlayerLyrics } from './PlayerPage/usePlayerLyrics'
 
 // 初始化各模块
 const player = usePlayerStore()
 const settingsStore = useSettingsStore()
+const router = useRouter()
 
 const {
   isControlsVisible,
   isFullscreen,
-  playerPageRef,
-  showControls,
-  handleActivity,
   toggleFullscreen,
   togglePlay,
   handlePrev,
@@ -53,7 +50,6 @@ const {
 } = usePlayerControls()
 
 const {
-  isDraggingProgress,
   progressPercent,
   displayTime,
   formatTime,
@@ -66,7 +62,6 @@ const {
   showVolumePopover,
   volumePercent,
   volumeIcon,
-  toggleMute,
   toggleVolumePopover
 } = usePlayerVolume()
 
@@ -76,29 +71,14 @@ const {
 } = usePlayerTheme()
 
 const {
-  isNeteaseSong,
-  showCommentsDrawer,
-  comments,
-  commentsTotal,
-  commentsHasMore,
-  commentsLoading,
-  commentsError,
-  formatCommentTime,
-  handleLoadMoreComments,
-  openComments
-} = usePlayerComments()
-
-const {
   currentTime,
   lyricsData,
   translatedLyricsData,
   lyricsMode,
   lyricsBaseFontSize,
-  lyricsAreaRatio,
   leftPanelFlex,
   rightPanelFlex,
-  lyricsMainFontSize,
-  lyricsSubFontSize,
+  lyricsFontFamily,
   activePageIndex,
   handleMainScroll,
   scrollToPage
@@ -108,6 +88,107 @@ const {
 const emit = defineEmits<{
   (e: 'open-playlist'): void
 }>()
+
+/**
+ * 歌词模式状态：隐藏封面，歌曲信息移到歌词顶部居中，歌词居中显示
+ */
+const isLyricsMode = ref(false)
+
+/**
+ * 切换歌词模式
+ */
+const toggleLyricsMode = () => {
+  isLyricsMode.value = !isLyricsMode.value
+}
+
+// 更多菜单显示状态（移动端和桌面端独立）
+const showMobileMoreMenu = ref(false)
+const showDesktopMoreMenu = ref(false)
+
+// 音效调节弹窗
+const showSoundEffectsModal = ref(false)
+
+/** 可视化控制弹窗 */
+const showVisualizerControls = ref(false)
+
+/**
+ * 歌词偏移预设选项
+ */
+const lyricsOffsetOptions = computed(() => {
+  const offsets = [-2.0, -1.0, -0.5, 0, 0.5, 1.0, 2.0]
+  return offsets.map((offset) => ({
+    label: offset === 0 ? '0s（默认）' : (offset > 0 ? `+${offset}s` : `${offset}s`),
+    key: `lyrics-offset-${offset}`,
+    offset
+  }))
+})
+
+/**
+ * 播放速度预设选项
+ */
+const playbackRateOptions = computed(() => {
+  const rates = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+  return rates.map((rate) => ({
+    label: rate === 1.0 ? `${rate}x（正常）` : `${rate}x`,
+    key: `playback-rate-${rate}`,
+    rate
+  }))
+})
+
+/**
+ * 更多菜单选项
+ */
+const moreMenuOptions = computed(() => [
+  {
+    label: '歌词偏移',
+    key: 'lyrics-offset-header',
+    children: lyricsOffsetOptions.value
+  },
+  {
+    label: '播放速度',
+    key: 'playback-rate-header',
+    children: playbackRateOptions.value
+  },
+  {
+    type: 'divider' as const,
+    key: 'divider-1'
+  },
+  {
+    label: '搜索同名歌曲',
+    key: 'search-same-name',
+    disabled: !player.currentSong?.title
+  }
+])
+
+/**
+ * 处理更多菜单选择
+ * @param key 选项键值
+ */
+const handleMoreMenuSelect = (key: string) => {
+  showMobileMoreMenu.value = false
+  showDesktopMoreMenu.value = false
+
+  if (key.startsWith('lyrics-offset-')) {
+    const offset = parseFloat(key.replace('lyrics-offset-', ''))
+    settingsStore.playback.lyricsOffset = offset
+    return
+  }
+
+  if (key.startsWith('playback-rate-')) {
+    const rate = parseFloat(key.replace('playback-rate-', ''))
+    settingsStore.playback.playbackRate = rate
+    webAudioEngine.setPlaybackRate(rate)
+    return
+  }
+
+  if (key === 'search-same-name') {
+    const title = player.currentSong?.title
+    if (title) {
+      router.push({ path: '/search', query: { q: title } })
+    }
+    return
+  }
+}
 
 // 抽屉目标元素
 const drawerTarget = ref('body')
@@ -158,13 +239,26 @@ watch(
           </template>
         </div>
 
+        <!-- 音频可视化层 -->
+        <div
+          v-if="settingsStore.playback.visualizerEnabled"
+          class="visualizer-layer"
+        >
+          <AudioVisualizer
+            :size="settingsStore.playback.visualizerSize"
+            :intensity="settingsStore.playback.visualizerIntensity"
+          />
+        </div>
+
         <!-- Content Layer -->
         <div class="player-content">
           <!-- Header -->
           <div class="page-header" :class="{ 'hide-controls': !isControlsVisible }">
             <div class="header-left">
-              <n-button text class="header-btn">
-                <n-icon size="24"><i class="mgc_menu_line"></i></n-icon>
+              <n-button text class="header-btn" @click="toggleLyricsMode">
+                <n-icon size="24">
+                  <i :class="isLyricsMode ? 'mgc_text_line' : 'mgc_menu_line'"></i>
+                </n-icon>
               </n-button>
             </div>
             <div class="header-right">
@@ -186,10 +280,11 @@ watch(
             <div
               :key="player.currentSong?.id || 'empty'"
               class="main-area"
+              :class="{ 'lyrics-mode': isLyricsMode }"
               @scroll="handleMainScroll"
             >
-              <!-- Left Panel: Cover & Info -->
-              <div class="left-panel" :style="{ flex: leftPanelFlex }">
+              <!-- Left Panel: Cover & Info (隐藏于歌词模式下) -->
+              <div v-if="!isLyricsMode" class="left-panel" :style="{ flex: leftPanelFlex }">
                 <div class="cover-wrapper">
                   <img
                     :src="player.currentSong?.cover || defaultCover"
@@ -216,7 +311,18 @@ watch(
               </div>
 
               <!-- Right Panel: Lyrics -->
-              <div class="right-panel" :style="{ flex: rightPanelFlex }">
+              <div class="right-panel" :class="{ 'lyrics-mode': isLyricsMode }" :style="{ flex: rightPanelFlex }">
+                <!-- 歌词模式下的歌曲信息（顶部居中） -->
+                <div v-if="isLyricsMode" class="lyrics-mode-info">
+                  <div class="song-title">{{ player.currentSong?.title || '未选择歌曲' }}</div>
+                  <div class="artist-row">
+                    <span>{{ player.currentSong?.artist || '未知歌手' }}</span>
+                  </div>
+                  <div v-if="player.currentSong?.album" class="album-row">
+                    <span>{{ player.currentSong?.album }}</span>
+                  </div>
+                </div>
+
                 <div
                   class="lyrics-placeholder"
                   :class="[
@@ -225,6 +331,7 @@ watch(
                       ? 'lyrics-auto-size'
                       : 'lyrics-manual-size'
                   ]"
+                  :style="{ fontFamily: lyricsFontFamily }"
                 >
                   <LyricPlayer
                     :lyrics="lyricsData"
@@ -249,8 +356,8 @@ watch(
             </div>
           </Transition>
 
-          <!-- Mobile Swipe Indicator -->
-          <div class="mobile-indicator">
+          <!-- Mobile Swipe Indicator（歌词模式下隐藏） -->
+          <div v-if="!isLyricsMode" class="mobile-indicator">
             <div
               class="dot"
               :class="{ active: activePageIndex === 0 }"
@@ -290,15 +397,18 @@ watch(
                   <n-icon size="24"><i class="mgc_add_circle_line"></i></n-icon>
                 </n-button>
               </n-dropdown>
-              <n-button
-                text
-                circle
-                :disabled="!isNeteaseSong"
-                @click="openComments"
-                class="mobile-action-btn"
+              <n-dropdown
+                trigger="click"
+                :options="moreMenuOptions"
+                :show="showMobileMoreMenu"
+                :to="drawerTarget"
+                @select="handleMoreMenuSelect"
+                @update:show="(val: boolean) => showMobileMoreMenu = val"
               >
-                <n-icon size="24"><i class="mgc_comment_line"></i></n-icon>
-              </n-button>
+                <n-button text circle class="mobile-action-btn">
+                  <n-icon size="24"><i class="mgc_more_2_line"></i></n-icon>
+                </n-button>
+              </n-dropdown>
             </div>
 
             <!-- Left Actions (Desktop) -->
@@ -329,16 +439,6 @@ watch(
                   ></n-icon>
                 </n-button>
               </n-dropdown>
-              <n-button
-                quaternary
-                class="action-btn"
-                :disabled="!isNeteaseSong"
-                @click="openComments"
-              >
-                <n-icon size="24" style="transform: translateX(-5px) translateY(1px)"
-                  ><i class="mgc_comment_line"></i
-                ></n-icon>
-              </n-button>
             </div>
 
             <!-- Center Controls -->
@@ -392,9 +492,37 @@ watch(
 
             <!-- Right Actions -->
             <div class="footer-right desktop-only">
-              <n-button quaternary class="action-btn">
+              <!-- 音频可视化控制入口（暂隐藏） -->
+              <n-popover
+                v-if="false"
+                v-model:show="showVisualizerControls"
+                trigger="click"
+                :show-arrow="false"
+                placement="top"
+                :to="drawerTarget"
+              >
+                <template #trigger>
+                  <n-button quaternary class="action-btn" @click="showVisualizerControls = !showVisualizerControls">
+                    <n-icon size="22"><i class="mgc_equalizer_line"></i></n-icon>
+                  </n-button>
+                </template>
+                <AudioVisualizerControls />
+              </n-popover>
+              <n-button quaternary class="action-btn" @click="showSoundEffectsModal = true">
                 <n-icon size="22"><i class="mgc_settings_2_line"></i></n-icon>
               </n-button>
+              <n-dropdown
+                trigger="click"
+                :options="moreMenuOptions"
+                :show="showDesktopMoreMenu"
+                :to="drawerTarget"
+                @select="handleMoreMenuSelect"
+                @update:show="(val: boolean) => showDesktopMoreMenu = val"
+              >
+                <n-button quaternary class="action-btn">
+                  <n-icon size="22"><i class="mgc_more_2_line"></i></n-icon>
+                </n-button>
+              </n-dropdown>
               <div class="volume-control">
                 <n-popover v-model:show="showVolumePopover" trigger="manual" :show-arrow="false" overlay-class="player-page-volume-popover" :placement="'top'" :to="drawerTarget">
                   <template #trigger>
@@ -426,80 +554,12 @@ watch(
     </Transition>
   </Teleport>
 
-  <!-- 网易云评论抽屉 -->
-  <n-drawer
-    v-model:show="showCommentsDrawer"
-    :width="420"
-    placement="right"
-    :trap-focus="false"
-    :block-scroll="false"
-    :to="drawerTarget"
-    :z-index="10000"
-  >
-    <n-drawer-content :native-scrollbar="false" body-content-style="padding: 0;">
-      <template #header>
-        <div class="comments-header">
-          <div class="comments-title">评论</div>
-          <div class="comments-meta">
-            <span v-if="commentsTotal > 0" class="comments-count"> 共 {{ commentsTotal }} 条 </span>
-            <span v-if="!isNeteaseSong" class="comments-tip">仅支持网易云歌曲</span>
-          </div>
-        </div>
-      </template>
-
-      <div class="comments-body">
-        <n-spin :show="commentsLoading">
-          <n-scrollbar style="max-height: 100%">
-            <n-empty
-              v-if="!commentsLoading && comments.length === 0 && !commentsError"
-              description="暂无评论"
-              style="margin-top: 40px"
-            />
-            <div v-else-if="commentsError" class="comments-error">
-              {{ commentsError }}
-            </div>
-            <div v-else class="comment-list">
-              <div v-for="item in comments" :key="item.commentId" class="comment-item">
-                <img :src="item.user.avatarUrl" class="comment-avatar" />
-                <div class="comment-main">
-                  <div class="comment-header">
-                    <div class="comment-author">{{ item.user.nickname }}</div>
-                    <div class="comment-time">
-                      {{ formatCommentTime(item.time) }}
-                    </div>
-                  </div>
-                  <div class="comment-content">
-                    {{ item.content }}
-                  </div>
-                  <div class="comment-footer">
-                    <span class="comment-like">
-                      <i class="mgc_thumb_up_line"></i>
-                      <span class="comment-like-count">{{ item.likedCount }}</span>
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div v-if="commentsHasMore" class="comments-load-more">
-                <n-button
-                  size="small"
-                  tertiary
-                  :loading="commentsLoading"
-                  @click="handleLoadMoreComments"
-                >
-                  加载更多
-                </n-button>
-              </div>
-            </div>
-          </n-scrollbar>
-        </n-spin>
-      </div>
-    </n-drawer-content>
-  </n-drawer>
+  <!-- 音效调节弹窗 -->
+  <SoundEffectsModal v-model:show="showSoundEffectsModal" />
 </template>
 
 <style scoped lang="scss">
-@import './PlayerPage/PlayerPage.scss';
+@use './PlayerPage/PlayerPage.scss';
 </style>
 
 

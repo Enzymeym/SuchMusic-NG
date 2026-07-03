@@ -16,7 +16,7 @@ export function usePlayerControls() {
   const settingsStore = useSettingsStore()
   const playlistStore = usePlaylistStore()
   const message = useMessage()
-  const { isDark } = useAutoNaiveTheme()
+  const { isDark: _isDark } = useAutoNaiveTheme()
 
   const { downloadMusic } = useDownloadMusic()
 

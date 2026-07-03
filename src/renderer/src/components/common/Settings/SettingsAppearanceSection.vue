@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, h } from 'vue'
-import { NCard, NSelect, NColorPicker, NSwitch } from 'naive-ui'
+import { NCard, NSelect, NColorPicker, NSwitch, NSlider } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 
 // 使用设置仓库，驱动外观设置选项
@@ -19,8 +19,19 @@ const props = defineProps<{
 }>()
 
 // 字体标签渲染函数，使用对应字体展示名称（恢复为单行展示）
+/**
+ * 渲染字体下拉选项，用该字体本身展示字体名称，实现所见即所得
+ * 使用解码后的字体名称作为 fontFamily，并用解码后的名称作为显示文字
+ * @param option 包含字体名称（label）和值（value）的选项对象
+ * @returns 使用对应字体渲染的 span VNode
+ */
 const renderFontLabel = (option: { label: string; value: string }) => {
-  return h('span', { style: { fontFamily: option.value } }, option.label)
+  // option.value 已在上游 SettingsModal 中经过 decodeMojibake 解码
+  // 如果字体名仍然无效（如 fallback 值 "follow_global"），则不应用 fontFamily
+  const isFollowGlobal = option.value === 'follow_global'
+  return h('span', {
+    style: isFollowGlobal ? {} : { fontFamily: option.value }
+  }, option.label)
 }
 
 // 主题色预设列表（用于根据预设值映射颜色）
@@ -200,22 +211,35 @@ const handleCustomColorChange = (color: string | null) => {
       </div>
     </n-card>
 
-    <div class="section-group-title" style="margin-top: 24px;">桌面歌词</div>
+    <div class="section-group-title" style="margin-top: 24px;">播放页布局</div>
 
     <n-card
       class="setting-item"
-      :class="{ 'setting-item--highlight': props.highlightKey === 'playback.desktopLyricsForceDuet' }"
-      data-setting-key="playback.desktopLyricsForceDuet"
+      :class="{ 'setting-item--highlight': props.highlightKey === 'playback.lyricsAreaRatio' }"
+      data-setting-key="playback.lyricsAreaRatio"
       :bordered="true"
       size="small"
       :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
     >
       <div class="setting-row">
         <div class="setting-label">
-          <div class="main-label">强制对唱模式</div>
-          <div class="sub-label">强制开启左右交替的对唱展示效果</div>
+          <div class="main-label">播放页布局</div>
+          <div class="sub-label">调节封面与歌词在播放页中的占比（右侧为歌词区域）</div>
         </div>
-        <n-switch v-model:value="settingsStore.playback.desktopLyricsForceDuet" />
+        <div style="display: flex; align-items: center; gap: 12px; min-width: 260px">
+          <n-slider
+            v-model:value="settingsStore.playback.lyricsAreaRatio"
+            :min="30"
+            :max="70"
+            :step="1"
+            :tooltip="false"
+            style="width: 180px"
+          />
+          <span class="time-text"
+            >封面 {{ 100 - settingsStore.playback.lyricsAreaRatio }}% / 歌词
+            {{ settingsStore.playback.lyricsAreaRatio }}%</span
+          >
+        </div>
       </div>
     </n-card>
 

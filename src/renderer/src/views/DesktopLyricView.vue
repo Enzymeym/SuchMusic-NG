@@ -1,49 +1,59 @@
 <template>
-  <div 
-    class="desktop-lyric-container" 
-    :class="{ 'is-locked': isLocked }"
-    :style="containerStyle"
-  >
+  <div class="desktop-lyric-container" :class="{ 'is-locked': isLocked }" :style="containerStyle">
     <div class="drag-region"></div>
     <div class="content">
       <transition-group name="lyric-scroll" tag="div" class="lyric-wrapper">
-        <div 
-          v-if="currentLine" 
-          :key="currentLine.startTime" 
-          class="lyric-line current" 
+        <div
+          v-if="currentLine"
+          :key="currentLine.startTime"
+          class="lyric-line current"
           :style="currentLineStyle"
         >
           <div class="lyric-content">
-            {{ currentLine.words.map(w => w.word).join('') }}
+            <!-- 逐字歌词渲染：根据每个词的起止时间计算渐变动画进度 -->
+            <template
+              v-if="currentLine.words && currentLine.words.length > 0 && hasWordTiming(currentLine)"
+            >
+              <span
+                v-for="(word, wIdx) in currentLine.words"
+                :key="wIdx"
+                class="lyric-word"
+                :style="getWordStyle(word, wIdx)"
+                >{{ word.word }}</span
+              >
+            </template>
+            <template v-else>
+              {{ currentLine.words.map((w) => w.word).join('') }}
+            </template>
           </div>
-          <div 
-            v-if="currentLine.translatedLyric" 
+          <div
+            v-if="currentLine.translatedLyric"
             class="lyric-translation"
             :style="currentTranslationStyle"
           >
             {{ currentLine.translatedLyric }}
           </div>
         </div>
-        <div 
-          v-else-if="lyrics.length === 0" 
-          key="placeholder" 
-          class="lyric-line placeholder" 
+        <div
+          v-else-if="lyrics.length === 0"
+          key="placeholder"
+          class="lyric-line placeholder"
           :style="currentLineStyle"
         >
           Wait for music...
         </div>
-        
-        <div 
-          v-if="nextLine && showNextLine" 
-          :key="nextLine.startTime" 
-          class="lyric-line next" 
+
+        <div
+          v-if="nextLine && showNextLine"
+          :key="nextLine.startTime"
+          class="lyric-line next"
           :style="nextLineStyle"
         >
           <div class="lyric-content">
-            {{ nextLine.words.map(w => w.word).join('') }}
+            {{ nextLine.words.map((w) => w.word).join('') }}
           </div>
-          <div 
-            v-if="nextLine.translatedLyric" 
+          <div
+            v-if="nextLine.translatedLyric"
             class="lyric-translation"
             :style="nextTranslationStyle"
           >
@@ -59,25 +69,47 @@
         <div class="song-artist">{{ songInfo.artist }}</div>
       </div>
       <div class="top-bar">
-        <button class="control-btn" @click="handleControl('lock-toggle')" :title="isLocked ? 'Unlock' : 'Lock'">
-          <svg v-if="isLocked" viewBox="0 0 24 24"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3 3.1-3 1.71 0 3.1 1.29 3.1 3v2z"/></svg>
-          <svg v-else viewBox="0 0 24 24"><path d="M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6h1v2h-1c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM8.9 6c0-1.71 1.39-3 3.1-3s3.1 1.29 3.1 3v2H8.9V6zM18 20H6V10h12v10z"/></svg>
+        <button
+          class="control-btn"
+          @click="handleControl('lock-toggle')"
+          :title="isLocked ? 'Unlock' : 'Lock'"
+        >
+          <svg v-if="isLocked" viewBox="0 0 24 24">
+            <path
+              d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3 3.1-3 1.71 0 3.1 1.29 3.1 3v2z"
+            />
+          </svg>
+          <svg v-else viewBox="0 0 24 24">
+            <path
+              d="M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6h1v2h-1c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM8.9 6c0-1.71 1.39-3 3.1-3s3.1 1.29 3.1 3v2H8.9V6zM18 20H6V10h12v10z"
+            />
+          </svg>
         </button>
         <button class="control-btn" @click="handleControl('close')" title="Close">
-          <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+          <svg viewBox="0 0 24 24">
+            <path
+              d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"
+            />
+          </svg>
         </button>
       </div>
       <div class="control-bar-wrapper">
         <div class="control-bar">
           <button class="control-btn" @click="handleControl('prev')" title="Previous">
-            <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+            <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" /></svg>
           </button>
-          <button class="control-btn main-btn" @click="handleControl('toggle')" :title="isPlaying ? 'Pause' : 'Play'">
-            <svg v-if="isPlaying" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-            <svg v-else viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          <button
+            class="control-btn main-btn"
+            @click="handleControl('toggle')"
+            :title="isPlaying ? 'Pause' : 'Play'"
+          >
+            <svg v-if="isPlaying" viewBox="0 0 24 24">
+              <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+            </svg>
+            <svg v-else viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
           </button>
           <button class="control-btn" @click="handleControl('next')" title="Next">
-            <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+            <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" /></svg>
           </button>
         </div>
       </div>
@@ -87,7 +119,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import type { LyricLine } from '@applemusic-like-lyrics/lyric'
+import type { LyricLine, LyricWord } from '@applemusic-like-lyrics/lyric'
 
 const lyrics = ref<LyricLine[]>([])
 const currentTime = ref(0)
@@ -145,15 +177,18 @@ onMounted(() => {
     if (settings.locked !== undefined) isLocked.value = settings.locked
     if (settings.forceDuet !== undefined) forceDuet.value = settings.forceDuet
   })
-  
+
   window.electron.ipcRenderer.on('desktop-lyric:set-playing', (_, playing: boolean) => {
     isPlaying.value = playing
   })
 
-  window.electron.ipcRenderer.on('desktop-lyric:set-info', (_, info: { title: string, artist: string }) => {
-    songInfo.value = info
-  })
-  
+  window.electron.ipcRenderer.on(
+    'desktop-lyric:set-info',
+    (_, info: { title: string; artist: string }) => {
+      songInfo.value = info
+    }
+  )
+
   // Notify main process that we are ready to receive data
   window.electron.ipcRenderer.invoke('desktop-lyric:ready')
 
@@ -183,7 +218,7 @@ let startY = 0
 const handleMouseDown = (e: MouseEvent) => {
   // Ignore if locked
   if (isLocked.value) return
-  
+
   // Ignore if clicking on buttons
   const target = e.target as HTMLElement
   if (target.closest('.control-btn') || target.closest('.no-drag')) return
@@ -195,10 +230,10 @@ const handleMouseDown = (e: MouseEvent) => {
 
 const handleMouseMove = (e: MouseEvent) => {
   if (!isDragging) return
-  
+
   const deltaX = e.screenX - startX
   const deltaY = e.screenY - startY
-  
+
   if (deltaX !== 0 || deltaY !== 0) {
     window.electron.ipcRenderer.send('desktop-lyric:move', { x: deltaX, y: deltaY })
     startX = e.screenX
@@ -212,12 +247,12 @@ const handleMouseUp = () => {
 
 const updateIndex = () => {
   if (!lyrics.value.length) return
-  
+
   // Find current line based on time
   // Simple search for now, can be optimized
   const time = currentTime.value
-  let idx = lyrics.value.findIndex(line => line.startTime <= time && line.endTime >= time)
-  
+  let idx = lyrics.value.findIndex((line) => line.startTime <= time && line.endTime >= time)
+
   if (idx === -1) {
     // If not in a specific range, find the last one that started
     for (let i = lyrics.value.length - 1; i >= 0; i--) {
@@ -227,7 +262,7 @@ const updateIndex = () => {
       }
     }
   }
-  
+
   if (idx !== -1) {
     currentIndex.value = idx
   }
@@ -255,10 +290,10 @@ const currentLineStyle = computed(() => {
   // Check if force duet mode is enabled or if the line is explicitly marked as duet
   // In force duet mode: current line aligns left, next line aligns right (or vice versa based on index/bg status)
   // Let's implement a simple force duet: current line LEFT, next line RIGHT
-  
+
   let alignStyle = ''
   let textAlign = ''
-  
+
   if (forceDuet.value) {
     // Force Duet: Current line LEFT
     alignStyle = 'flex-start'
@@ -270,16 +305,17 @@ const currentLineStyle = computed(() => {
       alignStyle = 'flex-end'
       textAlign = 'right'
     } else {
-      alignStyle = align.value === 'center' ? 'center' : align.value === 'right' ? 'flex-end' : 'flex-start'
+      alignStyle =
+        align.value === 'center' ? 'center' : align.value === 'right' ? 'flex-end' : 'flex-start'
       textAlign = align.value
     }
   }
-    
+
   return {
     fontSize: `${fontSize.value}px`,
     color: highlightColor.value,
     fontWeight: 'bold',
-    textShadow: '0 2px 4px rgba(0,0,0,0.5)',
+    textShadow: '0 4px 12px rgba(0,0,0,0.7)',
     textAlign: textAlign as any,
     fontFamily: fontFamily.value,
     display: 'flex',
@@ -298,9 +334,9 @@ const currentTranslationStyle = computed(() => {
     textAlign = 'left'
   } else {
     const isDuet = currentLine.value?.isDuet
-    textAlign = (isDuet && currentLine.value?.isBG) ? 'right' : align.value
+    textAlign = isDuet && currentLine.value?.isBG ? 'right' : align.value
   }
-  
+
   return {
     fontSize: `${fontSize.value * 0.6}px`,
     color: highlightColor.value,
@@ -308,14 +344,14 @@ const currentTranslationStyle = computed(() => {
     marginTop: '4px',
     fontWeight: 'normal',
     fontFamily: fontFamily.value,
-    textAlign: textAlign as any,
+    textAlign: textAlign as any
   }
 })
 
 const nextLineStyle = computed(() => {
   let alignStyle = ''
   let textAlign = ''
-  
+
   if (forceDuet.value) {
     // Force Duet: Next line RIGHT
     alignStyle = 'flex-end'
@@ -327,7 +363,8 @@ const nextLineStyle = computed(() => {
       alignStyle = 'flex-end'
       textAlign = 'right'
     } else {
-      alignStyle = align.value === 'center' ? 'center' : align.value === 'right' ? 'flex-end' : 'flex-start'
+      alignStyle =
+        align.value === 'center' ? 'center' : align.value === 'right' ? 'flex-end' : 'flex-start'
       textAlign = align.value
     }
   }
@@ -337,7 +374,7 @@ const nextLineStyle = computed(() => {
     color: fontColor.value,
     marginTop: '4px',
     opacity: 0.8,
-    textShadow: '0 1px 2px rgba(0,0,0,0.5)',
+    textShadow: '0 2px 8px rgba(0,0,0,0.6)',
     textAlign: textAlign as any,
     fontFamily: fontFamily.value,
     display: 'flex',
@@ -356,9 +393,9 @@ const nextTranslationStyle = computed(() => {
     textAlign = 'right'
   } else {
     const isDuet = nextLine.value?.isDuet
-    textAlign = (isDuet && nextLine.value?.isBG) ? 'right' : align.value
+    textAlign = isDuet && nextLine.value?.isBG ? 'right' : align.value
   }
-  
+
   return {
     fontSize: `${fontSize.value * 0.5}px`,
     color: fontColor.value,
@@ -366,9 +403,74 @@ const nextTranslationStyle = computed(() => {
     marginTop: '2px',
     fontWeight: 'normal',
     fontFamily: fontFamily.value,
-    textAlign: textAlign as any,
+    textAlign: textAlign as any
   }
 })
+
+/**
+ * 判断当前歌词行是否包含逐字时间信息
+ * @param line - 当前歌词行对象
+ * @returns 如果至少有一个词包含有效的时间信息则返回 true
+ */
+const hasWordTiming = (line: LyricLine): boolean => {
+  if (!line.words || line.words.length <= 1) return false
+  return line.words.some((w) => w.startTime > 0 && w.endTime > w.startTime)
+}
+
+/**
+ * 计算单个逐字歌词的样式，根据当前播放时间决定渐变动画和高亮状态
+ * @param word - 当前歌词词对象，包含起止时间
+ * @param index - 词在当前行中的索引
+ * @returns 包含 CSS 样式属性的对象
+ */
+const getWordStyle = (word: LyricWord, _index: number): Record<string, string> => {
+  const time = currentTime.value
+  const start = word.startTime
+  const end = word.endTime
+
+  const style: Record<string, string> = {
+    display: 'inline-block',
+    verticalAlign: 'middle',
+    transition: 'all 0.3s ease',
+    padding: '0 1px'
+  }
+
+  // 已唱完的词：高亮显示
+  if (time >= end) {
+    style.color = highlightColor.value
+    style.fontWeight = 'bold'
+    style.textShadow = '0 0 8px rgba(24,160,88,0.4)'
+    style.transform = 'translateY(-1px)'
+    return style
+  }
+
+  // 尚未唱到的词：低透明度显示
+  if (time < start) {
+    style.color = fontColor.value
+    style.opacity = '0.45'
+    style.textShadow = 'none'
+    return style
+  }
+
+  // 正在唱的词：卡拉OK渐变动画效果
+  const progress = (time - start) / (end - start || 1)
+  const clamped = Math.max(0, Math.min(1, progress))
+  const bgPos = (1 - clamped) * 100
+
+  style.backgroundImage = `linear-gradient(to right, ${highlightColor.value} 48%, ${fontColor.value} 52%)`
+  style.backgroundSize = '220% 100%'
+  style.backgroundPosition = `${bgPos}% 0`
+  style.backgroundClip = 'text'
+  style.WebkitBackgroundClip = 'text'
+  style.WebkitTextFillColor = 'transparent'
+  style.color = 'transparent'
+  style.fontWeight = 'bold'
+  style.textShadow = '0 0 10px rgba(24,160,88,0.6)'
+  style.transform = 'translateY(-2px) scale(1.05)'
+  style.opacity = '1'
+
+  return style
+}
 
 const handleControl = (action: string) => {
   if (action === 'close') {
@@ -394,7 +496,7 @@ const handleControl = (action: string) => {
   height: 100vh;
   overflow: hidden;
   background-color: transparent; /* Changed from transparent to a tiny bit of opacity to capture hover events */
-  background-color: rgba(0, 0, 0, 0.01); 
+  background-color: rgba(0, 0, 0, 0.01);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -430,7 +532,7 @@ const handleControl = (action: string) => {
   left: 0;
   width: 100%;
   height: 100%;
-  pointer-events: none; 
+  pointer-events: none;
   z-index: 30;
   display: flex;
   flex-direction: column;
@@ -453,7 +555,7 @@ const handleControl = (action: string) => {
   left: 0;
   width: 100%;
   height: 60px; /* Adjust height to cover title/controls area */
-  background: linear-gradient(to bottom, rgba(0,0,0,0.6) 0%, rgba(0,0,0,0) 100%);
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.6) 0%, rgba(0, 0, 0, 0) 100%);
   opacity: 0;
   transition: opacity 0.3s;
   pointer-events: none;
@@ -539,7 +641,7 @@ const handleControl = (action: string) => {
   overflow: hidden;
   text-overflow: ellipsis;
   width: 100%;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
 }
 
 .song-artist {
@@ -549,7 +651,7 @@ const handleControl = (action: string) => {
   overflow: hidden;
   text-overflow: ellipsis;
   width: 100%;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
 }
 
 .lock-indicator {
@@ -673,7 +775,10 @@ const handleControl = (action: string) => {
 /* Specific positioning overrides based on class (handled by Vue transition classes mostly) */
 .lyric-line.current {
   top: 25%; /* Adjust vertical center */
-  transition: top 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.5s, transform 0.5s;
+  transition:
+    top 0.3s cubic-bezier(0.25, 0.8, 0.25, 1),
+    opacity 0.5s,
+    transform 0.5s;
 }
 
 /* Adjust position when container is not hovered (controls hidden) */
@@ -683,7 +788,10 @@ const handleControl = (action: string) => {
 
 .lyric-line.next {
   top: 70%; /* Adjust vertical position */
-  transition: top 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.5s, transform 0.5s;
+  transition:
+    top 0.3s cubic-bezier(0.25, 0.8, 0.25, 1),
+    opacity 0.5s,
+    transform 0.5s;
 }
 
 /* Adjust position when container is not hovered (controls hidden) */
@@ -693,7 +801,10 @@ const handleControl = (action: string) => {
 
 .lyric-line.placeholder {
   top: 40%;
-  transition: top 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.5s, transform 0.5s;
+  transition:
+    top 0.3s cubic-bezier(0.25, 0.8, 0.25, 1),
+    opacity 0.5s,
+    transform 0.5s;
 }
 
 .desktop-lyric-container:not(:hover) .lyric-line.placeholder {

@@ -1,5 +1,4 @@
 import type { DecodedAudio } from '../apis/audio-decoder.types'
-import { usePlayerStore } from '../stores/playerStore'
 import { rustAudioAdapter } from './rust-audio-adapter'
 
 /**
@@ -42,9 +41,13 @@ class WebAudioEngine {
     await rustAudioAdapter.resume()
   }
 
-  // 跳转到指定位置
-  public seek(positionMs: number): void {
-    rustAudioAdapter.seek(positionMs)
+  /**
+   * 跳转到指定位置
+   * @param positionMs 目标位置（毫秒）
+   * @param startPlaying 是否启动播放，默认为 true
+   */
+  public seek(positionMs: number, startPlaying: boolean = true): void {
+    rustAudioAdapter.seek(positionMs, startPlaying)
   }
 
   // 设置播放结束回调
@@ -60,6 +63,14 @@ class WebAudioEngine {
   // 设置全局音量（0.0 - 1.0）
   public setVolume(volume: number): void {
     rustAudioAdapter.setVolume(volume)
+  }
+
+  /**
+   * 设置播放速度倍率
+   * @param rate 播放速度倍率（0.25 - 4.0）
+   */
+  public setPlaybackRate(rate: number): void {
+    rustAudioAdapter.setPlaybackRate(rate)
   }
 
   /**
@@ -211,9 +222,9 @@ class WebAudioEngine {
   }
 
   // 加载文件数据但不播放（已废弃，请使用 AudioPlayerManager）
-  public async loadFromFileData(data: ArrayBuffer): Promise<void> {
+  public async loadFromFileData(data: ArrayBuffer, startPlaying: boolean = true): Promise<void> {
     console.warn('[WebAudioEngine] loadFromFileData is deprecated, use AudioPlayerManager instead')
-    await rustAudioAdapter.loadFromFileData(data)
+    await rustAudioAdapter.loadFromFileData(data, startPlaying)
   }
 
   // 通过 URL 播放音频（已废弃，请使用 AudioPlayerManager）
@@ -223,18 +234,18 @@ class WebAudioEngine {
   }
 
   // 加载 URL 但不播放（已废弃，请使用 AudioPlayerManager）
-  public async loadFromUrl(url: string): Promise<void> {
+  public async loadFromUrl(url: string, startPlaying: boolean = true): Promise<void> {
     console.warn('[WebAudioEngine] loadFromUrl is deprecated, use AudioPlayerManager instead')
-    await rustAudioAdapter.loadFromUrl(url)
+    await rustAudioAdapter.loadFromUrl(url, startPlaying)
   }
 
   // 开始流式播放会话（已废弃）
-  public startStream(sampleRate: number, channels: number): void {
+  public startStream(_sampleRate: number, _channels: number): void {
     console.warn('[WebAudioEngine] startStream is deprecated')
   }
 
   // 追加一块流式解码得到的 PCM 数据（已废弃）
-  public appendStreamChunk(chunk: {
+  public appendStreamChunk(_chunk: {
     sampleRate: number
     channels: number
     data: number[]
@@ -244,19 +255,9 @@ class WebAudioEngine {
   }
 
   // 预加载下一首歌曲（已废弃，请使用 AudioPlayerManager）
-  public async preloadNextSong(song: any): Promise<void> {
+  public async preloadNextSong(_song: any): Promise<void> {
     console.warn('[WebAudioEngine] preloadNextSong is deprecated, use AudioPlayerManager instead')
     // 简单实现：只记录预加载状态
-  }
-
-  // 从本地文件预加载（已废弃）
-  private async preloadFromFile(filePath: string): Promise<void> {
-    console.warn('[WebAudioEngine] preloadFromFile is deprecated')
-  }
-
-  // 从URL预加载（已废弃）
-  private async preloadFromUrl(url: string): Promise<void> {
-    console.warn('[WebAudioEngine] preloadFromUrl is deprecated')
   }
 
   // 清除预加载资源（已废弃）
@@ -282,27 +283,27 @@ class WebAudioEngine {
   }
 
   // 添加预加载状态回调（已废弃）
-  public addPreloadCallback(callback: (status: 'loading' | 'loaded' | 'error', error?: string) => void): void {
+  public addPreloadCallback(_callback: (status: 'loading' | 'loaded' | 'error', error?: string) => void): void {
     console.warn('[WebAudioEngine] addPreloadCallback is deprecated')
   }
 
   // 移除预加载状态回调（已废弃）
-  public removePreloadCallback(callback: (status: 'loading' | 'loaded' | 'error', error?: string) => void): void {
+  public removePreloadCallback(_callback: (status: 'loading' | 'loaded' | 'error', error?: string) => void): void {
     console.warn('[WebAudioEngine] removePreloadCallback is deprecated')
   }
 
   // 设置过渡功能启用状态（已废弃）
-  public setTransitionEnabled(enabled: boolean): void {
+  public setTransitionEnabled(_enabled: boolean): void {
     console.warn('[WebAudioEngine] setTransitionEnabled is deprecated')
   }
 
   // 设置过渡时长（已废弃）
-  public setTransitionDuration(duration: number): void {
+  public setTransitionDuration(_duration: number): void {
     console.warn('[WebAudioEngine] setTransitionDuration is deprecated')
   }
 
   // 设置过渡效果类型（已废弃）
-  public setTransitionType(type: 'crossfade' | 'fade' | 'smart'): void {
+  public setTransitionType(_type: 'crossfade' | 'fade' | 'smart'): void {
     console.warn('[WebAudioEngine] setTransitionType is deprecated')
   }
 
@@ -329,20 +330,8 @@ class WebAudioEngine {
     callback?.()
   }
 
-  // 交叉淡入淡出过渡（已废弃）
-  private async crossfadeTransition(nextSong: () => Promise<void>): Promise<void> {
-    console.warn('[WebAudioEngine] crossfadeTransition is deprecated')
-    await nextSong()
-  }
-
-  // 普通淡入淡出过渡（已废弃）
-  private async fadeTransition(nextSong: () => Promise<void>): Promise<void> {
-    console.warn('[WebAudioEngine] fadeTransition is deprecated')
-    await nextSong()
-  }
-
   // 分析音频特征（已废弃）
-  public analyzeAudioFeatures(buffer: AudioBuffer): {
+  public analyzeAudioFeatures(_buffer: AudioBuffer): {
     energy: number
     tempo: number
     key: number
@@ -357,20 +346,10 @@ class WebAudioEngine {
     }
   }
 
-  // 估算音频 tempo（已废弃）
-  private estimateTempo(buffer: AudioBuffer): number {
-    return 120
-  }
-
-  // 估算音频 key（已废弃）
-  private estimateKey(buffer: AudioBuffer): number {
-    return 0
-  }
-
   // 基于音频特征计算最佳过渡点（已废弃）
   public calculateTransitionPoint(
-    currentFeatures: { energy: number; tempo: number; key: number; loudness: number },
-    nextFeatures: { energy: number; tempo: number; key: number; loudness: number }
+    _currentFeatures: { energy: number; tempo: number; key: number; loudness: number },
+    _nextFeatures: { energy: number; tempo: number; key: number; loudness: number }
   ): {
     fadeInDuration: number
     fadeOutDuration: number

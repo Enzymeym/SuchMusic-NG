@@ -1,5 +1,5 @@
 <template>
-  <div v-if="playlist" class="playlist-detail" :class="[layoutStyle, playlist.coverStyle || 'square']">
+  <div v-if="playlist" ref="detailRef" class="playlist-detail" :class="[layoutStyle, playlist.coverStyle || 'square', { collapsed: isCollapsed }]" @scroll="handleScroll">
     <!-- 背景层（仅现代模式）：统一模糊背景 -->
     <div
       v-if="layoutStyle === 'modern'"
@@ -44,23 +44,18 @@
           <!-- 按钮组 -->
           <div class="actions-row" style="justify-content: space-between;">
             <div class="actions-row">
-              <n-button type="primary" round size="large" @click="playAll">
+              <n-button :color="accentColor" round size="large" @click="playAll">
                 <template #icon>
                   <n-icon><i class="mgc_play_fill"></i></n-icon>
                 </template>
-                播放全部
+                播放
               </n-button>
 
-              <n-button secondary circle size="large">
+              <n-button secondary round size="large">
                 <template #icon>
                   <n-icon><i class="mgc_folder_download_line"></i></n-icon>
                 </template>
-              </n-button>
-
-              <n-button secondary circle size="large">
-                <template #icon>
-                  <n-icon><i class="mgc_more_2_line"></i></n-icon>
-                </template>
+                下载全部
               </n-button>
             </div>
             <div class="action-row">
@@ -104,19 +99,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, watch, type CSSProperties } from 'vue'
+import { computed, ref, onMounted, onUnmounted, watch, type CSSProperties } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NButton, NIcon, NEmpty, useMessage } from 'naive-ui'
 import { usePlaylistStore, type UserPlaylist } from '../stores/playlistStore'
 import { usePlayerStore } from '../stores/playerStore'
 import { useSettingsStore } from '../stores/settingsStore'
+import { usePlaylistTheme } from '../composables/usePlaylistTheme'
 import SongList from '../components/common/SongList.vue'
 import PlaylistSettingsModal from '../components/common/PlaylistSettingsModal.vue'
 import defaultCover from '@renderer/assets/icon.png'
 import { AudioPlayerManager } from '../utils/audioPlayerManager'
-import { runSnowdropGetMusicUrl } from '../apis/snowdrop-transform'
-import { fetchGMALyric } from '../apis/gma'
-import { fetchQQMusicLyric } from '../apis/vkeys'
 
 const route = useRoute()
 const router = useRouter()
@@ -126,11 +119,29 @@ const settingsStore = useSettingsStore()
 const message = useMessage()
 
 const playlistId = route.params.id as string
-// 初始化时从 store 获取布局风格
-const layoutStyle = ref<'classic' | 'modern'>(
+// 从 store 获取用户偏好的布局风格
+const storedLayoutStyle = ref<'classic' | 'modern'>(
   settingsStore.appearance.playlistLayoutStyle || 'classic'
 )
+
+// 当 coverStyle 为 'full' 时强制使用现代布局，否则使用用户偏好
+const layoutStyle = computed<'classic' | 'modern'>(() => {
+  if (!playlist.value) return storedLayoutStyle.value
+  return playlist.value.coverStyle === 'full' ? 'modern' : storedLayoutStyle.value
+})
+
 const showSettings = ref(false)
+
+// 滚动驱动页头收缩
+const detailRef = ref<HTMLElement | null>(null)
+const scrollY = ref(0)
+const HEADER_COLLAPSE_THRESHOLD = 200
+const isCollapsed = computed(() => scrollY.value >= HEADER_COLLAPSE_THRESHOLD)
+
+const handleScroll = () => {
+  if (!detailRef.value) return
+  scrollY.value = detailRef.value.scrollTop
+}
 
 const playlist = computed(() => {
   return playlistStore.playlists.find((p) => p.id === playlistId)
@@ -148,12 +159,17 @@ const handleDeletePlaylist = (id: string) => {
   router.push('/playlist')
 }
 
-// 歌单封面：优先使用自定义封面，其次使用第一首歌的封面，最后使用默认图标
+/**
+ * 歌单封面：根据 coverFollowsFirstTrack 决定使用自定义封面还是第一首歌曲封面
+ * 优先级：coverFollowsFirstTrack=true → 第一首歌曲封面 → 自定义封面(customCover) → 默认图标
+ */
 const playlistCover = computed(() => {
   if (!playlist.value) return defaultCover
-  if (playlist.value.cover) return playlist.value.cover
-  const first = playlist.value.tracks[0]
-  return first?.cover || defaultCover
+  if (playlist.value.coverFollowsFirstTrack) {
+    const first = playlist.value.tracks[0]
+    return first?.cover || playlist.value.cover || defaultCover
+  }
+  return playlist.value.cover || defaultCover
 })
 
 // 计算封面样式
@@ -167,6 +183,9 @@ const playlistCoverStyle = computed<CSSProperties>(() => {
     default: return { aspectRatio: '1/1', objectFit: 'cover' }
   }
 })
+
+// 根据封面提取主题色
+const { accentColor } = usePlaylistTheme(() => playlistCover.value)
 
 // 计算标题样式
 const playlistTitleStyle = computed(() => {
@@ -187,8 +206,8 @@ const playlistTitleStyle = computed(() => {
   }
 })
 
-// 监听布局风格变化并保存到 store
-watch(layoutStyle, (newStyle) => {
+// 监听用户偏好布局风格变化并保存到 store
+watch(storedLayoutStyle, (newStyle) => {
   // 直接写入 store 的 appearance，利用 Pinia 的深度 watch 持久化到 localStorage
   settingsStore.appearance.playlistLayoutStyle = newStyle
 })
@@ -250,76 +269,10 @@ const handleSongClick = async (song: any) => {
   const target = list.find((s) => s.id === song.id)
   if (!target) return
 
-  /**
-   * 判断歌词是否为 YRC 逐字格式
-   * YRC 格式特征：每行包含形如 (词,开始时间,持续时长) 的词级时间戳
-   * @param lyrics 歌词字符串
-   * @returns 是否为 YRC 逐字格式
-   */
-  const isYrcFormat = (lyrics: string): boolean => {
-    return lyrics.includes('(') && /\d+,\d+,\d+/.test(lyrics)
-  }
-
-  // 歌词重试获取函数
-  const fetchLyricWithRetry = async (id: string, source: string): Promise<string> => {
-    // 标准化 source：将外部格式 qq→tx 统一为内部格式
-    const normalizedSource = source === 'qq' ? 'tx' : source
-
-    let attempt = 0
-    while (true) {
-      // 检查当前播放歌曲是否改变，如果改变则停止重试
-      const currentId = player.currentSong?.sourceSongId ?? player.currentSong?.id
-      if (String(currentId) !== String(id)) {
-        return ''
-      }
-
-      try {
-        // QQ音乐优先使用 VKeys API
-        if (normalizedSource === 'tx') {
-          try {
-            const result = await fetchQQMusicLyric(String(id))
-            const mainLyric = result.yrc || result.lrc
-            if (mainLyric) {
-              if (result.trans) {
-                player.setTranslatedLyrics(result.trans)
-              }
-              return mainLyric
-            }
-          } catch (e) {
-            console.warn(`获取歌词失败，第 ${attempt + 1} 次重试:`, e)
-          }
-        }
-        const lyricText = await fetchGMALyric(String(id), normalizedSource)
-        if (lyricText) return lyricText
-      } catch (e) {
-        console.warn(`获取歌词失败，第 ${attempt + 1} 次重试:`, e)
-      }
-
-      attempt++
-      // 指数退避策略，最大延迟 5 秒
-      const delay = Math.min(500 + attempt * 500, 5000)
-      await new Promise((resolve) => setTimeout(resolve, delay))
-    }
-  }
-
-  // 1. 优先尝试使用已有的 filePath
+  // 本地文件播放
   if (target.filePath && !target.filePath.startsWith('http')) {
     try {
-      // 验证文件是否存在
-      // const exists = await window.electron.ipcRenderer.invoke('system:fs-exists', target.filePath)
-      // if (!exists) throw new Error('Local file not found')
-
-      // 尝试获取歌词（如果本地没存，或者QQ音乐只有LRC没有YRC逐字）
-      let lyrics = target.lyrics || ''
-      const neteaseId = target.sourceSongId ?? target.id
-      const localSource = target.source || 'wy'
-      const needsYrc = localSource === 'qq' && lyrics && !isYrcFormat(lyrics)
-      if (!lyrics || needsYrc) {
-        if (needsYrc) {
-          console.log('[PlaylistDetail] 检测到 QQ 音乐 LRC 歌词，尝试获取 YRC 逐字歌词...')
-        }
-        lyrics = await fetchLyricWithRetry(String(neteaseId), localSource)
-      }
+      const lyrics = target.lyrics || ''
 
       await AudioPlayerManager.play({
         filePath: target.filePath,
@@ -342,173 +295,14 @@ const handleSongClick = async (song: any) => {
       message.success('从本地缓存播放')
       return
     } catch (e) {
-      console.error('从本地缓存播放失败，回退到在线获取:', e)
-      // 失败时清除 filePath，以便继续走下面的在线逻辑
-      target.filePath = undefined
+      console.error('本地文件播放失败:', e)
+      message.error('找不到本地文件')
+      return
     }
   }
 
-  // 2. 如果没有 filePath 或文件不存在，尝试主动检测缓存
-  const neteaseId = target.sourceSongId ?? target.id
-  const quality = settingsStore.source.preferredQuality || '128k'
-  // 默认尝试使用网易云，或根据设置
-  let source =
-    settingsStore.source.preferredPlatform === 'all'
-      ? 'wy'
-      : settingsStore.source.preferredPlatform
-
-  // 映射旧设置值
-  if (source === 'netease') source = 'wy'
-  else if (source === 'qq') source = 'tx'
-  else if (source === 'kugou') source = 'kg'
-  else if (source === 'kuwo') source = 'kw'
-  else if (source === 'migu') source = 'mg'
-
-  // 如果歌曲本身指定了来源，则优先使用（映射旧值）
-  if (target.source) {
-    switch (target.source) {
-      case 'netease': source = 'wy'; break;
-      case 'qq': source = 'tx'; break;
-      case 'kugou': source = 'kg'; break;
-      case 'kuwo': source = 'kw'; break;
-      case 'migu': source = 'mg'; break;
-      default: source = target.source; break;
-    }
-  }
-
-  const cacheKey = `${source}:${neteaseId}:${quality}`
-
-  if (window.electron && window.electron.ipcRenderer) {
-    try {
-      const cachePath = await window.electron.ipcRenderer.invoke('online-cache:check', {
-         dir: settingsStore.local.cacheDir || null,
-         key: cacheKey
-      })
-
-      if (cachePath) {
-         console.log('[PlaylistDetail] 主动检测到缓存文件存在', cachePath)
-
-         // 尝试获取歌词（如果本地没存，或者QQ音乐只有LRC没有YRC逐字）
-         let lyrics = target.lyrics || ''
-         const needsYrc2 = source === 'tx' && lyrics && !isYrcFormat(lyrics)
-         if (!lyrics || needsYrc2) {
-           if (needsYrc2) {
-             console.log('[PlaylistDetail][Cache] 检测到 QQ 音乐 LRC 歌词，尝试获取 YRC 逐字歌词...')
-           }
-           lyrics = await fetchLyricWithRetry(String(neteaseId), source)
-         }
-
-         await AudioPlayerManager.play({
-           filePath: cachePath,
-           volume: player.volume
-         })
-
-         player.setCurrentSong({
-           id: target.id,
-           title: target.title,
-           artist: target.artist,
-           album: target.album,
-           cover: target.cover || '',
-           durationMs: target.durationMs || 0,
-           filePath: cachePath,
-           source: target.source,
-           sourceSongId: target.sourceSongId,
-           lyrics: lyrics
-         })
-         player.setPlaying(true)
-         message.success('从本地缓存播放')
-         return
-      }
-    } catch (e) {
-       console.warn('主动检测缓存失败:', e)
-    }
-  }
-
-  player.setCurrentSong(target)
-
-  // 3. 在线获取逻辑
-  if (!target.filePath || target.filePath.startsWith('http')) {
-    try {
-      message.loading('正在获取播放链接...')
-
-      const musicInfo = {
-        id: String(neteaseId),
-        name: target.title,
-        singer: target.artist || '未知歌手',
-        albumName: target.album || '未知专辑',
-        pic: target.cover || '',
-        songmid: String(neteaseId),
-        mediaId: String(neteaseId)
-      }
-
-      const lyricPromise = fetchLyricWithRetry(String(neteaseId), source).catch(() => '')
-
-      const { url } = await runSnowdropGetMusicUrl(source, musicInfo, quality)
-      if (!url) {
-        throw new Error('未获取到播放链接')
-      }
-
-      // const cacheKey = ... (上面已定义)
-      let finalUrl = url
-      let cacheFilePath: string | null = null
-
-      if (window.electron && window.electron.ipcRenderer) {
-        try {
-          const cacheResult = (await window.electron.ipcRenderer.invoke(
-            'online-cache:prepare',
-            {
-              dir: settingsStore.local.cacheDir || null,
-              key: cacheKey,
-              url
-            }
-          )) as { usedCache: boolean; filePath: string | null; url: string }
-
-          if (cacheResult.filePath) {
-            cacheFilePath = cacheResult.filePath
-            finalUrl = cacheResult.url || url
-          }
-        } catch (e) {
-          console.error('准备在线播放缓存失败:', e)
-        }
-      }
-
-      const lyrics = await lyricPromise
-
-      // 统一使用 AudioPlayerManager 播放，它会自动处理 cacheFilePath 或 url
-      try {
-        await AudioPlayerManager.play({
-          filePath: cacheFilePath || undefined,
-          url: finalUrl,
-          volume: player.volume
-        })
-      } catch (e) {
-        console.error('播放失败，尝试回退纯URL播放:', e)
-        await AudioPlayerManager.play({
-          url: finalUrl,
-          volume: player.volume
-        })
-      }
-
-      player.setCurrentSong({
-        id: target.id,
-        title: target.title,
-        artist: target.artist,
-        album: target.album,
-        cover: target.cover || '',
-        durationMs: target.durationMs || 0,
-        source: 'netease',
-        sourceSongId: neteaseId ?? undefined,
-        lyrics
-      })
-      player.setPlaying(true)
-      message.success('开始播放')
-    } catch (error: any) {
-      console.error('播放失败:', error)
-      message.error(`播放失败: ${error?.message || '未知错误'}`)
-    }
-  } else {
-    player.setPlaying(true)
-  }
+  // 没有本地文件
+  message.error('找不到本地文件')
 }
 
 const handleReorder = (fromIndex: number, toIndex: number) => {
@@ -528,6 +322,10 @@ onMounted(() => {
   if (playlistStore.playlists.length === 0) {
     playlistStore.loadFromStorage()
   }
+})
+
+onUnmounted(() => {
+  // 清理：无需手动移除，Vue 自动处理
 })
 </script>
 
@@ -682,11 +480,23 @@ onMounted(() => {
   filter: blur(20px) brightness(0.8); /* 增加模糊 */
 }
 
+/* Full 模式下的背景层：全尺寸封面大图作为背景，顶部清晰不模糊 */
+.modern .bg-layer.full {
+  background-size: cover;
+  background-position: center;
+  /* 顶部保持清晰可见，中下部渐隐过渡给倒影模糊层接管 */
+  -webkit-mask-image: linear-gradient(to bottom, black 0%, black 40%, transparent 85%);
+  mask-image: linear-gradient(to bottom, black 0%, black 40%, transparent 85%);
+  opacity: 1;
+  height: 380px;
+  /* 不设置 filter，避免创建层叠上下文破坏 backdrop-filter */
+}
+
 .modern .bg-layer::after {
   content: '';
   position: absolute;
   inset: 0;
-  backdrop-filter: blur(20px) brightness(0.9);
+  backdrop-filter: blur(100px) brightness(0.9);
   /* 调整模糊层的显现速度，让模糊感更早出现，并且渐变更平滑 */
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, transparent 10%, black 60%);
   mask-image: linear-gradient(to bottom, transparent 0%, transparent 10%, black 60%);
@@ -739,6 +549,16 @@ onMounted(() => {
   /* 隐藏倒影，或者让它非常淡，避免干扰 */
   opacity: 0.2;
   filter: blur(60px) brightness(0.6);
+}
+
+/* Full 模式下的倒影层：从中间开始向底部渐进增强模糊，实现渐进模糊效果 */
+.modern .bg-reflection.full {
+  opacity: 0.65;
+  filter: blur(40px) brightness(0.75);
+  height: 380px;
+  /* 从 35% 处开始渐显，覆盖 bg-layer 的渐隐区域 */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 35%, black 100%);
+  mask-image: linear-gradient(to bottom, transparent 35%, black 100%);
 }
 
 .modern .header-section {
@@ -868,6 +688,105 @@ onMounted(() => {
 /* 现代模式下的列表样式微调 */
 .modern :deep(.song-list-container) {
   /* 可以增加一些半透明背景让文字更清晰，或者直接依靠底色 */
+}
+
+/* ================= Collapsed Header（滚动收缩页头模式） ================= */
+/* 页头区域过渡动画 */
+.modern .header-section {
+  transition: min-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              padding 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.modern .cover-wrapper {
+  transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              margin-right 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              border-radius 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.modern .playlist-title {
+  transition: font-size 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              margin-bottom 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.modern .desc-row,
+.modern .actions-row {
+  transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              margin 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.modern .bg-layer,
+.modern .bg-reflection {
+  transition: opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              mask-image 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              -webkit-mask-image 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              height 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 收缩态：页头缩小为 compact bar */
+.playlist-detail.modern.collapsed .header-section {
+  min-height: 60px;
+  padding: 8px 40px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  /* 半透明毛玻璃背景，让模糊层透出 */
+  background: rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+}
+
+[data-theme='light'] .playlist-detail.modern.collapsed .header-section {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.playlist-detail.modern.collapsed .header-content {
+  align-items: center;
+}
+
+/* 收缩态：封面缩小（square 模式有封面，full 模式封面已隐藏） */
+.playlist-detail.modern.collapsed .cover-wrapper:not(.full) {
+  width: 44px;
+  height: 44px;
+  aspect-ratio: 1/1;
+  border-radius: 6px;
+  margin-right: 12px;
+}
+
+/* 收缩态：标题缩小 */
+.playlist-detail.modern.collapsed .playlist-title {
+  font-size: 20px;
+  margin-bottom: 0;
+  text-shadow: none;
+}
+
+/* 收缩态：隐藏描述和操作按钮 */
+.playlist-detail.modern.collapsed .desc-row,
+.playlist-detail.modern.collapsed .actions-row {
+  opacity: 0;
+  max-height: 0;
+  margin: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* 收缩态：背景层仅保留底部模糊区域 */
+.playlist-detail.modern.collapsed .bg-layer.full {
+  /* 顶部完全透明，仅底部保留模糊过渡 */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, transparent 55%, black 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, transparent 55%, black 100%);
+  opacity: 0.5;
+  height: 280px;
+}
+
+/* 收缩态：倒影层覆盖更广，承接模糊背景 */
+.playlist-detail.modern.collapsed .bg-reflection.full {
+  opacity: 0.75;
+  height: 280px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 100%);
 }
 
 /* 适配深色模式 */

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import type { LyricLine as CoreLyricLine, LyricWord as CoreLyricWord } from '@applemusic-like-lyrics/core'
+import { computed, watch, nextTick, ref } from 'vue'
+import type { LyricLine as CoreLyricLine } from '@applemusic-like-lyrics/core'
 import { LyricsView, parseLyrics } from 'suth-lyric-kit'
 import AMLLLyricPlayer from '../AMLL/LyricPlayer.vue'
+import type { LyricPlayerRef } from '../AMLL/LyricPlayer.vue'
 import { parseLyricsToCore } from '../../../utils/lyric/lyricParser'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePlayerStore } from '../../../stores/playerStore'
@@ -48,7 +49,6 @@ const suthLyrics = computed(() => {
   if (props.mode === 'suth') {
     if (typeof props.lyrics === 'string') {
       const parsed = parseLyrics(props.lyrics)
-      // 合并翻译歌词到 suth 模式下
       if (props.translatedLyrics && parsed.lines.length > 0) {
         try {
           const translatedParsed = parseLyrics(props.translatedLyrics)
@@ -91,6 +91,10 @@ const enableBlur = computed(() => settingsStore.playback.lyricsBlurEnabled)
 
 const enableSpring = computed(() => settingsStore.playback.lyricsSpringEnabled)
 
+const hidePassedLines = computed(() => settingsStore.playback.amllHidePassedLines)
+
+const wordFadeWidth = computed(() => settingsStore.playback.amllWordFadeWidth)
+
 const handleLineClick = (event: any) => {
   const rawLine =
     event && event.line && typeof event.line.getLine === 'function'
@@ -115,6 +119,35 @@ const handleLineClick = (event: any) => {
     playerStore.setPlaying(true)
   }
 }
+
+/**
+ * AMLL 播放器实例引用
+ */
+const lyricPlayerRef = ref<LyricPlayerRef>()
+
+/**
+ * 当启用隐藏已播放歌词时，清洗已播放行的翻译和音译
+ * 触发时机：hidePassedLines 切换、歌词数据变更（切歌/切换 AMLL 模式）
+ * 通过直接调用 AMLL 播放器的 setLyricLines 实现
+ */
+watch([hidePassedLines, appleLyrics], ([enabled]) => {
+  if (!enabled) return
+  nextTick(() => {
+    const playerRef = lyricPlayerRef.value?.lyricPlayer
+    if (!playerRef?.value) return
+    const lines = appleLyrics.value
+    if (!lines.length) return
+    const now = currentTimeMs.value
+    const cleaned = lines.map((line, i) => {
+      const endTime = lines[i + 1]?.startTime ?? line.endTime
+      if (endTime <= now) {
+        return { ...line, translatedLyric: '', romanLyric: '' }
+      }
+      return line
+    })
+    playerRef.value.setLyricLines(cleaned)
+  })
+})
 </script>
 
 <template>
@@ -135,9 +168,11 @@ const handleLineClick = (event: any) => {
       :playing="true"
       :enable-blur="enableBlur"
       :enable-spring="enableSpring"
+      :hide-passed-lines="hidePassedLines"
+      :word-fade-width="wordFadeWidth"
       class="am-lyric"
       :style="{
-        '--amll-lp-color': '--player-accent-color'
+        '--amll-lp-color': 'var(--player-accent-color, rgba(255, 255, 255, 0.95))'
       }"
       @line-click="handleLineClick"
     />
@@ -176,10 +211,9 @@ const handleLineClick = (event: any) => {
     top: 0;
     padding-left: var(--amll-lyric-left-padding, 10px);
     padding-right: 80px;
-    div {
-      div[class^='_interludeDots'] {
-        display: flex;
-      }
+    div[class^='_interludeDots'] {
+      display: flex;
+      color: var(--player-accent-color, rgba(255, 255, 255, 0.95));
     }
     @media (max-width: 990px) {
       padding: 0;
@@ -225,39 +259,23 @@ const handleLineClick = (event: any) => {
     }
   }
 
-  /* 对常见的“当前高亮行”类名应用颜色高亮（优先使用播放页主题色） */
   :deep(.am-lyric .current),
   :deep(.am-lyric .is-current),
   :deep(.am-lyric .active),
   :deep(.am-lyric .is-active),
   :deep(.am-lyric .lyric-line.current),
   :deep(.am-lyric .lyric-line.is-current) {
-    /* 直接使用播放页主题色作为高亮颜色，若没有则退回本地变量 */
     color: var(--player-accent-color, var(--amll-lp-color, rgba(255, 255, 255, 0.95)));
-    /* 轻微发光，增强辨识度 */
     text-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
-    /* 告诉浏览器该元素可能会变化，优化渲染 */
     will-change: transform, opacity, color;
   }
 
-  /* 只对主歌词文本（非翻译/音译）启用混合，匹配带有 lang 属性的主元素 */
   :deep(.am-lyric [lang]) {
-    /* 默认保持正常，但在高亮时会被上面的规则覆盖 */
     -webkit-font-smoothing: antialiased;
   }
 
   :deep(.am-lyric div[class*='lyricMainLine'] span) {
     text-align: start;
-  }
-
-  :lang(ja) {
-    font-family: var(--ja-font-family);
-  }
-  :lang(en) {
-    font-family: var(--en-font-family);
-  }
-  :lang(ko) {
-    font-family: var(--ko-font-family);
   }
 }
 
@@ -268,7 +286,6 @@ const handleLineClick = (event: any) => {
   align-items: center;
   gap: 6px;
   justify-content: center;
-  /* 加载中文本颜色，跟随播放页主题或本地变量 */
   color: var(--player-accent-color, var(--amll-lp-color, #efefef));
   font-size: 22px;
 }

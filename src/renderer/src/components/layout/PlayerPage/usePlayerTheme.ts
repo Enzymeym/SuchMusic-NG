@@ -70,7 +70,7 @@ export function usePlayerTheme() {
   const normalizeThemeColor = (hex: string) => {
     let color = hex
     let brightness = getBrightness(color)
-    const target = 0.7
+    const target = 0.9
     if (brightness >= target) return color
     for (let i = 0; i < 3 && brightness < target; i++) {
       const delta = target - brightness

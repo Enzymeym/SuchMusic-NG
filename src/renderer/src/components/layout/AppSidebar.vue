@@ -16,7 +16,10 @@ const activeBgColor = computed(() => {
   let hex = themeVars.value.primaryColor || '#2C8EFD'
   hex = hex.replace('#', '')
   if (hex.length === 3) {
-    hex = hex.split('').map(c => c + c).join('')
+    hex = hex
+      .split('')
+      .map((c) => c + c)
+      .join('')
   }
   const r = parseInt(hex.substring(0, 2), 16)
   const g = parseInt(hex.substring(2, 4), 16)
@@ -28,7 +31,10 @@ const activeBgColorDark = computed(() => {
   let hex = themeVars.value.primaryColor || '#2C8EFD'
   hex = hex.replace('#', '')
   if (hex.length === 3) {
-    hex = hex.split('').map(c => c + c).join('')
+    hex = hex
+      .split('')
+      .map((c) => c + c)
+      .join('')
   }
   const r = parseInt(hex.substring(0, 2), 16)
   const g = parseInt(hex.substring(2, 4), 16)
@@ -51,32 +57,46 @@ const activeKey = ref<string>('discover')
 watch(
   () => route.path,
   (newPath) => {
-    if (newPath === '/') activeKey.value = 'discover'
+    if (newPath === '/') activeKey.value = 'statistics'
     else if (newPath === '/playlist') activeKey.value = 'favorites'
     else if (newPath === '/local') activeKey.value = 'local'
     else if (newPath === '/recent') activeKey.value = 'recent'
+    else if (newPath === '/singer') activeKey.value = 'singer'
+    else if (newPath === '/album') activeKey.value = 'album'
   },
   { immediate: true }
 )
 
 // Handle menu selection
 watch(activeKey, (newKey) => {
-  if (newKey === 'discover') router.push('/')
+  if (newKey === 'statistics') router.push('/')
   else if (newKey === 'favorites') router.push('/playlist')
   else if (newKey === 'local') router.push('/local')
   else if (newKey === 'recent') router.push('/recent')
+  else if (newKey === 'singer') router.push('/singer')
+  else if (newKey === 'album') router.push('/album')
 })
 
 const menuOptions: MenuOption[] = [
   {
-    label: '首页',
-    key: 'discover',
-    icon: renderIcon('mgc_music_2_line')
+    label: '统计',
+    key: 'statistics',
+    icon: renderIcon('mgc_chart_bar_line')
   },
   {
     label: '歌单',
     key: 'favorites',
     icon: renderIcon('mgc_star_line')
+  },
+  {
+    label: '歌手',
+    key: 'singer',
+    icon: renderIcon('mgc_user_3_line')
+  },
+  {
+    label: '专辑',
+    key: 'album',
+    icon: renderIcon('mgc_album_line')
   },
   {
     label: '本地',
@@ -89,7 +109,6 @@ const menuOptions: MenuOption[] = [
     icon: renderIcon('mgc_history_line')
   }
 ]
-
 </script>
 
 <template>
@@ -101,9 +120,7 @@ const menuOptions: MenuOption[] = [
           <img src="../../assets/icon.png" alt="Logo" class="logo-img" />
           <span class="logo-text">
             Such
-            <n-tag type="info" size="small" round>
-              Next Gen
-            </n-tag>
+            <n-tag type="info" size="small" round> Next Gen </n-tag>
           </span>
         </div>
 
@@ -117,7 +134,7 @@ const menuOptions: MenuOption[] = [
           <i class="mgc_left_line"></i>
         </div>
       </div>
-      
+
       <div v-else class="collapsed-menu" key="collapsed">
         <!-- Collapsed Capsule Tab -->
         <div class="capsule-wrapper">
@@ -129,7 +146,7 @@ const menuOptions: MenuOption[] = [
               </div>
             </transition>
           </div>
-          
+
           <!-- Vertical Line Indicator -->
           <div class="collapse-indicator"></div>
 
@@ -137,14 +154,14 @@ const menuOptions: MenuOption[] = [
             <div class="capsule-tab">
               <!-- Expand Button -->
               <div class="capsule-item" @click="toggleCollapse">
-                <i class="mgc_menu_line" style="font-size: 20px;"></i>
+                <i class="mgc_menu_line" style="font-size: 20px"></i>
               </div>
               <div class="capsule-divider"></div>
               <!-- Menu Items -->
               <n-tooltip v-for="item in menuOptions" :key="item.key" placement="right">
                 <template #trigger>
-                  <div 
-                    class="capsule-item" 
+                  <div
+                    class="capsule-item"
                     :class="{ active: activeKey === item.key }"
                     @click="activeKey = item.key as string"
                   >
@@ -343,7 +360,10 @@ html[data-theme='dark'] .float-collapse-btn {
   background-color: rgba(0, 0, 0, 0.2); /* 加深浅色模式下的灰色 */
   border-radius: 0 4px 4px 0;
   opacity: 0.8;
-  transition: opacity 0.3s ease, transform 0.3s ease, background-color 0.3s ease;
+  transition:
+    opacity 0.3s ease,
+    transform 0.3s ease,
+    background-color 0.3s ease;
   pointer-events: none;
   z-index: 999;
 }
@@ -374,7 +394,9 @@ html[data-theme='dark'] .collapse-indicator {
   pointer-events: auto;
   /* 隐藏在左侧，等待悬停时出现 */
   transform: translateY(-40px) translateX(-60px);
-  transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.3s ease;
+  transition:
+    transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1),
+    opacity 0.3s ease;
   opacity: 0;
 }
 

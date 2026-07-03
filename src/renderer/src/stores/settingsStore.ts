@@ -7,14 +7,12 @@ import { usePlayerStore } from './playerStore'
 import { extractImageColors } from '../utils/imageColors'
 
 export interface GeneralSettings {
-  onlineServices: boolean
   closeAction: 'minimize' | 'quit'
   remindOnClose: boolean
   taskbarProgress: boolean
   orpheusProtocol: boolean
   autoCheckUpdate: boolean
   updateChannel: 'stable' | 'beta'
-  searchResultOrder: string[]
 }
 
 export interface AppearanceSettings {
@@ -37,6 +35,12 @@ export interface PlaybackSettings {
   eqEnabled: boolean
   eqGains: number[]
   eqPreset: string
+  /** 音频输出模式: 'webaudio' | 'wasapi-shared' | 'wasapi-exclusive' */
+  audioOutputMode: 'webaudio' | 'wasapi-shared' | 'wasapi-exclusive'
+  /** WASAPI 输出设备 ID（空字符串表示默认设备） */
+  audioOutputDeviceId: string
+  /** WASAPI 输出设备名称（用于 UI 显示） */
+  audioOutputDeviceName: string
   lyricsAutoSize: boolean
   lyricsFontSize: number
   lyricsAreaRatio: number
@@ -44,6 +48,22 @@ export interface PlaybackSettings {
   lyricsBlurEnabled: boolean
   lyricsSpringEnabled: boolean
   playerBackgroundStyle: 'classic' | 'amll'
+  /** 是否显示翻译歌词 */
+  lyricsShowTranslation: boolean
+  /** 是否显示音译歌词（罗马音等） */
+  lyricsShowTransliteration: boolean
+  /** 翻译/音译歌词字号（仅在自适应大小开启时生效） */
+  lyricsTranslationSize: number
+  /** 是否排除 TTML 格式歌词 */
+  lyricsExcludeTTML: boolean
+  /** 是否排除本地音乐歌词 */
+  lyricsExcludeLocal: boolean
+  /** 元数据关键词过滤（逗号分隔，匹配冒号前内容） */
+  lyricsExcludeKeywords: string
+  /** 隐藏已播放歌词行（AMLL） */
+  amllHidePassedLines: boolean
+  /** 逐字歌词渐变宽度（AMLL） */
+  amllWordFadeWidth: number
   desktopLyricsFontSize: number
   desktopLyricsColor: string
   desktopLyricsActiveColor: string
@@ -56,6 +76,14 @@ export interface PlaybackSettings {
   preloadQualityLevel: string // 预加载质量级别
   lyricsPriority: string[] // 歌词格式优先级
   ttmlMirrorUrl: string // TTML 歌词镜像站地址
+  lyricsOffset: number // 歌词偏移（秒，正数=歌词延后，负数=歌词提前）
+  playbackRate: number // 播放速度倍率（0.25-4.0）
+  // 音频可视化设置
+  visualizerEnabled: boolean // 是否启用可视化
+  visualizerStyle: string // 可视化风格（bars/circular/wave/particles/flame）
+  visualizerSize: number // 显示大小（0.5-2.0）
+  visualizerColorTheme: string // 颜色主题（default/warm/cool/neon/grayscale/follow-cover）
+  visualizerIntensity: number // 显示强度（0.3-1.5）
 }
 
 export interface LocalSettings {
@@ -64,32 +92,15 @@ export interface LocalSettings {
   downloadDir?: string
 }
 
-export interface SourceSettings {
-  preferredPlatform: string
-  preferredQuality: string
-  /** 各音源独立偏好设置，key 为音源ID（如 kw/kg/tx/wy/mg） */
-  perSourcePreferences: Record<string, SourcePreference>
-}
-
-/** 单个音源的独立偏好设置 */
-export interface SourcePreference {
-  /** 首选平台，为空表示跟随全局 */
-  platform?: string
-  /** 首选音质，为空表示跟随全局 */
-  quality?: string
-}
-
 export const useSettingsStore = defineStore('settings', () => {
   // --- State ---
   const general = ref<GeneralSettings>({
-    onlineServices: true,
     closeAction: 'minimize',
     remindOnClose: true,
     taskbarProgress: true,
     orpheusProtocol: true,
     autoCheckUpdate: true,
-    updateChannel: 'stable',
-    searchResultOrder: ['tx', 'kg', 'wy', 'kw', 'mg']
+    updateChannel: 'stable'
   })
 
   const appearance = ref<AppearanceSettings>({
@@ -112,6 +123,9 @@ export const useSettingsStore = defineStore('settings', () => {
     eqEnabled: false,
     eqGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     eqPreset: 'flat',
+    audioOutputMode: 'webaudio',
+    audioOutputDeviceId: '',
+    audioOutputDeviceName: '',
     // 歌词自适应大小开关
     lyricsAutoSize: true,
     // 歌词基础字号（px）
@@ -125,6 +139,17 @@ export const useSettingsStore = defineStore('settings', () => {
     // Apple 风格歌词弹簧效果开关
     lyricsSpringEnabled: true,
     playerBackgroundStyle: 'classic',
+    // 翻译与音译
+    lyricsShowTranslation: true,
+    lyricsShowTransliteration: true,
+    lyricsTranslationSize: 16,
+    // 歌词排除过滤
+    lyricsExcludeTTML: false,
+    lyricsExcludeLocal: false,
+    lyricsExcludeKeywords: '',
+    // AMLL 专属设置
+    amllHidePassedLines: false,
+    amllWordFadeWidth: 0.5,
     // 桌面歌词设置
     desktopLyricsFontSize: 24,
     desktopLyricsColor: '#ffffff',
@@ -140,19 +165,23 @@ export const useSettingsStore = defineStore('settings', () => {
     // 歌词格式优先级
     lyricsPriority: ['ttml', 'crlyric', 'lyric'],
     // TTML 歌词镜像站地址
-    ttmlMirrorUrl: 'https://amlldb.bikonoo.com/ncm-lyrics'
+    ttmlMirrorUrl: 'https://amlldb.bikonoo.com/ncm-lyrics',
+    // 歌词偏移（秒）
+    lyricsOffset: 0,
+    // 播放速度倍率
+    playbackRate: 1.0,
+    // 音频可视化
+    visualizerEnabled: true,
+    visualizerStyle: 'bars',
+    visualizerSize: 1.0,
+    visualizerColorTheme: 'follow-cover',
+    visualizerIntensity: 0.8
   })
 
   const local = ref<LocalSettings>({
     scanDirs: [],
     cacheDir: '',
     downloadDir: ''
-  })
-
-  const source = ref<SourceSettings>({
-    preferredPlatform: 'all',
-    preferredQuality: '128k',
-    perSourcePreferences: {}
   })
 
   // 获取系统主题
@@ -236,6 +265,60 @@ export const useSettingsStore = defineStore('settings', () => {
   // 记录最后一次提取的主色，防止切歌太快导致的异步覆盖
   let lastCoverUrl = ''
 
+  /**
+   * 将颜色与黑色混合，调暗颜色
+   * @param hex 十六进制颜色字符串
+   * @param weight 混合权重（0-1），值越大颜色越暗
+   * @returns 混合后的颜色
+   */
+  const mixWithBlack = (hex: string, weight: number) => {
+    const s = hex.trim().replace('#', '')
+    const r = parseInt(s.slice(0, 2), 16)
+    const g = parseInt(s.slice(2, 4), 16)
+    const b = parseInt(s.slice(4, 6), 16)
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return hex
+    const w = Math.min(Math.max(weight, 0), 1)
+    const nr = Math.round(r * (1 - w))
+    const ng = Math.round(g * (1 - w))
+    const nb = Math.round(b * (1 - w))
+    const toHex = (v: number) => v.toString(16).padStart(2, '0')
+    return `#${toHex(nr)}${toHex(ng)}${toHex(nb)}`
+  }
+
+  /**
+   * 将颜色与白色混合，提亮颜色
+   * @param hex 十六进制颜色字符串
+   * @param weight 混合权重（0-1），值越大颜色越亮
+   * @returns 混合后的颜色
+   */
+  const mixWithWhite = (hex: string, weight: number) => {
+    const s = hex.trim().replace('#', '')
+    const r = parseInt(s.slice(0, 2), 16)
+    const g = parseInt(s.slice(2, 4), 16)
+    const b = parseInt(s.slice(4, 6), 16)
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return hex
+    const w = Math.min(Math.max(weight, 0), 1)
+    const nr = Math.round(r + (255 - r) * w)
+    const ng = Math.round(g + (255 - g) * w)
+    const nb = Math.round(b + (255 - b) * w)
+    const toHex = (v: number) => v.toString(16).padStart(2, '0')
+    return `#${toHex(nr)}${toHex(ng)}${toHex(nb)}`
+  }
+
+  /**
+   * 计算颜色亮度（0-1），使用感知亮度公式
+   * @param hex 十六进制颜色字符串
+   * @returns 亮度值（0-1），越大越亮
+   */
+  const getBrightness = (hex: string) => {
+    const s = hex.trim().replace('#', '')
+    const r = parseInt(s.slice(0, 2), 16)
+    const g = parseInt(s.slice(2, 4), 16)
+    const b = parseInt(s.slice(4, 6), 16)
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return 0.5
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+  }
+
   watch(
     () => {
       const ps = getPlayerStore()
@@ -254,7 +337,18 @@ export const useSettingsStore = defineStore('settings', () => {
             const colors = await extractImageColors(cover, { isLightMode })
             // 确保当前封面没有发生变化，再应用颜色
             if (lastCoverUrl === cover) {
-              setPrimaryColor(colors.main)
+              // 浅色模式下压暗颜色，深色模式下提亮暗色
+              if (isLightMode) {
+                setPrimaryColor(mixWithBlack(colors.main, 0.3))
+              } else {
+                // 深色模式：较亮的颜色保持不变，较暗的颜色提亮80%
+                const brightness = getBrightness(colors.main)
+                if (brightness < 0.5) {
+                  setPrimaryColor(mixWithWhite(colors.main, 0.8))
+                } else {
+                  setPrimaryColor(colors.main)
+                }
+              }
             }
           } catch (e) {
             console.error('Failed to extract theme color from cover', e)
@@ -284,7 +378,6 @@ export const useSettingsStore = defineStore('settings', () => {
         if (data.appearance) appearance.value = { ...appearance.value, ...data.appearance }
         if (data.playback) playback.value = { ...playback.value, ...data.playback }
         if (data.local) local.value = { ...local.value, ...data.local }
-        if (data.source) source.value = { ...source.value, ...data.source }
       } catch (e) {
         console.error('Failed to load settings', e)
       }
@@ -296,8 +389,7 @@ export const useSettingsStore = defineStore('settings', () => {
       general: general.value,
       appearance: appearance.value,
       playback: playback.value,
-      local: local.value,
-      source: source.value
+      local: local.value
     }))
   }
 
@@ -318,11 +410,6 @@ export const useSettingsStore = defineStore('settings', () => {
     debouncedSave()
   }, { deep: true })
 
-  // 对 source 启用深度监听，确保 perSourcePreferences 的嵌套修改也能触发保存
-  watch(source, () => {
-    debouncedSave()
-  }, { deep: true })
-
   // Initialize
   loadSettings()
 
@@ -337,30 +424,6 @@ export const useSettingsStore = defineStore('settings', () => {
     })
   }
 
-  /**
-   * 获取指定音源的有效平台设置
-   * 优先使用音源独立设置，否则回退到全局设置
-   * @param sourceId 音源ID（如 kw、kg、tx等）
-   * @returns 有效的平台偏好值
-   */
-  const getEffectivePlatform = (sourceId: string): string => {
-    const pref = source.value.perSourcePreferences[sourceId]
-    if (pref?.platform) return pref.platform
-    return source.value.preferredPlatform
-  }
-
-  /**
-   * 获取指定音源的有效音质设置
-   * 优先使用音源独立设置，否则回退到全局设置
-   * @param sourceId 音源ID（如 kw、kg、tx等）
-   * @returns 有效的音质偏好值
-   */
-  const getEffectiveQuality = (sourceId: string): string => {
-    const pref = source.value.perSourcePreferences[sourceId]
-    if (pref?.quality) return pref.quality
-    return source.value.preferredQuality
-  }
-
   const updateAppearance = (settings: Partial<AppearanceSettings>) => {
     appearance.value = { ...appearance.value, ...settings }
   }
@@ -370,10 +433,7 @@ export const useSettingsStore = defineStore('settings', () => {
     appearance,
     playback,
     local,
-    source,
     updateAppearance,
-    getEffectivePlatform,
-    getEffectiveQuality,
     saveSettings
   }
 })

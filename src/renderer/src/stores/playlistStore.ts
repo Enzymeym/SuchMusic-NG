@@ -24,6 +24,8 @@ export interface UserPlaylist {
   coverStyle?: 'square' | 'landscape' | 'wide' | 'adaptive' | 'full'
   titleFontWeight?: 'light' | 'regular' | 'bold' | 'heavy'
   titleFontFamily?: 'default' | 'serif'
+  /** 封面是否跟随第一首歌曲封面，为 true 时忽略 cover 字段自动使用第一首歌曲封面 */
+  coverFollowsFirstTrack?: boolean
 }
 
 interface PlaylistState {
@@ -57,7 +59,7 @@ export const usePlaylistStore = defineStore('playlist', {
         const favorite: UserPlaylist = {
           id: 'favorite',
           name: '我喜爱的音乐',
-          cover: undefined, 
+          cover: undefined,
           tracks: [],
           createdAt: now,
           updatedAt: now,
@@ -157,9 +159,11 @@ export const usePlaylistStore = defineStore('playlist', {
         return false
       } else {
         fav.tracks.unshift(track)
-        // 更新封面
-        if (!fav.cover && track.cover) {
-          fav.cover = track.cover
+        // 更新封面：如果没有自定义封面，或开启了跟随第一首歌曲封面，则自动更新
+        if (fav.coverFollowsFirstTrack || !fav.cover) {
+          if (track.cover) {
+            fav.cover = track.cover
+          }
         }
         this.saveToStorage()
         return true
@@ -168,7 +172,7 @@ export const usePlaylistStore = defineStore('playlist', {
     isFavorite(track: PlaylistTrack): boolean {
       const fav = this.playlists.find((p) => p.id === 'favorite')
       if (!fav) return false
-      
+
       return fav.tracks.some((t) => {
         if (t.id && track.id && String(t.id) === String(track.id)) {
           return true

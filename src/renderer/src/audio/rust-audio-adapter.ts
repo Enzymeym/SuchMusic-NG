@@ -9,7 +9,9 @@
  */
 
 import { usePlayerStore } from '../stores/playerStore'
-import type { DecodedAudio } from '../apis/audio-decoder.types'
+import { VirtualBassProcessor, type VirtualBassParams } from './virtual-bass'
+import { SoftClipper, type SoftClipperParams } from './soft-clipper'
+import { audioVisualizer } from './audio-visualizer'
 
 // 获取 Rust 音频引擎 API
 function getRustAudioAPI() {
@@ -25,19 +27,19 @@ export class RustAudioAdapter {
   private audioWorkletNode: AudioWorkletNode | null = null
   private positionTimer: number | null = null
   private volume: number = 1
+  private playbackRate: number = 1.0
   private onEndedCallback: (() => void) | null = null
   
   // 流式播放状态
   private isStreaming: boolean = false
   private streamInterval: number | null = null
-  private audioBufferQueue: Float32Array[] = []
-  private sampleRate: number = 44100
   private channels: number = 2
 
   // Web Audio API 播放状态（用于位置跟踪）
   private webAudioSource: AudioBufferSourceNode | null = null
   private webAudioStartTime: number = 0
   private webAudioPauseTime: number = 0
+  private webAudioSourceStarted: boolean = false // 标记 source 是否已调用 start()
   private isWebAudioMode: boolean = false
   private currentAudioBuffer: AudioBuffer | null = null  // 当前播放的音频缓冲区
 
@@ -46,6 +48,41 @@ export class RustAudioAdapter {
   private compressorNode: DynamicsCompressorNode | null = null
   private eqEnabled: boolean = false
   private compressorEnabled: boolean = false
+
+  // EQ 频段目标增益存储（用于启用/禁用时的增益恢复）
+  private eqBandTargetGains: number[] = []
+
+  // 虚拟低频处理器
+  private virtualBassProcessor: VirtualBassProcessor | null = null
+  private virtualBassParams: VirtualBassParams = {
+    enabled: false,
+    intensity: 50,
+    crossoverFreq: 120
+  }
+
+  // 软限幅爆音抑制器
+  private softClipper: SoftClipper | null = null
+  private softClipperParams: SoftClipperParams = {
+    enabled: false,
+    threshold: 2.0,
+    makeupGain: 0
+  }
+
+  // 等响度补偿滤波器
+  private loudnessBassFilter: BiquadFilterNode | null = null
+  private loudnessTrebleFilter: BiquadFilterNode | null = null
+  private loudnessEnabled: boolean = false
+  private loudnessCompensation: number = 1.0
+  private loudnessDirection: 'low' | 'high' | 'both' = 'both'
+
+  // 音频处理链是否已初始化
+  private processingChainInitialized: boolean = false
+
+  // 处理链输入节点（用于连接音频源到处理链）
+  private chainInputNode: GainNode | null = null
+
+  // 存储压缩器目标阈值（用于启用/禁用恢复）
+  private savedCompressorThreshold: number = -24
 
   // 主动交叉过渡调度状态
   private pendingTransitionBuffer: AudioBuffer | null = null
@@ -72,15 +109,113 @@ export class RustAudioAdapter {
 
       this.audioContext = context
       this.gainNode = gain
-      this.sampleRate = context.sampleRate
 
       // 设置初始音量
       if (this.gainNode) {
         this.gainNode.gain.value = this.volume
       }
+
+      // 初始化音频处理链
+      this.initAudioProcessingChain()
     } catch (error) {
       console.error('[RustAudioAdapter] Failed to create AudioContext:', error)
     }
+  }
+
+  /**
+   * 初始化音频处理链
+   * 一次性预建所有音效节点并建立固定连接，后续只需直接修改 AudioParam 即可实时生效。
+   * 音频链路（串行）：
+   * chainInput → EQ[0..9] → compressor → postProcGain →
+   *   virtualBass → vbOutGain → softClipper → gainNode → destination
+   */
+  private initAudioProcessingChain(): void {
+    if (this.processingChainInitialized || !this.audioContext) return
+
+    const ctx = this.audioContext
+
+    // 创建处理链输入节点
+    this.chainInputNode = ctx.createGain()
+    this.chainInputNode.gain.value = 1
+
+    // 创建 10 段 EQ 滤波器并串行连接
+    const eqFrequencies = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+    this.eqFilters = []
+    this.eqBandTargetGains = new Array(10).fill(0)
+
+    let lastNode: AudioNode = this.chainInputNode
+    for (let i = 0; i < 10; i++) {
+      const filter = ctx.createBiquadFilter()
+      filter.type = 'peaking'
+      filter.frequency.value = eqFrequencies[i]
+      filter.gain.value = 0
+      filter.Q.value = 1.0
+      lastNode.connect(filter)
+      lastNode = filter
+      this.eqFilters.push(filter)
+    }
+
+    // 创建压缩器节点并连接到 EQ 链末端
+    this.compressorNode = ctx.createDynamicsCompressor()
+    this.compressorNode.threshold.value = -24
+    this.compressorNode.ratio.value = 4
+    this.compressorNode.attack.value = 0.01
+    this.compressorNode.release.value = 0.1
+    this.compressorNode.knee.value = 6
+    lastNode.connect(this.compressorNode)
+    lastNode = this.compressorNode
+
+    // 等响度补偿滤波器组（低架 + 高架），放在压缩器之后
+    // 低架滤波器：补偿低频（100Hz），高架滤波器：补偿高频（10kHz）
+    this.loudnessBassFilter = ctx.createBiquadFilter()
+    this.loudnessBassFilter.type = 'lowshelf'
+    this.loudnessBassFilter.frequency.value = 100
+    this.loudnessBassFilter.gain.value = 0
+    this.loudnessBassFilter.Q.value = 0.7
+
+    this.loudnessTrebleFilter = ctx.createBiquadFilter()
+    this.loudnessTrebleFilter.type = 'highshelf'
+    this.loudnessTrebleFilter.frequency.value = 10000
+    this.loudnessTrebleFilter.gain.value = 0
+    this.loudnessTrebleFilter.Q.value = 0.7
+
+    lastNode.connect(this.loudnessBassFilter)
+    this.loudnessBassFilter.connect(this.loudnessTrebleFilter)
+    lastNode = this.loudnessTrebleFilter
+
+    // 后处理级联节点：postProc → [virtualBass] → vbOut → [softClipper] → gainNode
+    const postProcGain = ctx.createGain()
+    postProcGain.gain.value = 1
+    lastNode.connect(postProcGain)
+
+    const vbOutGain = ctx.createGain()
+    vbOutGain.gain.value = 1
+
+    // 虚拟低频处理器：postProcGain → virtualBass 内部处理 → vbOutGain
+    this.virtualBassProcessor = new VirtualBassProcessor()
+    this.virtualBassProcessor.connect(postProcGain, vbOutGain)
+
+    // 软限幅器：vbOutGain → softClipper 内部处理 → gainNode
+    this.softClipper = new SoftClipper()
+    this.softClipper.connect(vbOutGain, this.gainNode!)
+
+    // 在软限幅器和主音量之间插入音频可视化分析器
+    if (!audioVisualizer.isInitialized()) {
+      const analyserNode = ctx.createAnalyser()
+      analyserNode.fftSize = 256
+      analyserNode.smoothingTimeConstant = 0.8
+      analyserNode.connect(this.gainNode!)
+      // 将软限幅器的输出重新路由到分析器节点
+      this.softClipper.rerouteOutput(analyserNode)
+      // 通过内部方法直接设置 analyserNode（绕过 initialize 的前置条件检查）
+      ;(audioVisualizer as any).analyserNode = analyserNode
+      ;(audioVisualizer as any).frequencyData = new Uint8Array(analyserNode.frequencyBinCount)
+      ;(audioVisualizer as any).timeDomainData = new Uint8Array(analyserNode.fftSize)
+      ;(audioVisualizer as any).initialized = true
+    }
+
+    this.processingChainInitialized = true
+    console.log('[RustAudioAdapter] 音频处理链初始化完成')
   }
 
   // 设置 AudioWorklet
@@ -289,7 +424,8 @@ export class RustAudioAdapter {
       }
 
       // 检查是否播放完成（没有待过渡时才触发结束回调）
-      if (positionMs >= durationMs - 100) {
+      // 注意：durationMs 可能为 0（时长尚未加载），此时不应触发结束回调
+      if (durationMs > 0 && positionMs >= durationMs - 100) {
         this.triggerEndedCallback();
       }
     }, 100);
@@ -323,6 +459,7 @@ export class RustAudioAdapter {
     this.isWebAudioMode = false
     this.webAudioStartTime = 0
     this.webAudioPauseTime = 0
+    this.webAudioSourceStarted = false
     this.currentAudioBuffer = null
   }
 
@@ -383,7 +520,11 @@ export class RustAudioAdapter {
     }
   }
 
-  // 恢复播放
+  /**
+   * 恢复播放
+   * 如果 source 尚未启动（load-only 模式），则先启动 source 再开始位置定时器
+   * @returns 是否成功恢复播放
+   */
   public async play(): Promise<boolean> {
     this.ensureContext()
 
@@ -393,6 +534,27 @@ export class RustAudioAdapter {
 
     // 处理 Web Audio 模式
     if (this.isWebAudioMode) {
+      // 如果 source 尚未启动（load-only 模式导致），则启动播放
+      if (!this.webAudioSourceStarted && this.webAudioSource) {
+        try {
+          this.webAudioSource.start(0)
+          this.webAudioSource.playbackRate.value = this.playbackRate
+          this.webAudioSourceStarted = true
+          this.isStreaming = true
+
+          // 设置播放结束回调
+          this.webAudioSource.onended = () => {
+            this.triggerEndedCallback()
+          }
+
+          // 重置启动时间为当前时间，确保 positionMs 从 0 开始计算
+          this.webAudioStartTime = this.audioContext!.currentTime
+          this.webAudioPauseTime = 0
+        } catch (e) {
+          // source 可能已经被外部启动，忽略错误
+          console.warn('[RustAudioAdapter] 启动 source 失败:', e)
+        }
+      }
       // 计算暂停时长并调整启动时间
       if (this.webAudioPauseTime > 0 && this.webAudioStartTime > 0) {
         const pauseDuration = this.audioContext!.currentTime - this.webAudioPauseTime
@@ -444,8 +606,12 @@ export class RustAudioAdapter {
     }
   }
 
-  // 跳转到指定位置
-  public seek(positionMs: number) {
+  /**
+   * 跳转到指定位置
+   * @param positionMs 目标位置（毫秒）
+   * @param startPlaying 是否启动播放，默认为 true；设为 false 则仅定位但不播放
+   */
+  public seek(positionMs: number, startPlaying: boolean = true) {
     const p = usePlayerStore()
 
     if (this.isWebAudioMode) {
@@ -472,27 +638,37 @@ export class RustAudioAdapter {
         // 连接音效处理链
         this.connectWebAudioEffects(source)
 
-        // 从新位置开始播放
+        // 计算目标偏移秒数
         const offsetSec = Math.max(0, Math.min(positionMs / 1000, this.currentAudioBuffer.duration))
-        source.start(0, offsetSec)
 
-        // 更新源节点和启动时间
+        // 更新源节点和启动时间（无论是否播放，都先设置好位置信息）
         this.webAudioSource = source
-        this.webAudioStartTime = this.audioContext.currentTime - offsetSec
         this.webAudioPauseTime = 0
 
-        // 监听播放结束
-        source.onended = () => {
-          this.triggerEndedCallback()
-        }
+        if (startPlaying) {
+          // 从新位置开始播放
+          source.start(0, offsetSec)
+          source.playbackRate.value = this.playbackRate
+          this.webAudioSourceStarted = true
+          this.webAudioStartTime = this.audioContext.currentTime - offsetSec
 
-        // 重新启动位置更新定时器
-        this.startPositionTimer()
+          // 监听播放结束
+          source.onended = () => {
+            this.triggerEndedCallback()
+          }
+
+          // 重新启动位置更新定时器
+          this.startPositionTimer()
+        } else {
+          // 仅定位不播放：保存启动时间偏移，等待 play() 调用时真正启动
+          this.webAudioSourceStarted = false
+          this.webAudioStartTime = this.audioContext.currentTime - offsetSec
+        }
 
         // 更新位置
         const actualPositionMs = offsetSec * 1000
         p.setPosition(actualPositionMs)
-        console.log('[RustAudioAdapter] Web Audio 跳转到:', actualPositionMs, 'ms')
+        console.log('[RustAudioAdapter] Web Audio 跳转到:', actualPositionMs, 'ms', startPlaying ? '(播放)' : '(仅定位)')
       }
       return
     }
@@ -532,98 +708,26 @@ export class RustAudioAdapter {
 
   /**
    * 交叉渐入渐出过渡到新的音频缓冲区
-   * 创建并行的音频图，对旧音频淡出同时对新音频淡入
+   * 使用预构建的处理链，实现简洁高效的过渡
    * @param audioBuffer 新的音频缓冲区
    * @param durationMs 过渡时长（毫秒）
    */
   public async crossfadeToBuffer(audioBuffer: AudioBuffer, durationMs: number): Promise<void> {
     this.ensureContext()
-    if (!this.audioContext) return
+    if (!this.audioContext || !this.chainInputNode || !this.gainNode) return
 
     const effectiveDuration = Math.max(durationMs, 100)
 
     // 停止位置更新（过渡完成后再重新启动）
     this.stopProgressUpdates()
 
-    // 保存旧音频状态引用
+    // 保存旧源引用
     const oldSource = this.webAudioSource
-    const oldGainNode = this.gainNode
-    const oldEqFilters = [...this.eqFilters]
-    const oldCompressor = this.compressorNode
 
-    // 创建新的音量控制节点（新音频独享）
-    const newGainNode = this.audioContext.createGain()
-    newGainNode.gain.value = 0
-    newGainNode.connect(this.audioContext.destination)
+    // 清理待过渡状态
+    this.clearPendingTransition()
 
-    // 创建新的音频源节点
-    const newSource = this.audioContext.createBufferSource()
-    newSource.buffer = audioBuffer
-
-    // 为新音频源创建独立的音效处理链（复制当前音效参数）
-    const newEqFilters: BiquadFilterNode[] = []
-    let lastNode: AudioNode = newSource
-
-    if (this.eqEnabled && this.eqFilters.length > 0) {
-      for (const existingFilter of this.eqFilters) {
-        const newFilter = this.audioContext.createBiquadFilter()
-        newFilter.type = existingFilter.type
-        newFilter.frequency.value = existingFilter.frequency.value
-        newFilter.gain.value = existingFilter.gain.value
-        newFilter.Q.value = existingFilter.Q.value
-        lastNode.connect(newFilter)
-        lastNode = newFilter
-        newEqFilters.push(newFilter)
-      }
-    }
-
-    let newCompressorNode: DynamicsCompressorNode | null = null
-    if (this.compressorEnabled && this.compressorNode) {
-      newCompressorNode = this.audioContext.createDynamicsCompressor()
-      newCompressorNode.threshold.value = this.compressorNode.threshold.value
-      newCompressorNode.ratio.value = this.compressorNode.ratio.value
-      newCompressorNode.attack.value = this.compressorNode.attack.value
-      newCompressorNode.release.value = this.compressorNode.release.value
-      newCompressorNode.knee.value = this.compressorNode.knee.value
-      lastNode.connect(newCompressorNode)
-      lastNode = newCompressorNode
-    }
-
-    // 新音频链连接到新的增益节点
-    lastNode.connect(newGainNode)
-
-    // 启动新音频源的播放（音量从 0 开始）
-    const now = this.audioContext.currentTime
-    newSource.start(now)
-
-    // 保存当前音频缓冲区引用
-    this.currentAudioBuffer = audioBuffer
-
-    // 停止 Rust 引擎的音频流（如果处于流式播放模式）
-    this.stopAudioStream()
-    const api = getRustAudioAPI()
-    if (api && typeof api.stop === 'function') {
-      api.stop().catch((e: any) => console.warn('[RustAudioAdapter] 停止 Rust 引擎失败:', e))
-    }
-
-    // 执行交叉淡入淡出
-    const durationSec = effectiveDuration / 1000
-
-    // 淡出旧的增益节点
-    if (oldGainNode && oldGainNode.gain.value > 0) {
-      oldGainNode.gain.cancelScheduledValues(now)
-      oldGainNode.gain.setValueAtTime(oldGainNode.gain.value, now)
-      oldGainNode.gain.linearRampToValueAtTime(0, now + durationSec)
-    }
-
-    // 淡入新的增益节点
-    newGainNode.gain.setValueAtTime(0, now)
-    newGainNode.gain.linearRampToValueAtTime(this.volume, now + durationSec)
-
-    // 等待过渡完成
-    await new Promise((resolve) => setTimeout(resolve, effectiveDuration))
-
-    // 清理旧的音频图
+    // 停止旧音频源（先清除 onended 回调防止异步触发）
     if (oldSource) {
       oldSource.onended = null
       try {
@@ -634,38 +738,44 @@ export class RustAudioAdapter {
       oldSource.disconnect()
     }
 
-    oldEqFilters.forEach((f) => {
-      try {
-        f.disconnect()
-      } catch (e) {
-        // 忽略断开错误
-      }
-    })
-
-    if (oldCompressor) {
-      try {
-        oldCompressor.disconnect()
-      } catch (e) {
-        // 忽略断开错误
-      }
+    // 停止 Rust 引擎的音频流
+    this.stopAudioStream()
+    const api = getRustAudioAPI()
+    if (api && typeof api.stop === 'function') {
+      api.stop().catch((e: any) => console.warn('[RustAudioAdapter] 停止 Rust 引擎失败:', e))
     }
 
-    if (oldGainNode) {
-      try {
-        oldGainNode.disconnect()
-      } catch (e) {
-        // 忽略断开错误
-      }
-    }
+    // 保存当前音频缓冲区
+    this.currentAudioBuffer = audioBuffer
 
-    // 将新音频图设为主音频图
+    // 创建新的音频源节点并连接到预构建处理链
+    const newSource = this.audioContext.createBufferSource()
+    newSource.buffer = audioBuffer
+    newSource.connect(this.chainInputNode)
+    newSource.playbackRate.value = this.playbackRate
+
+    // 执行淡入淡出
+    const now = this.audioContext.currentTime
+    const durationSec = effectiveDuration / 1000
+
+    // 淡出增益节点
+    this.gainNode.gain.cancelScheduledValues(now)
+    this.gainNode.gain.setValueAtTime(this.volume, now)
+    this.gainNode.gain.linearRampToValueAtTime(0, now + durationSec * 0.5)
+
+    // 淡入恢复
+    this.gainNode.gain.setValueAtTime(0, now + durationSec * 0.5)
+    this.gainNode.gain.linearRampToValueAtTime(this.volume, now + durationSec)
+
+    // 启动新音频源
+    newSource.start(now + durationSec * 0.5)
+    this.webAudioSourceStarted = true
+
+    // 更新状态
     this.webAudioSource = newSource
-    this.gainNode = newGainNode
-    this.eqFilters = newEqFilters
-    this.compressorNode = newCompressorNode
     this.isWebAudioMode = true
     this.isStreaming = true
-    this.webAudioStartTime = now
+    this.webAudioStartTime = now + durationSec * 0.5
     this.webAudioPauseTime = 0
 
     // 设置播放结束回调
@@ -677,8 +787,11 @@ export class RustAudioAdapter {
     const p = usePlayerStore()
     p.setDuration(audioBuffer.duration * 1000)
 
-    // 清除过渡状态标记，恢复正常切歌逻辑
+    // 清除过渡状态标记
     p.setTransitioning(false)
+
+    // 等待过渡完成
+    await new Promise((resolve) => setTimeout(resolve, effectiveDuration))
 
     // 重新启动位置更新
     this.startPositionTimer()
@@ -765,6 +878,26 @@ export class RustAudioAdapter {
     gain.linearRampToValueAtTime(target, now + durationSec)
   }
 
+  /**
+   * 设置播放速度倍率
+   * @param rate 播放速度倍率（0.25 - 4.0）
+   */
+  public setPlaybackRate(rate: number): void {
+    this.playbackRate = Math.min(Math.max(rate, 0.25), 4.0)
+    // 如果正在 Web Audio 模式播放，立即应用新的播放速率
+    if (this.webAudioSource && this.isWebAudioMode) {
+      this.webAudioSource.playbackRate.value = this.playbackRate
+    }
+  }
+
+  /**
+   * 获取当前播放速度倍率
+   * @returns 当前播放速度倍率
+   */
+  public getPlaybackRate(): number {
+    return this.playbackRate
+  }
+
   // 设置全局音量
   public setVolume(volume: number): void {
     this.volume = Math.min(Math.max(volume, 0), 1)
@@ -772,26 +905,36 @@ export class RustAudioAdapter {
     if (this.gainNode) {
       this.gainNode.gain.value = this.volume
     }
+
+    // 音量变化时更新等响度补偿（补偿量与音量成反比）
+    this.updateLoudnessCompensation()
   }
 
   // === Web Audio API 音效处理 ===
 
   /**
    * 设置 EQ 启用状态（Web Audio API 模式）
+   * 使用旁路方式：启用时恢复目标增益，禁用时将所有频段增益设为 0
    * @param enabled - 是否启用
    */
   public setEqEnabled(enabled: boolean): void {
     this.eqEnabled = enabled
-    this.updateWebAudioEq()
-    // 如果正在播放，立即重新连接音频链以应用更改
-    if (this.webAudioSource && this.isWebAudioMode) {
-      this.reconnectWebAudioEffects()
+
+    // 直接修改已连接滤波器的增益值
+    for (let i = 0; i < this.eqFilters.length; i++) {
+      const targetGain = enabled ? (this.eqBandTargetGains[i] ?? 0) : 0
+      if (this.audioContext) {
+        this.eqFilters[i].gain.setTargetAtTime(targetGain, this.audioContext.currentTime, 0.015)
+      } else {
+        this.eqFilters[i].gain.value = targetGain
+      }
     }
   }
 
   /**
    * 设置 EQ 频段（Web Audio API 模式）
-   * @param bandIndex - 频段索引
+   * 直接修改已连接滤波器的 AudioParam，无需断开/重连
+   * @param bandIndex - 频段索引 (0-9)
    * @param settings - 频段设置
    */
   public setEqBand(bandIndex: number, settings: {
@@ -802,22 +945,19 @@ export class RustAudioAdapter {
     postQ: number
     bandType: string
   }): void {
-    if (!this.audioContext) return
-
-    // 确保 EQ 滤波器数组已初始化
-    while (this.eqFilters.length <= bandIndex) {
-      const filter = this.audioContext.createBiquadFilter()
-      filter.type = 'peaking'
-      filter.frequency.value = 1000
-      filter.gain.value = 0
-      filter.Q.value = 1
-      this.eqFilters.push(filter)
-    }
+    if (!this.audioContext || bandIndex < 0 || bandIndex >= this.eqFilters.length) return
 
     const filter = this.eqFilters[bandIndex]
-    filter.frequency.value = settings.frequency
-    filter.gain.value = settings.preGain
-    filter.Q.value = settings.preQ
+    const now = this.audioContext.currentTime
+
+    // 更新滤波器频率
+    filter.frequency.setTargetAtTime(settings.frequency, now, 0.015)
+
+    // 更新滤波器 Q 值
+    filter.Q.setTargetAtTime(settings.preQ, now, 0.015)
+
+    // 保存目标增益（用于启用/禁用恢复）
+    this.eqBandTargetGains[bandIndex] = settings.preGain
 
     // 根据 bandType 设置滤波器类型
     const typeMap: Record<string, BiquadFilterType> = {
@@ -828,27 +968,10 @@ export class RustAudioAdapter {
     }
     filter.type = typeMap[settings.bandType] || 'peaking'
 
-    this.updateWebAudioEq()
-  }
-
-  /**
-   * 更新 Web Audio EQ 连接
-   */
-  private updateWebAudioEq(): void {
-    if (!this.audioContext || !this.gainNode) return
-
-    // 断开所有 EQ 滤波器的连接
-    this.eqFilters.forEach(filter => {
-      filter.disconnect()
-    })
-
-    if (!this.eqEnabled || this.eqFilters.length === 0) {
-      // EQ 禁用或没有滤波器，直接连接
-      return
+    // 仅在 EQ 启用时应用增益
+    if (this.eqEnabled) {
+      filter.gain.setTargetAtTime(settings.preGain, now, 0.015)
     }
-
-    // 重新连接 EQ 滤波器链
-    // 注意：需要在播放时动态连接，这里只更新状态
   }
 
   /**
@@ -862,97 +985,157 @@ export class RustAudioAdapter {
     releaseMs: number
     kneeDb: number
   }): void {
-    if (!this.audioContext) return
+    if (!this.audioContext || !this.compressorNode) return
 
-    if (!this.compressorNode) {
-      this.compressorNode = this.audioContext.createDynamicsCompressor()
+    const now = this.audioContext.currentTime
+    const comp = this.compressorNode
+
+    // 保存目标阈值（用于启用/禁用恢复）
+    this.savedCompressorThreshold = params.thresholdDb
+
+    // 仅在压缩器启用时应用实际阈值
+    if (this.compressorEnabled) {
+      comp.threshold.setTargetAtTime(params.thresholdDb, now, 0.015)
     }
-
-    this.compressorNode.threshold.value = params.thresholdDb
-    this.compressorNode.ratio.value = params.ratio
-    this.compressorNode.attack.value = params.attackMs / 1000
-    this.compressorNode.release.value = params.releaseMs / 1000
-    this.compressorNode.knee.value = params.kneeDb
+    comp.ratio.setTargetAtTime(params.ratio, now, 0.015)
+    comp.attack.setTargetAtTime(params.attackMs / 1000, now, 0.015)
+    comp.release.setTargetAtTime(params.releaseMs / 1000, now, 0.015)
+    comp.knee.setTargetAtTime(params.kneeDb, now, 0.015)
   }
 
   /**
    * 设置压缩器启用状态（Web Audio API 模式）
+   * 使用阈值旁路：禁用时将阈值设为 0dB（不触发压缩），启用时恢复目标阈值
    * @param enabled - 是否启用
    */
   public setCompressorEnabled(enabled: boolean): void {
     this.compressorEnabled = enabled
-    // 如果正在播放，立即重新连接音频链以应用更改
-    if (this.webAudioSource && this.isWebAudioMode) {
-      this.reconnectWebAudioEffects()
+    if (!this.audioContext || !this.compressorNode) return
+
+    const now = this.audioContext.currentTime
+    // 禁用时设阈值为 0dB（最大，不压缩），启用时恢复保存的目标阈值
+    const targetThreshold = enabled ? this.savedCompressorThreshold : 0
+    this.compressorNode.threshold.setTargetAtTime(targetThreshold, now, 0.015)
+  }
+
+  /**
+   * 设置虚拟低频参数（Web Audio API 模式）
+   * @param params - 虚拟低频参数
+   */
+  public setVirtualBassParams(params: Partial<VirtualBassParams>): void {
+    if (params.enabled !== undefined) this.virtualBassParams.enabled = params.enabled
+    if (params.intensity !== undefined) this.virtualBassParams.intensity = params.intensity
+    if (params.crossoverFreq !== undefined) this.virtualBassParams.crossoverFreq = params.crossoverFreq
+
+    if (this.virtualBassProcessor) {
+      this.virtualBassProcessor.setParams(this.virtualBassParams)
     }
   }
 
   /**
-   * 重新连接 Web Audio 音效处理链
-   * 在启用/禁用音效时立即生效
+   * 设置软限幅器参数（Web Audio API 模式）
+   * @param params - 软限幅器参数
    */
-  private reconnectWebAudioEffects(): void {
-    if (!this.audioContext || !this.gainNode || !this.webAudioSource || !this.currentAudioBuffer) return
+  public setSoftClipperParams(params: Partial<SoftClipperParams>): void {
+    if (params.enabled !== undefined) this.softClipperParams.enabled = params.enabled
+    if (params.threshold !== undefined) this.softClipperParams.threshold = params.threshold
+    if (params.makeupGain !== undefined) this.softClipperParams.makeupGain = params.makeupGain
 
-    // 获取当前播放位置（加上淡出时间的补偿）
-    const currentTime = this.audioContext.currentTime
-    const currentOffsetSec = currentTime - this.webAudioStartTime
-
-    // 短暂淡出时间（10ms）
-    const fadeOutDuration = 0.01
-
-    // 立即停止并断开旧源，避免重音
-    const oldSource = this.webAudioSource
-    oldSource.onended = null
-
-    try {
-      oldSource.stop()
-      oldSource.disconnect()
-    } catch (e) {
-      // 忽略停止错误
+    if (this.softClipper) {
+      this.softClipper.setParams(this.softClipperParams)
     }
-
-    // 清除当前源引用，防止重复停止
-    this.webAudioSource = null
-
-    // 计算补偿后的播放位置（加上淡出时间）
-    const offsetWithCompensation = currentOffsetSec + fadeOutDuration
-    const offset = Math.max(0, Math.min(offsetWithCompensation, this.currentAudioBuffer.duration))
-
-    // 淡出音量
-    this.gainNode.gain.cancelScheduledValues(currentTime)
-    this.gainNode.gain.setValueAtTime(this.volume, currentTime)
-    this.gainNode.gain.exponentialRampToValueAtTime(0.001, currentTime + fadeOutDuration)
-
-    // 创建新的音频源节点
-    const newSource = this.audioContext.createBufferSource()
-    newSource.buffer = this.currentAudioBuffer
-
-    // 连接音效处理链（使用最新的启用状态）
-    this.connectWebAudioEffects(newSource)
-
-    // 从补偿后的位置开始播放
-    newSource.start(currentTime + fadeOutDuration, offset)
-
-    // 更新源节点和启动时间（考虑调度延迟）
-    this.webAudioSource = newSource
-    this.webAudioStartTime = currentTime + fadeOutDuration - offset
-
-    // 重新设置播放结束回调
-    newSource.onended = () => {
-      this.triggerEndedCallback()
-    }
-
-    // 淡入恢复音量
-    const fadeInStartTime = currentTime + fadeOutDuration
-    this.gainNode.gain.setValueAtTime(0.001, fadeInStartTime)
-    this.gainNode.gain.exponentialRampToValueAtTime(this.volume, fadeInStartTime + fadeOutDuration)
-
-    console.log('[RustAudioAdapter] 音效链已重新连接，位置:', offset.toFixed(3), '秒')
   }
 
-  // 从 URL 加载并播放（使用 Rust 引擎流式播放，回退到 Web Audio API）
-  public async loadFromUrl(url: string): Promise<void> {
+  // === 等响度补偿控制（Web Audio API 模式） ===
+
+  /**
+   * 设置等响度补偿启用状态
+   * 基于弗莱彻-曼森等响度曲线，小音量时提升低频和高频以保持感知响度平坦
+   * @param enabled - 是否启用等响度补偿
+   */
+  public setLoudnessEnabled(enabled: boolean): void {
+    this.loudnessEnabled = enabled
+    this.updateLoudnessCompensation()
+  }
+
+  /**
+   * 设置等响度补偿参数
+   * @param params - 等响度补偿参数
+   * @param params.compensation - 补偿强度 (0-1)，1 为最大补偿
+   * @param params.referenceLoudness - 参考响度 LUFS (-40 到 -10)
+   * @param params.direction - 补偿方向：'low' 仅低频, 'high' 仅高频, 'both' 双向
+   */
+  public setLoudnessParams(params: {
+    enabled?: boolean
+    compensation?: number
+    referenceLoudness?: number
+    direction?: 'low' | 'high' | 'both'
+  }): void {
+    if (params.enabled !== undefined) this.loudnessEnabled = params.enabled
+    if (params.compensation !== undefined) this.loudnessCompensation = params.compensation
+    if (params.direction !== undefined) this.loudnessDirection = params.direction
+
+    this.updateLoudnessCompensation()
+  }
+
+  /**
+   * 根据当前音量和参数计算并应用等响度补偿增益
+   *
+   * 算法原理：
+   * - 基于弗莱彻-曼森等响度曲线，人耳在小音量时对低频和高频敏感度大幅下降
+   * - 补偿增益与音量成反比：音量越低，补偿越多；音量最大时补偿为零
+   * - 低频补偿中心频率 100Hz，最大增益 ~15dB
+   * - 高频补偿中心频率 10kHz，最大增益 ~12dB
+   * - 补偿强度受 compensation 参数缩放 (0-1)
+   * - 方向参数控制补偿范围
+   */
+  private updateLoudnessCompensation(): void {
+    if (!this.audioContext) return
+
+    const now = this.audioContext.currentTime
+
+    if (!this.loudnessEnabled) {
+      // 禁用时清零增益
+      if (this.loudnessBassFilter) {
+        this.loudnessBassFilter.gain.setTargetAtTime(0, now, 0.03)
+      }
+      if (this.loudnessTrebleFilter) {
+        this.loudnessTrebleFilter.gain.setTargetAtTime(0, now, 0.03)
+      }
+      return
+    }
+
+    // 计算基于当前音量的补偿系数
+    // 音量越低，补偿越大；音量为 1.0 时补偿为 0
+    const volumeFactor = 1.0 - this.volume
+    const compensationRatio = this.loudnessCompensation * volumeFactor
+
+    // 根据方向计算低频和高频增益
+    // 低频最大补偿 15dB，高频最大补偿 12dB（基于等响度曲线数据）
+    const maxBassGain = 15.0
+    const maxTrebleGain = 12.0
+
+    const applyLow = this.loudnessDirection === 'low' || this.loudnessDirection === 'both'
+    const applyHigh = this.loudnessDirection === 'high' || this.loudnessDirection === 'both'
+
+    const bassGain = applyLow ? maxBassGain * compensationRatio : 0
+    const trebleGain = applyHigh ? maxTrebleGain * compensationRatio : 0
+
+    // 平滑应用增益变化
+    if (this.loudnessBassFilter) {
+      this.loudnessBassFilter.gain.setTargetAtTime(bassGain, now, 0.03)
+    }
+    if (this.loudnessTrebleFilter) {
+      this.loudnessTrebleFilter.gain.setTargetAtTime(trebleGain, now, 0.03)
+    }
+  }
+
+  /**
+   * 从 URL 加载音频（使用 Rust 引擎流式播放，回退到 Web Audio API）
+   * @param url 音频文件的 URL
+   * @param startPlaying 是否立即开始播放，默认为 true；设为 false 则仅加载但不播放
+   */
+  public async loadFromUrl(url: string, startPlaying: boolean = true): Promise<void> {
     this.ensureContext()
     if (!this.audioContext || !this.gainNode) return
 
@@ -972,8 +1155,7 @@ export class RustAudioAdapter {
           const p = usePlayerStore()
           p.setDuration(result.trackInfo.durationMs)
           
-          // 更新采样率和声道数
-          this.sampleRate = result.trackInfo.sampleRate || 44100
+          // 更新声道数
           this.channels = result.trackInfo.channels || 2
           return
         } else {
@@ -986,11 +1168,15 @@ export class RustAudioAdapter {
     
     // Rust 引擎不可用或加载失败，回退到 Web Audio API
     console.log('[RustAudioAdapter] 回退到 Web Audio API 加载 URL')
-    await this.loadFromUrlWithWebAudio(url)
+    await this.loadFromUrlWithWebAudio(url, startPlaying)
   }
   
-  // 使用 Web Audio API 从 URL 加载音频
-  private async loadFromUrlWithWebAudio(url: string): Promise<void> {
+  /**
+   * 使用 Web Audio API 从 URL 加载音频
+   * @param url 音频文件的 URL
+   * @param startPlaying 是否立即开始播放
+   */
+  private async loadFromUrlWithWebAudio(url: string, startPlaying: boolean = true): Promise<void> {
     try {
       // 获取音频数据
       const response = await fetch(url)
@@ -1000,15 +1186,19 @@ export class RustAudioAdapter {
       const arrayBuffer = await response.arrayBuffer()
       
       // 使用已实现的 loadFromFileData 方法解码和播放
-      await this.loadFromFileData(arrayBuffer)
+      await this.loadFromFileData(arrayBuffer, startPlaying)
     } catch (error) {
       console.error('[RustAudioAdapter] Web Audio API 加载 URL 失败:', error)
       throw error
     }
   }
 
-  // 从文件数据加载并播放（使用 Web Audio API 解码）
-  public async loadFromFileData(data: ArrayBuffer): Promise<void> {
+  /**
+   * 从文件数据加载音频
+   * @param data 音频文件的 ArrayBuffer 数据
+   * @param startPlaying 是否立即开始播放，默认为 true；设为 false 则仅解码和准备但不播放
+   */
+  public async loadFromFileData(data: ArrayBuffer, startPlaying: boolean = true): Promise<void> {
     this.ensureContext()
     if (!this.audioContext || !this.gainNode) return
 
@@ -1038,23 +1228,29 @@ export class RustAudioAdapter {
       this.webAudioPauseTime = 0
       this.isWebAudioMode = true
 
-      // 播放
-      source.start(0)
+      if (startPlaying) {
+        // 播放
+        source.start(0)
+        source.playbackRate.value = this.playbackRate
+        this.webAudioSourceStarted = true
 
-      // 更新状态
-      this.isStreaming = true
+        // 更新状态
+        this.isStreaming = true
+
+        // 监听播放结束
+        source.onended = () => {
+          this.triggerEndedCallback()
+        }
+
+        // 启动位置更新定时器
+        this.startPositionTimer()
+      } else {
+        this.webAudioSourceStarted = false
+      }
 
       // 更新播放器 store 的时长
       const p = usePlayerStore()
       p.setDuration(audioBuffer.duration * 1000)
-
-      // 监听播放结束
-      source.onended = () => {
-        this.triggerEndedCallback()
-      }
-
-      // 启动位置更新定时器
-      this.startPositionTimer()
     } catch (error) {
       console.error('[RustAudioAdapter] Web Audio API 解码失败:', error)
       throw error
@@ -1063,45 +1259,14 @@ export class RustAudioAdapter {
 
   /**
    * 连接 Web Audio API 音效处理链
+   * 处理链已预构建，只需将音频源连接到 chainInputNode
    * @param source - 音频源节点
    */
   private connectWebAudioEffects(source: AudioBufferSourceNode): void {
-    if (!this.audioContext || !this.gainNode) return
+    if (!this.audioContext || !this.chainInputNode) return
 
-    // 先断开所有音效节点的连接，避免重复连接
-    this.eqFilters.forEach(filter => {
-      try {
-        filter.disconnect()
-      } catch (e) {
-        // 忽略断开错误
-      }
-    })
-    if (this.compressorNode) {
-      try {
-        this.compressorNode.disconnect()
-      } catch (e) {
-        // 忽略断开错误
-      }
-    }
-
-    let lastNode: AudioNode = source
-
-    // 连接 EQ 滤波器链
-    if (this.eqEnabled && this.eqFilters.length > 0) {
-      this.eqFilters.forEach(filter => {
-        lastNode.connect(filter)
-        lastNode = filter
-      })
-    }
-
-    // 连接压缩器
-    if (this.compressorEnabled && this.compressorNode) {
-      lastNode.connect(this.compressorNode)
-      lastNode = this.compressorNode
-    }
-
-    // 最终连接到音量节点
-    lastNode.connect(this.gainNode)
+    // 直接连接到预构建的处理链输入
+    source.connect(this.chainInputNode)
   }
 
   // 播放已加载的音频（流式播放）

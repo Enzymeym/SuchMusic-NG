@@ -1,18 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { NGrid, NGridItem, NIcon, NScrollbar, NButton, NPageHeader, NSpin } from 'naive-ui'
+import { NGrid, NGridItem, NIcon, NScrollbar, NButton } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import defaultCover from '@renderer/assets/icon.png'
 import { usePlayerStore } from '../stores/playerStore'
-import { useUserStore } from '../stores/userStore'
-import { fetchTopPlaylists, type TopPlaylistItem } from '../apis/netease/playlist/top-playlist'
-import { fetchToplists, type ToplistItem } from '../apis/netease/playlist/toplist'
-import { fetchTopArtists, type TopArtistItem } from '../apis/netease/artist/top-artist'
 import { throttle } from '../utils/performance'
 
 
 const playerStore = usePlayerStore()
-const userStore = useUserStore()
 const router = useRouter()
 
 // 响应式显示数量，确保只显示一行
@@ -52,87 +47,12 @@ const navigateTo = (name: string) => {
   router.push({ name })
 }
 
-// 歌单广场数据
-const squarePlaylists = ref<
-  Array<{
-    id: number
-    title: string
-    cover: string
-    playCount: string
-  }>
->([])
-
-// 排行榜数据
-const toplists = ref<
-  Array<{
-    id: number
-    name: string
-    cover: string
-    playCount: string
-    updateFrequency: string
-  }>
->([])
-
-// 歌手广场数据
-const topArtists = ref<
-  Array<{
-    id: number
-    name: string
-    cover: string
-    alias: string
-  }>
->([])
-
-/** 页面内容是否正在加载（歌单广场、歌手广场、排行榜等需要 API 数据的部分） */
-const isContentLoading = ref(true)
-
 // 初始化加载
-onMounted(async () => {
+onMounted(() => {
   updateDisplayLimit()
   window.addEventListener('resize', throttle(updateDisplayLimit, 200))
 
-  // 初始化用户登录状态
-  await userStore.initLoginState()
-  console.log('用户登录状态初始化完成，isLoggedIn:', userStore.isLoggedIn)
-
   playerStore.loadHistory()
-
-  try {
-    // 并行加载所有数据
-    const [playlistData, toplistData, artistData] = await Promise.all([
-      fetchTopPlaylists(),
-      fetchToplists(),
-      fetchTopArtists()
-    ])
-
-    // 处理最热歌单
-    squarePlaylists.value = playlistData.slice(0, 24).map((item: TopPlaylistItem) => ({
-      id: item.id,
-      title: item.name,
-      cover: item.coverImgUrl || defaultCover,
-      playCount: formatPlayCount(item.playCount)
-    }))
-
-    // 处理排行榜数据
-    toplists.value = toplistData.slice(0, 24).map((item: ToplistItem) => ({
-      id: item.id,
-      name: item.name,
-      cover: item.coverImgUrl || defaultCover,
-      playCount: formatPlayCount(item.playCount),
-      updateFrequency: item.updateFrequency ?? ''
-    }))
-
-    // 处理歌手数据
-    topArtists.value = artistData.slice(0, 24).map((item: TopArtistItem) => ({
-      id: item.id,
-      name: item.name,
-      cover: item.picUrl || defaultCover,
-      alias: item.alias && item.alias.length > 0 ? item.alias[0] : ''
-    }))
-  } finally {
-    // 无论加载成功或失败，都标记加载完成
-    isContentLoading.value = false
-  }
 })
 
 onUnmounted(() => {
@@ -219,44 +139,22 @@ const weeklyActivity = computed(() => {
   const max = Math.max(...days, 5) // At least 5 to avoid huge bars for 1 play
   return days.map((count) => Math.round((count / max) * 100))
 })
-
-// 播放次数格式化
-const formatPlayCount = (count: number): string => {
-  if (!Number.isFinite(count)) return '0'
-  if (count >= 100000000) {
-    return `${(count / 100000000).toFixed(1)}亿`
-  }
-  if (count >= 10000) {
-    return `${(count / 10000).toFixed(1)}万`
-  }
-  return String(count)
-}
-
-const goToPlaylistDetail = (id: number) => {
-  router.push({ name: 'netease-playlist-detail', params: { id } })
-}
-
-// 格式化艺术家名称
-const formatArtists = (artists: { id: number; name: string }[]): string => {
-  return artists.map(artist => artist.name).join(' / ')
-}
 </script>
 
 <template>
   <div style="height: 100%">
-    <n-scrollbar
-      style="height: 100%"
-      content-style="padding: 16px 24px;"
-    >
+    <n-scrollbar style="height: 100%" content-style="padding: 16px 24px;">
       <div class="home-view">
         <div class="home-container">
           <!-- Greeting Section -->
           <div class="greeting-section">
             <h1 class="greeting-title">
               统计
-              <n-button secondary @click="navigateTo('statistics')" style="margin-top: 2px">
-                详细统计
+
+              <n-button secondary circle style="margin-top: 2px" @click="navigateTo('statistics')">
+                <n-icon size="20"><i class="mgc_right_line"></i></n-icon>
               </n-button>
+
             </h1>
             <p class="greeting-sub">总共播放了 {{ totalPlays }} 次</p>
           </div>
@@ -301,7 +199,8 @@ const formatArtists = (artists: { id: number; name: string }[]): string => {
               <!-- Bottom Row -->
               <div class="highlight-row">
                 <div class="highlight-item small" v-if="topArtist">
-                  <img :src="topArtist.cover || defaultCover" class="highlight-img-small" loading="lazy" decoding="async" />
+                  <img :src="topArtist.cover || defaultCover" class="highlight-img-small" loading="lazy"
+                    decoding="async" />
                   <div class="highlight-info">
                     <div class="tag">最爱艺人</div>
                     <div class="name">{{ topArtist.displayTitle }}</div>
@@ -315,7 +214,8 @@ const formatArtists = (artists: { id: number; name: string }[]): string => {
                 </div>
 
                 <div class="highlight-item small" v-if="topAlbum">
-                  <img :src="topAlbum.cover || defaultCover" class="highlight-img-small" loading="lazy" decoding="async" />
+                  <img :src="topAlbum.cover || defaultCover" class="highlight-img-small" loading="lazy"
+                    decoding="async" />
                   <div class="highlight-info">
                     <div class="tag">最爱专辑</div>
                     <div class="name">{{ topAlbum.displayTitle }}</div>
@@ -345,133 +245,6 @@ const formatArtists = (artists: { id: number; name: string }[]): string => {
           </div>
         </div>
         <!-- Banners Section -->
-        <div class="banners-section">
-          <div class="section-header-row">
-            <div class="banner-title">歌单广场</div>
-            <n-button
-              secondary
-              circle
-              style="margin-top: 2px"
-              @click="navigateTo('playlist-square')"
-            >
-              <n-icon size="20"><i class="mgc_right_line"></i></n-icon>
-            </n-button>
-          </div>
-          <span
-            style="font-size: 14px; color: #666; margin-bottom: 8px; transform: translateY(-2px)"
-            >Netease Music 精选推荐</span
-          >
-          <div class="playlists-section">
-            <div v-if="isContentLoading" class="section-loading">
-              <n-spin size="large" />
-              <span class="loading-text">正在加载歌单广场...</span>
-            </div>
-            <n-grid
-              v-else
-              x-gap="16"
-              y-gap="24"
-              cols="2 s:3 m:4 l:5 xl:6 2xl:8"
-              responsive="screen"
-              class="fade-blur-enter"
-            >
-              <n-grid-item v-for="item in squarePlaylists.slice(0, displayLimit)" :key="item.id">
-                <div class="playlist-card" @click="goToPlaylistDetail(item.id)">
-                  <div class="cover-wrapper">
-                    <img :src="item.cover" class="playlist-cover" loading="lazy" decoding="async" />
-                    <div class="play-count">
-                      <n-icon><i class="mgc_play_line"></i></n-icon> {{ item.playCount }}
-                    </div>
-                    <div class="play-overlay">
-                      <n-icon size="40" color="white"><i class="mgc_play_circle_line"></i></n-icon>
-                    </div>
-                  </div>
-                  <div class="playlist-title">{{ item.title }}</div>
-                </div>
-              </n-grid-item>
-            </n-grid>
-          </div>
-
-          <div class="section-header-row" style="margin-top: 24px">
-            <div class="banner-title">歌手广场</div>
-            <n-button secondary circle style="margin-top: 2px" @click="navigateTo('playlist-square')">
-              <n-icon size="20"><i class="mgc_right_line"></i></n-icon>
-            </n-button>
-          </div>
-          <span
-            style="font-size: 14px; color: #666; margin-bottom: 8px; transform: translateY(-2px)"
-            >热门歌手推荐</span
-          >
-          <div class="playlists-section">
-            <div v-if="isContentLoading" class="section-loading">
-              <n-spin size="large" />
-              <span class="loading-text">正在加载歌手广场...</span>
-            </div>
-            <n-grid
-              v-else
-              x-gap="24"
-              y-gap="24"
-              cols="2 s:3 m:4 l:5 xl:6 2xl:8"
-              responsive="screen"
-              class="fade-blur-enter"
-            >
-              <n-grid-item v-for="item in topArtists.slice(0, displayLimit)" :key="item.id">
-                <div class="artist-card">
-                  <div class="artist-cover-wrapper">
-                    <img :src="item.cover" class="artist-cover" loading="lazy" decoding="async" />
-                  </div>
-                  <div class="artist-name">{{ item.name }}</div>
-                  <div class="artist-alias" v-if="item.alias">{{ item.alias }}</div>
-                </div>
-              </n-grid-item>
-            </n-grid>
-          </div>
-
-          <div class="section-header-row" style="margin-top: 24px">
-            <div class="banner-title">排行榜</div>
-            <n-button secondary circle style="margin-top: 2px" @click="navigateTo('toplist')">
-              <n-icon size="20"><i class="mgc_right_line"></i></n-icon>
-            </n-button>
-          </div>
-          <span
-            style="font-size: 14px; color: #666; margin-bottom: 8px; transform: translateY(-2px)"
-            >探索最新内容</span
-          >
-          <div class="toplist-section">
-            <div v-if="isContentLoading" class="section-loading">
-              <n-spin size="large" />
-              <span class="loading-text">正在加载排行榜...</span>
-            </div>
-            <n-grid
-              v-else
-              x-gap="16"
-              y-gap="24"
-              cols="2 s:3 m:4 l:5 xl:6 2xl:8"
-              responsive="screen"
-              class="fade-blur-enter"
-            >
-              <n-grid-item v-for="item in toplists.slice(0, displayLimit)" :key="item.id">
-                <div class="playlist-card" @click="goToPlaylistDetail(item.id)">
-                  <div class="cover-wrapper">
-                    <img :src="item.cover" class="playlist-cover" loading="lazy" decoding="async" />
-                    <div class="play-count">
-                      <n-icon><i class="mgc_play_line"></i></n-icon> {{ item.playCount }}
-                    </div>
-                    <div class="play-overlay">
-                      <n-icon size="40" color="white"><i class="mgc_play_circle_line"></i></n-icon>
-                    </div>
-                  </div>
-                  <div class="playlist-title">{{ item.name }}</div>
-                  <div v-if="item.updateFrequency" class="toplist-sub">
-                    {{ item.updateFrequency }}
-                  </div>
-                </div>
-              </n-grid-item>
-            </n-grid>
-          </div>
-
-
-        </div>
-        <!-- Exclusive Playlists Section -->
       </div>
     </n-scrollbar>
   </div>
@@ -482,11 +255,9 @@ const formatArtists = (artists: { id: number; name: string }[]): string => {
   /* overflow-y: auto; handled by NScrollbar */
 }
 
-.home-container {
-}
+.home-container {}
 
-.greeting-section {
-}
+.greeting-section {}
 
 .greeting-title {
   font-size: 32px;
@@ -670,7 +441,8 @@ const formatArtists = (artists: { id: number; name: string }[]): string => {
   padding: 12px;
   border-radius: 12px;
   transition: background-color 0.2s;
-  will-change: transform; /* Hint to browser */
+  will-change: transform;
+  /* Hint to browser */
 }
 
 .artist-card:hover {
@@ -685,7 +457,8 @@ const formatArtists = (artists: { id: number; name: string }[]): string => {
   margin-bottom: 12px;
   /* Removed heavy shadow */
   /* box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); */
-  background-color: rgba(0, 0, 0, 0.05); /* Placeholder bg */
+  background-color: rgba(0, 0, 0, 0.05);
+  /* Placeholder bg */
 }
 
 .artist-cover {
@@ -1015,10 +788,12 @@ const formatArtists = (artists: { id: number; name: string }[]): string => {
 }
 
 @media (max-width: 950px) {
+
   /* 窗口较小时调整统计卡片网格布局，隐藏活跃动态区域 */
   .stats-card {
     grid-template-columns: 1fr 1.5fr;
   }
+
   .stats-right {
     display: none !important;
   }
@@ -1069,6 +844,7 @@ const formatArtists = (artists: { id: number; name: string }[]): string => {
     filter: blur(12px);
     transform: translateY(16px);
   }
+
   to {
     opacity: 1;
     filter: blur(0);

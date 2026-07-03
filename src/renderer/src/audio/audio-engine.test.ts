@@ -1,3 +1,4 @@
+/// <reference types="vitest/globals" />
 import { webAudioEngine } from './audio-engine'
 import { usePlayerStore } from '../stores/playerStore'
 
@@ -109,7 +110,7 @@ describe('WebAudioEngine Preload Tests', () => {
     webAudioEngine.clearPreload()
     
     // 模拟预加载回调
-    preloadCallbackMock = jest.fn()
+    preloadCallbackMock = vi.fn()
     webAudioEngine.addPreloadCallback(preloadCallbackMock)
   })
   

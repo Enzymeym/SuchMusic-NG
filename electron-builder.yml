@@ -4,7 +4,6 @@ directories:
   buildResources: build
 files:
   - out/**
-  - native/**
   - '!**/.vscode/*'
   - '!src/*'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
@@ -13,13 +12,14 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - resources/**
-  - native/**
 extraResources:
-  # 将 native 目录单独拷贝到打包应用的 resources/native 下，用于加载 .node 插件
+  # 将 native 目录下编译好的 .node 二进制文件拷贝到 resources/native
   - from: native
     to: native
     filter:
-      - '**/*'
+      - '*.node'
+      - '**/target/debug/*.node'
+      - '**/target/release/*.node'
 win:
   executableName: such-pc-ng
 nsis:

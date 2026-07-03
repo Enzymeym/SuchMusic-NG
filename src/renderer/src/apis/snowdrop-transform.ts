@@ -125,7 +125,7 @@ export async function runSnowdropGetMusicUrl(
       if (result && result.url) {
         return result as { url: string }
       }
-      
+
       // 如果没有抛出异常但没有 url，也视为失败，抛出错误以触发重试
       throw new Error('Plugin returned empty URL')
 

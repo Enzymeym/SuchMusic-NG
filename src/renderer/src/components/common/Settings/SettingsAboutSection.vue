@@ -141,7 +141,20 @@ const fetchDeveloperInfo = async () => {
 const openGithub = () => {
   const url = 'https://github.com/Enzymeym/SuchMusic-NG'
   if ((window as any).electron?.shell) {
-    ;(window as any).electron.shell.openExternal(url)
+    ; (window as any).electron.shell.openExternal(url)
+  } else {
+    window.open(url, '_blank')
+  }
+}
+
+/**
+ * 打开赞助页面链接
+ * 优先使用 Electron shell 打开外部链接，否则使用浏览器新标签页打开
+ */
+const openSponsor = () => {
+  const url = 'https://ifdian.net/a/enzymeym?tab=home'
+  if ((window as any).electron?.shell) {
+    ; (window as any).electron.shell.openExternal(url)
   } else {
     window.open(url, '_blank')
   }
@@ -253,10 +266,7 @@ const renderedChangelog = computed(() => {
       </div>
 
       <!-- 更新状态卡片 -->
-      <div
-        class="update-status-card"
-        v-if="isUpdateAvailable || isDownloading || isDownloaded || hasError"
-      >
+      <div class="update-status-card" v-if="isUpdateAvailable || isDownloading || isDownloaded || hasError">
         <div v-if="isChecking" class="update-status-item">
           <n-spin size="small" />
           <span>正在检查更新...</span>
@@ -266,10 +276,7 @@ const renderedChangelog = computed(() => {
           <span>{{ error || '检查更新失败' }}</span>
           <n-button size="tiny" @click="handleCheckUpdate">重试</n-button>
         </div>
-        <div
-          v-else-if="isUpdateAvailable && !isDownloading && !isDownloaded"
-          class="update-status-item"
-        >
+        <div v-else-if="isUpdateAvailable && !isDownloading && !isDownloaded" class="update-status-item">
           <i class="mgc_alert_line" />
           <span>发现新版本: v{{ updateInfo?.latestVersion }}</span>
           <n-button size="tiny" type="primary" @click="handleDownloadUpdate">立即下载</n-button>
@@ -278,20 +285,12 @@ const renderedChangelog = computed(() => {
           <i class="mgc_download_3_line" />
           <div class="update-download-info">
             <span>正在下载更新... {{ downloadProgress.percent }}%</span>
-            <n-progress
-              type="line"
-              :percentage="downloadProgress.percent"
-              :show-indicator="false"
-              :height="4"
-              :border-radius="2"
-              style="width: 120px"
-            />
+            <n-progress type="line" :percentage="downloadProgress.percent" :show-indicator="false" :height="4"
+              :border-radius="2" style="width: 120px" />
             <span class="update-download-detail">
               {{ formatBytes(downloadProgress.downloaded) }} /
               {{ formatBytes(downloadProgress.total) }}
-              <span v-if="downloadProgress.speed > 0"
-                >({{ formatSpeed(downloadProgress.speed) }})</span
-              >
+              <span v-if="downloadProgress.speed > 0">({{ formatSpeed(downloadProgress.speed) }})</span>
             </span>
           </div>
         </div>
@@ -313,17 +312,25 @@ const renderedChangelog = computed(() => {
     </div>
 
     <div class="about-cards">
-      <n-alert :bordered="false" type="info">
-        注意：当前版本为测试版，功能不完善，请谨慎使用
+      <n-alert type="info" title="Beta 版本">
+        功能不完善，请谨慎使用
       </n-alert>
 
-      <n-card
-        class="about-card"
-        :bordered="false"
-        :style="{
-          backgroundColor: themeVars.cardColor
-        }"
-      >
+      <n-alert title="赞助本项目" type="error" class="sponsor-alert">
+        <template #icon>
+          <i class="mgc_heart_line" style="color: #d03050;" />
+        </template>
+        <div class="sponsor-content">
+          <span class="sponsor-text">如果喜欢这个项目，欢迎赞助支持开发者</span>
+          <n-button size="small" tertiary @click="openSponsor">
+            前往赞助
+          </n-button>
+        </div>
+      </n-alert>
+
+      <n-card class="about-card" :bordered="false" :style="{
+        backgroundColor: themeVars.cardColor
+      }">
         <template #header>
           <div>开发者</div>
         </template>
@@ -336,9 +343,7 @@ const renderedChangelog = computed(() => {
           <img :src="developerInfo.avatar_url" class="developer-avatar" alt="avatar" />
           <div class="developer-details">
             <div class="developer-name">{{ developerInfo.name || developerInfo.login }}</div>
-            <a :href="developerInfo.html_url" target="_blank" class="developer-link"
-              >@{{ developerInfo.login }}</a
-            >
+            <a :href="developerInfo.html_url" target="_blank" class="developer-link">@{{ developerInfo.login }}</a>
           </div>
         </div>
 
@@ -349,13 +354,9 @@ const renderedChangelog = computed(() => {
       </n-card>
 
       <!-- 更新日志卡片 -->
-      <n-card
-        class="about-card changelog-card"
-        :bordered="false"
-        :style="{
-          backgroundColor: themeVars.cardColor
-        }"
-      >
+      <n-card class="about-card changelog-card" :bordered="false" :style="{
+        backgroundColor: themeVars.cardColor
+      }">
         <template #header>
           <div class="changelog-header">
             <span>更新日志</span>
@@ -372,9 +373,7 @@ const renderedChangelog = computed(() => {
             <i class="mgc_wifi_off_line"></i>
           </n-icon>
           <div class="error-text">{{ changelogError }}</div>
-          <n-button size="small" secondary style="margin-top: 12px" @click="fetchChangelog"
-            >重试</n-button
-          >
+          <n-button size="small" secondary style="margin-top: 12px" @click="fetchChangelog">重试</n-button>
         </div>
 
         <div v-else class="markdown-body changelog-content" v-html="renderedChangelog"></div>
@@ -391,31 +390,6 @@ const renderedChangelog = computed(() => {
   overflow: hidden;
 }
 
-/* 顶部圆形渐变背景 */
-.about-root::before {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: -280px;
-  width: 480px;
-  height: 480px;
-  border-radius: 50%;
-  background: conic-gradient(
-    from 180deg at 50% 50%,
-    #2e4d7b 0deg,
-    #3e2b59 59deg,
-    #793236 111deg,
-    #92371c 150deg,
-    #c18e42 185deg,
-    #877545 224deg,
-    #417175 256deg,
-    #366775 303deg,
-    #2c5777 360deg
-  );
-  opacity: 0.6;
-  filter: blur(56px);
-  transform: translateX(-50%);
-}
 
 .about-hero {
   position: relative;
@@ -570,11 +544,13 @@ const renderedChangelog = computed(() => {
   border-bottom: 1px solid rgba(127, 127, 127, 0.2);
   padding-bottom: 0.3em;
 }
+
 :deep(.markdown-body h2) {
   font-size: 1.3em;
   border-bottom: 1px solid rgba(127, 127, 127, 0.1);
   padding-bottom: 0.3em;
 }
+
 :deep(.markdown-body h3) {
   font-size: 1.1em;
 }
@@ -597,6 +573,7 @@ const renderedChangelog = computed(() => {
   color: v-bind('themeVars.primaryColor');
   text-decoration: none;
 }
+
 :deep(.markdown-body a:hover) {
   text-decoration: underline;
 }
@@ -707,5 +684,23 @@ const renderedChangelog = computed(() => {
   margin-top: 16px;
   display: flex;
   justify-content: center;
+}
+
+.sponsor-alert {
+  margin-top: 0;
+}
+
+.sponsor-content {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sponsor-text {
+  margin: 0;
+  font-size: 13px;
+  opacity: 0.85;
 }
 </style>

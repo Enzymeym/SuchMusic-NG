@@ -13,7 +13,7 @@ performanceMonitor.mark('app-init-start')
 if (window.electron) {
   const { ipcRenderer } = window.electron
 
-  ipcRenderer.on('plugin:log', (event, level, ...args) => {
+  ipcRenderer.on('plugin:log', (_event, level, ...args) => {
     console[level](...args)
   })
 }

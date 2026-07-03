@@ -12,7 +12,7 @@ const PlayerBar = defineAsyncComponent(() => import('../components/layout/Player
 const route = useRoute()
 const player = usePlayerStore()
 
-const immersiveRoutes = ['playlist-detail', 'netease-playlist-detail']
+const immersiveRoutes = ['playlist-detail']
 
 const isImmersive = computed(() => {
   return immersiveRoutes.includes(route.name as string)
@@ -105,7 +105,7 @@ onUnmounted(() => {
           <div class="content-container" :class="{ 'immersive-container': isImmersive }">
             <router-view v-slot="{ Component, route }">
               <transition name="fade-slide" mode="out-in">
-                <keep-alive :include="['home', 'local', 'playlist', 'recent', 'playlist-square', 'toplist']">
+                <keep-alive :include="['statistics', 'local', 'playlist', 'recent', 'playlist-square', 'toplist', 'singer', 'album']">
                   <component :is="Component" :key="route.fullPath" />
                 </keep-alive>
               </transition>

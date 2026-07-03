@@ -66,11 +66,7 @@ import { ref, computed, onMounted, h } from 'vue'
 import { NButton, NIcon, useMessage, NInput } from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import { usePlayerStore } from '../stores/playerStore'
-import { useSettingsStore } from '../stores/settingsStore'
-import { runSnowdropGetMusicUrl } from '../apis/snowdrop-transform'
 import { AudioPlayerManager } from '../utils/audioPlayerManager'
-import { fetchGMALyric } from '../apis/gma'
-import { fetchQQMusicLyric } from '../apis/vkeys'
 
 interface RecentSong {
   id: string | number
@@ -85,7 +81,6 @@ interface RecentSong {
 }
 
 const player = usePlayerStore()
-const settingsStore = useSettingsStore()
 const songs = ref<RecentSong[]>([])
 const searchKeyword = ref('')
 const message = useMessage()
@@ -112,8 +107,8 @@ const buildSongsFromHistory = () => {
       // 补充来源信息：
       // 1. 如果 PlayRecord 中有 source，直接使用
       // 2. 如果没有，但有 filePath，则视为 local
-      // 3. 否则默认假设为 netease
-      source: (r as any).source || (r.filePath ? 'local' : 'netease'),
+      // 3. 否则默认标记为 local
+      source: (r as any).source || (r.filePath ? 'local' : 'local'),
       sourceSongId: r.songId
     })
   }
@@ -220,182 +215,8 @@ const handleSongClick = async (song: RecentSong) => {
     return
   }
 
-  // 2. 在线歌曲播放逻辑
-  try {
-    let source = song.source || 'wy' // 默认网易云(wy)，后续可扩展
-    // 映射旧版 source 代码到新版
-    switch (source) {
-      case 'netease': source = 'wy'; break;
-      case 'qq': source = 'tx'; break;
-      case 'kugou': source = 'kg'; break;
-      case 'kuwo': source = 'kw'; break;
-      case 'migu': source = 'mg'; break;
-    }
-    const quality = settingsStore.source.preferredQuality || '128k'
-    
-    // 获取歌曲 ID
-    const neteaseId = song.id
-
-    // 歌词重试获取函数
-    const fetchLyricWithRetry = async (id: string, source: string): Promise<string> => {
-      // 标准化 source：将外部格式 qq→tx 统一为内部格式
-      const normalizedSource = source === 'qq' ? 'tx' : source
-
-      let attempt = 0
-      while (true) {
-        // 检查当前播放歌曲是否改变，如果改变则停止重试
-        const currentId = player.currentSong?.sourceSongId ?? player.currentSong?.id
-        if (String(currentId) !== String(id)) {
-          return ''
-        }
-
-        try {
-          // QQ音乐优先使用 VKeys API
-          if (normalizedSource === 'tx') {
-            try {
-              const result = await fetchQQMusicLyric(String(id))
-              const mainLyric = result.yrc || result.lrc
-              if (mainLyric) {
-                if (result.trans) {
-                  player.setTranslatedLyrics(result.trans)
-                }
-                return mainLyric
-              }
-            } catch (e) {
-              console.warn(`获取歌词失败，第 ${attempt + 1} 次重试:`, e)
-            }
-          }
-          const lyricText = await fetchGMALyric(String(id), normalizedSource)
-          if (lyricText) return lyricText
-        } catch (e) {
-          console.warn(`获取歌词失败，第 ${attempt + 1} 次重试:`, e)
-        }
-        
-        attempt++
-        // 指数退避策略，最大延迟 5 秒
-        const delay = Math.min(500 + attempt * 500, 5000)
-        await new Promise((resolve) => setTimeout(resolve, delay))
-      }
-    }
-
-    // 构造 MusicInfo 供插件使用
-    const musicInfo = {
-      id: String(neteaseId),
-      name: song.name,
-      singer: (song.ar || []).map((a) => a.name).join(' / ') || '未知歌手',
-      albumName: song.al?.name || '未知专辑',
-      pic: song.picUrl || '',
-      songmid: String(neteaseId),
-      mediaId: String(neteaseId)
-    }
-
-    // 启动获取歌词（异步）
-    const lyricPromise = fetchLyricWithRetry(String(neteaseId), source).catch(() => '')
-
-    // 缓存处理：先检查是否存在缓存
-    let cacheFilePath: string | null = null
-    const cacheKey = `${source}:${neteaseId}:${quality}`
-    
-    if (window.electron && window.electron.ipcRenderer) {
-      try {
-        const cachePath = await window.electron.ipcRenderer.invoke('online-cache:check', {
-           dir: settingsStore.local.cacheDir || null,
-           key: cacheKey
-        })
-        if (cachePath) {
-           console.log('[RecentPlayView] 主动检测到缓存文件存在', cachePath)
-           cacheFilePath = cachePath
-        }
-      } catch (e) {
-         console.warn('主动检测缓存失败:', e)
-      }
-    }
-
-    let finalUrl = ''
-    
-    // 如果没有缓存，则获取在线 URL
-    if (!cacheFilePath) {
-       const { url } = await runSnowdropGetMusicUrl(source, musicInfo, quality)
-       if (!url) {
-         throw new Error('未获取到播放链接')
-       }
-       finalUrl = url
-
-       // 准备缓存（下载/记录）
-       if (window.electron && window.electron.ipcRenderer) {
-          try {
-            const cacheResult = (await window.electron.ipcRenderer.invoke(
-              'online-cache:prepare',
-              {
-                dir: settingsStore.local.cacheDir || null,
-                key: cacheKey,
-                url
-              }
-            )) as { usedCache: boolean; filePath: string | null; url: string }
-
-            if (cacheResult.filePath) {
-              cacheFilePath = cacheResult.filePath
-              finalUrl = cacheResult.url || url
-            }
-          } catch (e) {
-            console.error('准备在线播放缓存失败:', e)
-          }
-       }
-    } else {
-       // 如果有缓存，finalUrl 可以为空，或者设置为 filePath (虽然 AudioPlayerManager 优先用 filePath)
-       // 为了兼容性，保持为空
-    }
-
-    // 解析歌词
-    const lyrics = await lyricPromise
-
-    // 构造播放器歌曲对象
-    const playerSong = {
-      id: song.id,
-      title: song.name,
-      artist: (song.ar || []).map((a) => a.name).join(' / ') || '未知歌手',
-      album: song.al?.name || '未知专辑',
-      cover: song.picUrl || '',
-      durationMs: song.dt || 0,
-      source: source,
-      sourceSongId: song.id,
-      filePath: cacheFilePath || undefined,
-      url: finalUrl,
-      lyrics
-    }
-
-    player.setCurrentSong(playerSong)
-    player.setPlaying(true)
-
-    // 播放
-    try {
-      await AudioPlayerManager.play({
-        filePath: cacheFilePath || undefined,
-        url: finalUrl,
-        volume: player.volume
-      })
-      message.success(cacheFilePath ? '从缓存播放' : '开始播放')
-    } catch (e) {
-      console.error('播放失败，尝试回退纯URL播放:', e)
-      // 如果本地播放失败，且有 URL，则回退到 URL 播放
-      if (finalUrl) {
-         await AudioPlayerManager.play({
-           url: finalUrl,
-           volume: player.volume
-         })
-      } else {
-         // 如果本来就是缓存播放且没有 URL (即 skipped fetch)，则此时可能需要重新 fetch URL
-         // 但为了简化，这里假设 cacheFilePath 存在时文件通常可用。
-         // 如果真的不可用，AudioPlayerManager 会报错。
-         // 可以在这里补充 fetch URL 逻辑，但比较复杂。
-         throw e
-      }
-    }
-
-  } catch (error: any) {
-    console.error('播放失败:', error)
-    message.error(error.message || '播放失败')
-  }
+  // 2. 非本地歌曲（在线服务已移除）
+  message.warning('在线服务已移除，无法播放在线歌曲')
 }
 
 const playAll = (): void => {

@@ -41,6 +41,22 @@
           </div>
 
           <div class="form-item">
+            <div class="label"><n-icon><i class="mgc_pic_line"></i></n-icon> 封面</div>
+            <div class="cover-setting">
+              <div class="cover-preview-small" @click="handleChooseCover">
+                <img :src="previewCover" class="cover-preview-img" />
+                <div class="cover-overlay">
+                  <n-icon size="18"><i class="mgc_pencil_line"></i></n-icon>
+                </div>
+              </div>
+              <div class="cover-actions">
+                <n-switch v-model:value="form.coverFollowsFirstTrack" size="small" />
+                <span class="cover-switch-label">跟随第一首歌曲封面</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-item">
             <div class="label"><n-icon><i class="mgc_pic_line"></i></n-icon> 样式</div>
             <n-select v-model:value="form.coverStyle" :options="coverStyleOptions" />
           </div>
@@ -115,7 +131,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { NModal, NInput, NSelect, NIcon, NButton, useMessage, useDialog } from 'naive-ui'
+import { NModal, NInput, NSelect, NIcon, NButton, NSwitch, useMessage, useDialog } from 'naive-ui'
 import type { UserPlaylist } from '../../stores/playlistStore'
 import defaultCoverIcon from '@renderer/assets/icon.png'
 
@@ -141,7 +157,9 @@ const form = ref({
   description: '',
   coverStyle: 'square',
   titleFontWeight: 'bold',
-  titleFontFamily: 'default'
+  titleFontFamily: 'default',
+  customCover: '',
+  coverFollowsFirstTrack: false
 })
 
 // 监听 playlist 变化，初始化表单
@@ -154,14 +172,29 @@ watch(
         description: newVal.description || '',
         coverStyle: newVal.coverStyle || 'square',
         titleFontWeight: newVal.titleFontWeight || 'bold',
-        titleFontFamily: newVal.titleFontFamily || 'default'
+        titleFontFamily: newVal.titleFontFamily || 'default',
+        customCover: newVal.cover || '',
+        coverFollowsFirstTrack: newVal.coverFollowsFirstTrack || false
       }
     }
   },
   { immediate: true }
 )
 
-const cover = computed(() => props.playlist?.cover || (props.playlist?.tracks[0]?.cover))
+/**
+ * 预览封面：优先使用自定义封面，其次根据 coverFollowsFirstTrack 使用第一首歌曲封面，最后用默认封面
+ */
+const previewCover = computed(() => {
+  if (form.value.coverFollowsFirstTrack) {
+    return props.playlist?.tracks[0]?.cover || defaultCover
+  }
+  return form.value.customCover || defaultCover
+})
+
+/**
+ * 预览区域显示的封面（与预览封面一致）
+ */
+const cover = computed(() => previewCover.value)
 
 // 预览样式计算
 const previewStyle = computed(() => {
@@ -214,15 +247,50 @@ const fontFamilyOptions = [
   { label: '衬线体', value: 'serif' }
 ]
 
+/**
+ * 选择自定义封面图片
+ * 通过 Electron 文件对话框选择图片，读取为 base64 Data URL
+ * 如果当前开启了"跟随第一首歌曲封面"，选择自定义封面后自动关闭该选项
+ */
+const handleChooseCover = async () => {
+  try {
+    if (!window.electron?.ipcRenderer) {
+      message.warning('当前环境不支持选择文件')
+      return
+    }
+    const filePath: string = await window.electron.ipcRenderer.invoke('system:choose-image')
+    if (!filePath) return
+    const base64: string = await window.electron.ipcRenderer.invoke('system:read-file-base64', filePath)
+    if (base64) {
+      form.value.customCover = base64
+      // 用户主动选择自定义封面，自动关闭"跟随第一首歌曲封面"
+      form.value.coverFollowsFirstTrack = false
+      message.success('封面已更新')
+    } else {
+      message.error('读取封面图片失败')
+    }
+  } catch (e) {
+    console.error('选择封面失败:', e)
+    message.error('选择封面失败')
+  }
+}
+
 const handleSave = () => {
   if (!props.playlist) return
+  // 构建最终封面：如果跟随第一首歌曲封面则使用第一首歌曲封面，否则使用自定义封面
+  const finalCover = form.value.coverFollowsFirstTrack
+    ? (props.playlist.tracks[0]?.cover || form.value.customCover || undefined)
+    : (form.value.customCover || undefined)
+
   emit('save', {
     ...props.playlist,
     name: form.value.name,
     description: form.value.description,
+    cover: finalCover,
     coverStyle: form.value.coverStyle as any,
     titleFontWeight: form.value.titleFontWeight as any,
-    titleFontFamily: form.value.titleFontFamily as any
+    titleFontFamily: form.value.titleFontFamily as any,
+    coverFollowsFirstTrack: form.value.coverFollowsFirstTrack
   })
   emit('update:show', false)
   message.success('已保存修改')
@@ -337,6 +405,64 @@ html[data-theme='dark'] .modal-container {
   gap: 6px;
   font-size: 14px;
   color: #666;
+  flex-shrink: 0;
+}
+
+/* 封面设置区域 */
+.cover-setting {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+
+.cover-preview-small {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  flex-shrink: 0;
+  border: 2px dashed #ddd;
+  transition: border-color 0.2s;
+}
+
+.cover-preview-small:hover {
+  border-color: var(--n-color-target, #2080f0);
+}
+
+.cover-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.cover-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s;
+  color: #fff;
+}
+
+.cover-preview-small:hover .cover-overlay {
+  opacity: 1;
+}
+
+.cover-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cover-switch-label {
+  font-size: 12px;
+  color: #999;
 }
 
 .section-title {

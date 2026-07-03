@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, session, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
 import { join } from 'path'
 import { existsSync, mkdirSync } from 'fs'
@@ -6,15 +6,15 @@ import { execSync } from 'child_process'
 import { monitorEvent } from './monitorEvent'
 import { createWindow } from './windows/mainWindow'
 import { registerAudioHandlers } from './ipc/audio'
-import { registerPluginHandlers } from './ipc/plugin'
 import { registerLocalMusicHandlers } from './ipc/localMusic'
 import { registerSystemHandlers } from './ipc/system'
 import { registerDesktopLyricHandlers } from './ipc/desktopLyric'
 import { registerTaskbarLyricHandlers } from './ipc/taskbarLyric'
-import { registerProxyHandlers } from './ipc/proxy'
-import { registerPluginManagerHandlers, checkAllPluginsForUpdates } from './ipc/pluginManager'
 import { createTray } from './tray'
 import { registerAudioEngineHandlers } from './services/audioEngineService'
+import { registerFfmpegEngineHandlers } from './services/audioEngineFfmpegService'
+import { registerWasapiHandlers } from './services/wasapiService'
+import { registerFfmpegInstallerHandlers, initFfmpeg } from './services/ffmpegDownloader'
 import { registerUpdateHandlers } from './ipc/update'
 import { checkForUpdate } from './services/updateService'
 import { sendAutoUpdateResult } from './ipc/update'
@@ -138,97 +138,22 @@ app.whenReady().then(() => {
 
   // Register IPC handlers
   registerAudioHandlers()
-  registerPluginHandlers()
-  registerPluginManagerHandlers()
   registerLocalMusicHandlers()
   registerSystemHandlers()
   registerDesktopLyricHandlers()
   registerTaskbarLyricHandlers()
-  registerProxyHandlers()
   registerAudioEngineHandlers()
+  registerFfmpegEngineHandlers()
+  registerWasapiHandlers()
+  registerFfmpegInstallerHandlers()
   registerUpdateHandlers()
 
-  // 配置图片防盗链和跨域
-  const filter = {
-    urls: [
-      '*://*.music.126.net/*',
-      '*://*.126.net/*',
-      '*://*.qpic.cn/*',
-      '*://*.gtimg.cn/*',
-      '*://*.qq.com/*',
-      '*://*.kugou.com/*',
-      '*://*.kuwo.cn/*',
-      '*://*.migu.cn/*'
-    ]
-  }
-
-  session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
-    const { url } = details
-    let referer = ''
-
-    if (url.includes('music.126.net') || url.includes('126.net')) {
-      referer = 'https://music.163.com/'
-    } else if (url.includes('y.qq.com') || url.includes('qpic.cn') || url.includes('gtimg.cn')) {
-      referer = 'https://y.qq.com/'
-    } else if (url.includes('kugou.com')) {
-      referer = 'https://www.kugou.com/'
-    } else if (url.includes('kuwo.cn')) {
-      referer = 'https://www.kuwo.cn/'
-    } else if (url.includes('migu.cn')) {
-      referer = 'https://music.migu.cn/'
-    }
-
-    if (referer) {
-      details.requestHeaders['Referer'] = referer
-    }
-
-    // 删除 Origin，避免触发严格的同源检查
-    delete details.requestHeaders['Origin']
-
-    callback({ cancel: false, requestHeaders: details.requestHeaders })
-  })
-
-  // 允许跨域图片加载
-  session.defaultSession.webRequest.onHeadersReceived(filter, (details, callback) => {
-    const responseHeaders = details.responseHeaders || {}
-
-    // 允许所有域访问
-    responseHeaders['Access-Control-Allow-Origin'] = ['*']
-    // 允许所有 Header
-    responseHeaders['Access-Control-Allow-Headers'] = ['*']
-    // 允许所有方法
-    responseHeaders['Access-Control-Allow-Methods'] = ['*']
-
-    // 移除可能阻止 iframe 或 image 加载的 Header
-    delete responseHeaders['X-Frame-Options']
-    delete responseHeaders['x-frame-options']
-
-    callback({ responseHeaders })
-  })
+  // 初始化 FFmpeg DLL 检测
+  initFfmpeg()
 
   createWindow()
   createTray()
   monitorEvent()
-
-  // 应用启动后自动检查插件更新
-  setTimeout(async () => {
-    try {
-      // 发送日志到前端
-      const mainWindow = BrowserWindow.getAllWindows()[0]
-      if (mainWindow) {
-        mainWindow.webContents.send('plugin:log', 'log', '启动自动插件更新检查...')
-      }
-      console.log('启动自动插件更新检查...')
-      await checkAllPluginsForUpdates()
-    } catch (error) {
-      // 发送错误日志到前端
-      const mainWindow = BrowserWindow.getAllWindows()[0]
-      if (mainWindow) {
-        mainWindow.webContents.send('plugin:log', 'error', '自动检查插件更新失败:', error)
-      }
-      console.error('自动检查插件更新失败:', error)
-    }
-  }, 2000)
 
   // 应用启动后自动检查应用更新（延迟 3 秒执行）
   setTimeout(async () => {
