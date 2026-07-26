@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { NIcon, NScrollbar, NInput, NTag } from 'naive-ui'
-import defaultCover from '@renderer/assets/icon.png'
+import { useRouter } from 'vue-router'
+import { NIcon, NScrollbar, NInput } from 'naive-ui'
+import defaultCover from '@renderer/assets/default-cover.png'
 import { usePlayerStore } from '../stores/playerStore'
 import { useLocalMusicStore } from '../stores/localMusicStore'
 
+const router = useRouter()
 const playerStore = usePlayerStore()
 const localMusicStore = useLocalMusicStore()
 
@@ -23,72 +25,7 @@ interface ArtistInfo {
 }
 
 const artists = computed<ArtistInfo[]>(() => {
-  const artistMap = new Map<string, ArtistInfo>()
-
-  // 从播放历史聚合
-  playerStore.playHistory.forEach((record) => {
-    const artistName = record.artist || '未知歌手'
-    if (!artistMap.has(artistName)) {
-      artistMap.set(artistName, {
-        name: artistName,
-        cover: '',
-        playCount: 0,
-        songCount: 0,
-        songs: []
-      })
-    }
-    const info = artistMap.get(artistName)!
-    info.playCount++
-    if (!info.cover && record.cover) {
-      info.cover = record.cover
-    }
-    // 去重添加歌曲
-    if (!info.songs.find(s => s.id === record.songId)) {
-      info.songs.push({
-        id: record.songId,
-        title: record.title,
-        artist: record.artist,
-        cover: record.cover,
-        album: record.album,
-        filePath: record.filePath
-      })
-    }
-  })
-
-  // 从本地音乐补充
-  localMusicStore.songs.forEach((song) => {
-    const artistName = song.ar?.[0]?.name || '未知歌手'
-    if (!artistMap.has(artistName)) {
-      artistMap.set(artistName, {
-        name: artistName,
-        cover: '',
-        playCount: 0,
-        songCount: 0,
-        songs: []
-      })
-    }
-    const info = artistMap.get(artistName)!
-    if (!info.cover && song.picUrl) {
-      info.cover = song.picUrl
-    }
-    if (!info.cover && song.al?.picUrl) {
-      info.cover = song.al.picUrl
-    }
-    if (!info.songs.find(s => s.id === song.id)) {
-      info.songs.push({
-        id: song.id,
-        title: song.name,
-        artist: artistName,
-        cover: song.picUrl || song.al?.picUrl || '',
-        album: song.al?.name,
-        filePath: song.filePath,
-        durationMs: song.dt
-      })
-    }
-  })
-
-  info.songCount = info.songs.length
-  return Array.from(artistMap.values())
+  return localMusicStore.artistList
 })
 
 const filteredArtists = computed(() => {
@@ -97,19 +34,8 @@ const filteredArtists = computed(() => {
   return artists.value.filter(a => a.name.toLowerCase().includes(q))
 })
 
-const playArtistSongs = (artist: ArtistInfo) => {
-  if (artist.songs.length === 0) return
-  const playlist = artist.songs.map(s => ({
-    id: s.id,
-    title: s.title,
-    artist: s.artist,
-    cover: s.cover || defaultCover,
-    durationMs: s.durationMs || 0,
-    album: s.album,
-    filePath: s.filePath
-  }))
-  playerStore.setPlaylist(playlist)
-  playerStore.playSongAtIndex(0)
+const goToArtistDetail = (artist: ArtistInfo) => {
+  router.push({ name: 'singer-detail', params: { name: artist.name } })
 }
 </script>
 
@@ -118,54 +44,61 @@ const playArtistSongs = (artist: ArtistInfo) => {
     <n-scrollbar style="height: 100%" content-style="padding: 16px 24px;">
       <div class="singer-view">
         <!-- Header -->
-        <div class="header-section">
-          <div class="header-content">
-            <div class="header-left">
-              <h1 class="page-title">歌手</h1>
-              <p class="page-subtitle">{{ artists.length }} 位歌手</p>
-            </div>
-            <div class="header-right">
-              <n-input
-                v-model:value="searchQuery"
-                placeholder="搜索歌手..."
-                clearable
-                round
-                :style="{ width: '220px' }"
-              >
-                <template #prefix>
-                  <n-icon><i class="mgc_search_line"></i></n-icon>
-                </template>
-              </n-input>
-            </div>
+        <div class="header">
+          <div class="title">
+            歌手
+            <span class="subtitle">
+              <i class="mgc_user_3_line"></i> {{ artists.length }} 位</span>
+          </div>
+          <div class="actions">
+            <n-input
+              v-model:value="searchQuery"
+              placeholder="模糊搜索"
+              clearable
+              round
+              class="search-input"
+              style="width: 200px"
+            >
+              <template #prefix>
+                <n-icon size="18" color="#999">
+                  <i class="mgc_search_2_line"></i>
+                </n-icon>
+              </template>
+            </n-input>
           </div>
         </div>
 
-        <!-- Artist Grid -->
-        <div class="artists-grid" v-if="filteredArtists.length > 0">
+        <!-- Artist List -->
+        <div class="artists-list" v-if="filteredArtists.length > 0">
           <div
-            v-for="artist in filteredArtists"
+            v-for="(artist, index) in filteredArtists"
             :key="artist.name"
-            class="artist-card"
-            @click="playArtistSongs(artist)"
+            class="artist-row"
+            @click="goToArtistDetail(artist)"
           >
-            <div class="artist-img-wrapper">
-              <img
-                :src="artist.cover || defaultCover"
-                class="artist-img"
-                loading="lazy"
-                decoding="async"
-              />
-              <div class="artist-play-overlay">
-                <n-icon size="28" color="white"><i class="mgc_play_fill"></i></n-icon>
+            <div class="artist-col-index">
+              <span class="index-num">{{ index + 1 }}</span>
+            </div>
+            <div class="artist-col-main">
+              <div class="artist-row-cover">
+                <img
+                  :src="artist.cover || defaultCover"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </div>
+              <div class="artist-row-info">
+                <span class="artist-row-name" :title="artist.name">{{ artist.name }}</span>
               </div>
             </div>
-            <div class="artist-name" :title="artist.name">{{ artist.name }}</div>
-            <div class="artist-stats">
-              <n-tag size="small" :bordered="false" type="info">
-                {{ artist.songCount }} 首
-              </n-tag>
-              <span class="stat-sep">·</span>
-              <span class="stat-plays">{{ artist.playCount }} 次播放</span>
+            <div class="artist-col-songs">
+              <span>{{ artist.songCount }} 首歌曲</span>
+            </div>
+            <div class="artist-col-plays">
+              <span>{{ artist.playCount }} 次播放</span>
+            </div>
+            <div class="artist-col-arrow">
+              <n-icon size="20"><i class="mgc_right_line"></i></n-icon>
             </div>
           </div>
         </div>
@@ -187,117 +120,149 @@ const playArtistSongs = (artist: ArtistInfo) => {
 }
 
 /* Header */
-.header-section {
-  margin: 8px 0 24px 0;
-}
-
-.header-content {
+.header {
   display: flex;
+  background-color: #F6F6F6;
   justify-content: space-between;
-  align-items: flex-start;
-  gap: 24px;
+  align-items: center;
+  margin-top: 8px;
+  margin-bottom: 14px;
+  padding: 8px 14px 4px;
+  z-index: 10;
+  border-radius: 8px;
 }
 
-.page-title {
-  font-size: 28px;
-  font-weight: 700;
-  margin: 0 0 4px 0;
-  color: var(--n-text-color);
+html[data-theme='dark'] .header {
+  background-color: rgba(255, 255, 255, 0);
 }
 
-.page-subtitle {
+html[data-theme='dark'] .search-input {
+  --n-color: rgba(255, 255, 255, 0.1) !important;
+  --n-color-focus: rgba(255, 255, 255, 0.15) !important;
+  --n-border: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+.title {
+  font-size: 27px;
+  font-weight: bold;
+}
+
+.subtitle {
   font-size: 14px;
-  color: var(--n-text-color-3);
-  margin: 0;
+  color: #999;
+  margin-left: 8px;
 }
 
-/* Artist Grid */
-.artists-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-  gap: 20px;
+.actions {
+  display: flex;
+  align-items: center;
 }
 
-.artist-card {
+/* Artist List */
+.artists-list {
   display: flex;
   flex-direction: column;
+  gap: 4px;
+}
+
+.artist-row {
+  display: flex;
   align-items: center;
-  padding: 20px 14px 16px;
+  padding: 8px 16px;
   background: var(--n-color-card);
-  border-radius: 16px;
-  border: 1px solid var(--n-border-color);
+  border-radius: 12px;
+  border: 1px solid transparent;
   cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.2s ease;
+  gap: 12px;
 }
 
-.artist-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
-  border-color: var(--n-primary-color);
+.artist-row:hover {
+  background: var(--n-color-hover);
+  border-color: var(--n-border-color);
 }
 
-.artist-img-wrapper {
-  position: relative;
-  width: 110px;
-  height: 110px;
+.artist-col-index {
+  width: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.index-num {
+  font-size: 14px;
+  color: var(--n-text-color-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.artist-col-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.artist-row-cover {
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   overflow: hidden;
-  margin-bottom: 14px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
-  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
-.artist-card:hover .artist-img-wrapper {
-  transform: scale(1.06);
-}
-
-.artist-img {
+.artist-row-cover img {
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
 
-.artist-play-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+.artist-row-info {
+  min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
-  opacity: 0;
-  transition: opacity 0.25s;
-  border-radius: 50%;
 }
 
-.artist-card:hover .artist-play-overlay {
-  opacity: 1;
-}
-
-.artist-name {
+.artist-row-name {
   font-size: 15px;
   font-weight: 600;
   color: var(--n-text-color);
-  text-align: center;
-  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-bottom: 8px;
 }
 
-.artist-stats {
+.artist-col-songs {
+  width: 120px;
+  flex-shrink: 0;
+  text-align: left;
+  font-size: 13px;
+  color: var(--n-text-color-3);
+}
+
+.artist-col-plays {
+  width: 100px;
+  flex-shrink: 0;
+  text-align: left;
+  font-size: 13px;
+  color: var(--n-text-color-3);
+}
+
+.artist-col-arrow {
+  width: 32px;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  justify-content: center;
+  color: var(--n-text-color-3);
+  opacity: 0;
+  transition: opacity 0.2s ease;
 }
 
-.stat-sep {
-  color: var(--n-text-color-3);
-}
-
-.stat-plays {
-  color: var(--n-text-color-3);
+.artist-row:hover .artist-col-arrow {
+  opacity: 1;
 }
 
 /* Empty */
@@ -317,19 +282,17 @@ const playArtistSongs = (artist: ArtistInfo) => {
 
 /* Responsive */
 @media (max-width: 768px) {
-  .header-content {
-    flex-direction: column;
-    align-items: flex-start;
+  .artist-row {
+    padding: 8px 12px;
   }
 
-  .artists-grid {
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-    gap: 14px;
+  .artist-col-songs,
+  .artist-col-plays {
+    display: none;
   }
 
-  .artist-img-wrapper {
-    width: 90px;
-    height: 90px;
+  .artist-col-arrow {
+    opacity: 1;
   }
 }
 </style>

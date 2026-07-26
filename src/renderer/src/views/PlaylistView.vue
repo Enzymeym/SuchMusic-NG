@@ -12,7 +12,7 @@
             @click="createEmptyPlaylist">
             <template #icon>
               <n-icon size="16">
-                <i class="mgc_add_circle_line"></i>
+                <i class="mgc_add_line"></i>
               </n-icon>
             </template>
             新建歌单
@@ -38,13 +38,7 @@
 
     <div class="content">
       <n-scrollbar class="playlist-scroll" content-style="padding: 0 4px 16px;">
-        <!-- 本地歌单 -->
-        <div class="local-section">
-          <div class="section-title">
-            <i class="mgc_folder_line"></i>
-            本地歌单
-          </div>
-          <div class="playlist-grid">
+        <div class="playlist-grid">
             <div v-for="pl in filteredPlaylists" :key="pl.id" class="playlist-card"
               :class="{ active: pl.id === selectedId }" @click="handleSelect(pl.id)"
               @dblclick="() => handlePlayPlaylist(pl.id)">
@@ -58,7 +52,6 @@
               <div class="playlist-title">{{ pl.name }}</div>
             </div>
           </div>
-        </div>
       </n-scrollbar>
     </div>
 
@@ -79,7 +72,7 @@ import { useRouter } from 'vue-router'
 import { NButton, NIcon, NInput, NScrollbar, NModal, useMessage } from 'naive-ui'
 import { usePlayerStore } from '../stores/playerStore'
 import { usePlaylistStore, type UserPlaylist } from '../stores/playlistStore'
-import defaultCover from '@renderer/assets/icon.png'
+import defaultCover from '@renderer/assets/default-cover.png'
 
 const router = useRouter()
 const player = usePlayerStore()
@@ -116,13 +109,9 @@ const filteredPlaylists = computed<UserPlaylist[]>(() => {
   })
 })
 
-onMounted(async () => {
-  loading.value = true
-  try {
-    playlistStore.loadFromStorage()
-  } finally {
-    loading.value = false
-  }
+onMounted(() => {
+  // 歌单数据已在 App.vue 初始化时加载，无需重复调用
+  loading.value = false
 })
 
 const handleSelect = (id: string) => {
@@ -141,7 +130,7 @@ const handlePlayPlaylist = (id: string) => {
     title: t.title,
     artist: t.artist,
     album: t.album,
-    cover: t.cover || defaultCover,
+    cover: t.cover || '',
     filePath: t.filePath,
     durationMs: t.durationMs || 0,
     source: t.source,
@@ -151,7 +140,6 @@ const handlePlayPlaylist = (id: string) => {
   player.setPlaylist(list)
   if (list.length > 0) {
     player.setCurrentSong(list[0])
-    player.setPlaying(true)
   }
 }
 
@@ -188,7 +176,7 @@ const handleConfirmCreate = (): void => {
       title: s.title,
       artist: s.artist,
       album: s.album,
-      cover: s.cover || defaultCover,
+      cover: s.cover || '',
       filePath: s.filePath,
       durationMs: s.durationMs,
       source: s.source,
@@ -209,7 +197,7 @@ const handleConfirmCreate = (): void => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 16px 24px 0px;
+  padding: 64px 24px 0px;
   box-sizing: border-box;
 }
 
@@ -320,37 +308,12 @@ html[data-theme='dark'] .search-input {
 }
 
 .playlist-title {
-  font-size: clamp(12px, 1.1vw, 14px);
+  font-size: clamp(14px, 1.3vw, 16px);
   line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
-}
-
-/* 分区标题 */
-.section-title {
-  font-size: clamp(14px, 1.3vw, 16px);
-  font-weight: 600;
-  color: #333;
-  margin-bottom: 12px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-html[data-theme='dark'] .section-title {
-  color: #eee;
-}
-
-.section-title i {
-  font-size: clamp(16px, 1.5vw, 18px);
-  color: #666;
-}
-
-/* 分区标题 */
-.local-section {
-  margin-top: 8px;
 }
 </style>

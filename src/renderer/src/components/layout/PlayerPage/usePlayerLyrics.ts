@@ -22,6 +22,9 @@ export function usePlayerLyrics() {
     return player.currentSong?.lyrics || ''
   })
 
+  // 是否含有有效歌词（去除空白后判断）
+  const hasLyrics = computed(() => lyricsData.value.trim().length > 0)
+
   // 翻译歌词数据
   const translatedLyricsData = computed(() => {
     return player.currentSong?.translatedLyrics || ''
@@ -87,22 +90,105 @@ export function usePlayerLyrics() {
     }
   }
 
-  /**
-   * 判断歌词是否为 YRC 逐字格式
-   * YRC 格式特征：每行包含形如 (词,开始时间,持续时长) 的词级时间戳
-   * @param lyrics 歌词字符串
-   * @returns 是否为 YRC 逐字格式
-   */
-  const isYrcFormat = (lyrics: string): boolean => {
-    return lyrics.includes('(') && /\d+,\d+,\d+/.test(lyrics)
+  // 判断是否为网易云歌曲
+  function isWySong(source?: string): boolean {
+    return source === 'wy' || source === 'netease'
   }
 
-  // 监听当前歌曲变化，仅使用本地已有的歌词数据
+  // 标记是否正在获取歌词，防止重复请求
+  const fetchingLyrics = ref(false)
+
+  // 记录用户手动选择过歌词的歌曲 ID，防止自动匹配覆盖用户选择
+  const manualLyricsSongId = ref<string | number | null>(null)
+
+  /**
+   * 标记当前歌曲已手动选择歌词
+   * 后续自动匹配会跳过该歌曲，避免覆盖用户选择
+   */
+  function markManualLyricsSelected(): void {
+    manualLyricsSongId.value = player.currentSong?.id ?? null
+  }
+
+  // 从网易云在线获取歌词（已有已知 songId）
+  async function fetchWyLyricsOnline(sourceSongId: string | number) {
+    try {
+      const result = await window.electron.ipcRenderer.invoke('lyric:fetch-wy', String(sourceSongId))
+      if (!result) return
+      // 校验歌曲是否已切换，且未手动选择过歌词
+      if (!player.currentSong) return
+      if (manualLyricsSongId.value === player.currentSong.id) return
+      const currentWy = isWySong(player.currentSong.source)
+      const currentSid = player.currentSong.sourceSongId
+      if (!currentWy || String(currentSid) !== String(sourceSongId)) return
+
+      if (result.lyrics) {
+        player.setLyrics(result.lyrics)
+      }
+      if (result.translatedLyrics) {
+        player.setTranslatedLyrics(result.translatedLyrics)
+      }
+    } catch (e) {
+      console.warn('[usePlayerLyrics] Failed to fetch Wy lyrics:', e)
+    }
+  }
+
+  // 通过歌曲名 + 歌手名模糊匹配获取网易云歌词（支持本地缓存）
+  async function fetchLyricsByMatch(title: string, artist: string) {
+    if (fetchingLyrics.value) return
+    fetchingLyrics.value = true
+    try {
+      const result = await window.electron.ipcRenderer.invoke('lyric:fetch-local', {
+        title,
+        artist
+      })
+      if (!result) return
+      // 校验歌曲是否已切换，且未手动选择过歌词
+      if (!player.currentSong) return
+      if (manualLyricsSongId.value === player.currentSong.id) return
+      if (
+        player.currentSong.title !== title ||
+        player.currentSong.artist !== artist
+      ) {
+        return
+      }
+
+      if (result.lyrics) {
+        player.setLyrics(result.lyrics)
+      }
+      if (result.translatedLyrics) {
+        player.setTranslatedLyrics(result.translatedLyrics)
+      }
+    } catch (e) {
+      console.warn('[usePlayerLyrics] Failed to fetch lyrics by match:', e)
+    } finally {
+      fetchingLyrics.value = false
+    }
+  }
+
+  // 监听当前歌曲变化，尝试在线获取歌词
   watch(
     () => player.currentSong?.id,
     (newId) => {
       if (!newId || !player.currentSong) return
-      // 歌词来源于本地文件元数据，无需在线获取
+      // 歌曲切换时清除手动选择标记
+      if (manualLyricsSongId.value !== newId) {
+        manualLyricsSongId.value = null
+      }
+
+      const song = player.currentSong
+
+      // 如果已有歌词或已手动选择，跳过
+      if (song.lyrics) return
+      if (manualLyricsSongId.value === newId) return
+
+      // 网易云歌曲已有 sourceSongId 的，直接通过 ID 获取
+      if (isWySong(song.source) && song.sourceSongId) {
+        fetchWyLyricsOnline(song.sourceSongId)
+        return
+      }
+
+      // 其他歌曲（本地歌曲等），通过歌名 + 歌手匹配获取
+      fetchLyricsByMatch(song.title, song.artist)
     },
     { immediate: true }
   )
@@ -110,6 +196,7 @@ export function usePlayerLyrics() {
   return {
     currentTime,
     lyricsData,
+    hasLyrics,
     translatedLyricsData,
     lyricsMode,
     lyricsBaseFontSize,
@@ -121,6 +208,8 @@ export function usePlayerLyrics() {
     lyricsFontFamily,
     activePageIndex,
     handleMainScroll,
-    scrollToPage
+    scrollToPage,
+    fetchingLyrics,
+    markManualLyricsSelected
   }
 }

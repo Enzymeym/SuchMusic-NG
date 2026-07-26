@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { ref, computed, h, onMounted, watch, nextTick } from 'vue'
-import { NModal, NLayout, NLayoutSider, NLayoutContent, NMenu, NIcon, NAutoComplete, NCard, useThemeVars } from 'naive-ui'
+import {
+  NModal,
+  NLayout,
+  NLayoutSider,
+  NLayoutContent,
+  NMenu,
+  NIcon,
+  NAutoComplete,
+  NCard,
+  useThemeVars
+} from 'naive-ui'
 import { useAutoNaiveTheme } from '../../themes/autoNaiveTheme'
 import SettingsGeneralSection from './Settings/SettingsGeneralSection.vue'
 import SettingsAppearanceSection from './Settings/SettingsAppearanceSection.vue'
@@ -29,6 +39,9 @@ const showModal = computed({
 })
 
 const activeKey = ref('general')
+
+// 设置内容区滚动容器引用
+const settingsContentRef = ref<any>(null)
 
 // 搜索输入内容，用于命令面板风格搜索
 const searchInput = ref('')
@@ -91,6 +104,12 @@ const searchOptions = [
     desc: '是否在任务栏显示歌曲播放进度'
   },
   {
+    label: '任务栏显示歌曲信息',
+    value: 'general.taskbarSongInfo',
+    section: 'general',
+    desc: '播放时在任务栏应用名显示 歌曲名 - 歌手'
+  },
+  {
     label: '自动检查更新',
     value: 'general.autoCheckUpdate',
     section: 'general',
@@ -137,18 +156,6 @@ const searchOptions = [
     value: 'playback.autoHideCursorWhenControlsHidden',
     section: 'playback',
     desc: '播放页底栏隐藏时自动隐藏鼠标指针'
-  },
-  {
-    label: '音频压限器强度',
-    value: 'playback.limiterStrength',
-    section: 'playback',
-    desc: '限制瞬时峰值，降低破音和爆音风险'
-  },
-  {
-    label: '音频均衡器',
-    value: 'playback.eq',
-    section: 'playback',
-    desc: '调节不同频段的增益，优化整体音色'
   },
   {
     label: '自适应歌词大小',
@@ -264,12 +271,13 @@ const autoCompleteOptions = computed(() => {
   const keyword = searchInput.value.trim().toLowerCase()
 
   return searchOptions
-    .filter(item => {
+    .filter((item) => {
       if (!keyword) return true
-      const text = `${item.label} ${sectionLabelMap[item.section] || item.section} ${item.desc || ''}`.toLowerCase()
+      const text =
+        `${item.label} ${sectionLabelMap[item.section] || item.section} ${item.desc || ''}`.toLowerCase()
       return text.includes(keyword)
     })
-    .map(item => ({
+    .map((item) => ({
       // label 用于 NAutoComplete 内部展示文本基础
       label: item.label,
       value: item.value,
@@ -303,6 +311,16 @@ watch(
   }
 )
 
+// 切换设置分区时重置滚动位置，避免从播放设置滚动后进入歌词设置继承 scrollY
+watch(activeKey, () => {
+  nextTick(() => {
+    const el = settingsContentRef.value?.$el?.querySelector('.n-layout-scroll-container')
+    if (el) {
+      el.scrollTop = 0
+    }
+  })
+})
+
 // 自定义命令面板选项标签渲染：括号内容作为上副标题，描述作为下副标题
 const renderSearchLabel = (rawOption: any) => {
   const option = rawOption as {
@@ -310,31 +328,13 @@ const renderSearchLabel = (rawOption: any) => {
     sectionLabel?: string
     desc?: string
   }
-  return h(
-    'div',
-    { class: 'settings-search-option' },
-    [
-      option.sectionLabel
-        ? h(
-            'div',
-            { class: 'settings-search-option__top' },
-            option.sectionLabel
-          )
-        : null,
-      h(
-        'div',
-        { class: 'settings-search-option__label' },
-        option.title
-      ),
-      option.desc
-        ? h(
-            'div',
-            { class: 'settings-search-option__desc' },
-            option.desc
-          )
-        : null
-    ]
-  )
+  return h('div', { class: 'settings-search-option' }, [
+    option.sectionLabel
+      ? h('div', { class: 'settings-search-option__top' }, option.sectionLabel)
+      : null,
+    h('div', { class: 'settings-search-option__label' }, option.title),
+    option.desc ? h('div', { class: 'settings-search-option__desc' }, option.desc) : null
+  ])
 }
 
 onMounted(async () => {
@@ -355,14 +355,11 @@ onMounted(async () => {
           return { label, value: decodedValue }
         })
 
-      if (!systemFonts.find(f => f.value === 'Microsoft YaHei UI')) {
+      if (!systemFonts.find((f) => f.value === 'Microsoft YaHei UI')) {
         systemFonts.unshift({ label: 'Microsoft YaHei UI', value: 'Microsoft YaHei UI' })
       }
 
-      fontOptions.value = [
-        { label: '跟随全局设置', value: 'follow_global' },
-        ...systemFonts
-      ]
+      fontOptions.value = [{ label: '跟随全局设置', value: 'follow_global' }, ...systemFonts]
     } catch (e) {
       console.error('Failed to load fonts', e)
       fontOptions.value = [
@@ -374,7 +371,7 @@ onMounted(async () => {
 })
 
 const globalFontOptions = computed(() => {
-  return fontOptions.value.filter(opt => opt.value !== 'follow_global')
+  return fontOptions.value.filter((opt) => opt.value !== 'follow_global')
 })
 
 // 设置项卡片背景色（深色用卡片色，浅色用纯白）
@@ -389,7 +386,7 @@ const settingItemBorderColor = computed(() => {
 
 // 处理搜索选择，切换到对应分组并高亮目标项
 const handleSearchSelect = (value: string) => {
-  const target = searchOptions.find(item => item.value === value)
+  const target = searchOptions.find((item) => item.value === value)
   if (!target) return
 
   activeKey.value = target.section
@@ -431,13 +428,25 @@ watch(
 </script>
 
 <template>
-  <n-modal v-model:show="showModal" style="width: 60vw; max-width: 1000px; height: 70vh; max-height: 600px; min-width: 800px; min-height: 400px; border-radius: 12px; overflow: hidden;">
+  <n-modal
+    v-model:show="showModal"
+    style="
+      width: 60vw;
+      max-width: 1000px;
+      height: 70vh;
+      max-height: 600px;
+      min-width: 800px;
+      min-height: 400px;
+      border-radius: 12px;
+      overflow: hidden;
+    "
+  >
     <n-card
       class="settings-root-card"
       :bordered="false"
       role="dialog"
       aria-modal="true"
-      style="height: 100%; width: 100%;"
+      style="height: 100%; width: 100%"
       :style="{ backgroundColor: themeVars.modalColor }"
       content-style="padding: 0; height: 100%; display: flex; flex-direction: column;"
     >
@@ -447,8 +456,11 @@ watch(
           <n-icon size="18"><i class="mgc_close_line"></i></n-icon>
         </div>
       </div>
-      <div class="settings-container" style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
-        <n-layout has-sider style="height: 540px;">
+      <div
+        class="settings-container"
+        style="flex: 1; min-height: 0; display: flex; flex-direction: column"
+      >
+        <n-layout has-sider style="height: 540px">
           <n-layout-sider bordered width="220" content-style="padding: 16px 0; overflow: hidden;">
             <!-- 侧边栏标题 -->
             <div class="sider-header">
@@ -465,12 +477,12 @@ watch(
                 @select="handleSearchSelect"
               />
             </div>
-            <div style="padding: 0 4px;">
-               <n-menu v-model:value="activeKey" :options="menuOptions" />
+            <div style="padding: 0 4px">
+              <n-menu v-model:value="activeKey" :options="menuOptions" />
             </div>
-
           </n-layout-sider>
           <n-layout-content
+            ref="settingsContentRef"
             content-style="padding: 6px 32px;"
             :native-scrollbar="false"
             :style="{ backgroundColor: isDark ? undefined : '#F6F6F6' }"
@@ -523,7 +535,6 @@ watch(
           </n-layout-content>
         </n-layout>
       </div>
-
     </n-card>
   </n-modal>
 </template>

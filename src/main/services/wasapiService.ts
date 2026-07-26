@@ -7,13 +7,13 @@
  * 架构：
  * ┌──────────────┐     ┌──────────────┐
  * │ 解码引擎      │────▶│ 处理链 (EQ等) │
- * │ symphonia/ffmpeg│   │              │
+ * │   Symphonia    │   │              │
  * └──────────────┘     └──────┬───────┘
  *                              │ PCM f32
  *                    ┌─────────▼─────────┐
  *                    │ 输出模式路由器     │
  *                    ├───────────────────┤
- *                    │ WebAudio │ WASAPI │
+ *                    │   WASAPI   │
  *                    └─────────┴─────────┘
  */
 
@@ -147,10 +147,23 @@ function getWasapiEngine(engineId: string): any {
 export function destroyWasapiEngine(engineId: string): void {
   const engine = wasapiEngines.get(engineId);
   if (engine) {
+    try { engine.stop(); } catch (e) {}
     try { engine.reset(); } catch (e) {}
     wasapiEngines.delete(engineId);
     console.log('[WASAPI] 销毁引擎实例:', engineId);
   }
+}
+
+/**
+ * 销毁所有 WASAPI 引擎实例（紧急停止用）
+ */
+export function destroyAllWasapiEngines(): void {
+  for (const [_engineId, engine] of wasapiEngines) {
+    try { engine.stop(); } catch (e) {}
+    try { engine.reset(); } catch (e) {}
+  }
+  wasapiEngines.clear();
+  console.log('[WASAPI] 已销毁所有引擎实例');
 }
 
 /**

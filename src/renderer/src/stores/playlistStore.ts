@@ -35,9 +35,21 @@ interface PlaylistState {
 const STORAGE_KEY = 'user_playlists'
 
 export const usePlaylistStore = defineStore('playlist', {
-  state: (): PlaylistState => ({
-    playlists: []
-  }),
+  state: (): PlaylistState => {
+    // 在 state 初始化时同步从 localStorage 加载歌单数据
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) {
+          return { playlists: parsed }
+        }
+      } catch (e) {
+        console.error('Failed to load playlists from storage', e)
+      }
+    }
+    return { playlists: [] }
+  },
   actions: {
     loadFromStorage(): void {
       const raw = localStorage.getItem(STORAGE_KEY)
@@ -73,17 +85,51 @@ export const usePlaylistStore = defineStore('playlist', {
       } else {
         // 确保它在第一个
         if (favoriteIndex !== 0) {
-           const fav = this.playlists.splice(favoriteIndex, 1)[0]
-           this.playlists.unshift(fav)
-           this.saveToStorage()
+          const fav = this.playlists.splice(favoriteIndex, 1)[0]
+          this.playlists.unshift(fav)
+          this.saveToStorage()
         }
       }
     },
     saveToStorage(): void {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(this.playlists))
+        const json = JSON.stringify(this.playlists)
+        localStorage.setItem(STORAGE_KEY, json)
       } catch (e) {
         console.error('Failed to save playlists to storage', e)
+        // 输出数据大小帮助排查 localStorage 配额问题
+        try {
+          const size = JSON.stringify(this.playlists).length
+          console.error(`Playlists data size: ${(size / 1024).toFixed(2)} KB`)
+        } catch {
+          /* ignore secondary error */
+        }
+      }
+    },
+    /**
+     * 根据本地歌曲已加载的封面恢复用户歌单中缺失的封面
+     * 仅补充空封面的曲目，并持久化到 storage
+     */
+    restoreCoversFromLocalSongs(localSongs: { id: string | number; picUrl?: string }[]): void {
+      const coverMap = new Map<string | number, string>()
+      localSongs.forEach((song) => {
+        if (song.picUrl) {
+          coverMap.set(song.id, song.picUrl)
+        }
+      })
+
+      let updated = false
+      this.playlists.forEach((pl) => {
+        pl.tracks.forEach((t) => {
+          if (t.id != null && !t.cover && coverMap.has(t.id)) {
+            t.cover = coverMap.get(t.id)!
+            updated = true
+          }
+        })
+      })
+
+      if (updated) {
+        this.saveToStorage()
       }
     },
     createPlaylistFromTracks(name: string, tracks: PlaylistTrack[], cover?: string): UserPlaylist {
@@ -111,7 +157,7 @@ export const usePlaylistStore = defineStore('playlist', {
       }
       // 防止其他歌单重命名为“我喜爱的音乐”
       if (playlist.id !== 'favorite' && playlist.name === '我喜爱的音乐') {
-         throw new Error('无法将歌单重命名为“我喜爱的音乐”，因为它是系统保留名称')
+        throw new Error('无法将歌单重命名为“我喜爱的音乐”，因为它是系统保留名称')
       }
 
       const index = this.playlists.findIndex((p) => p.id === playlist.id)
@@ -127,6 +173,25 @@ export const usePlaylistStore = defineStore('playlist', {
         this.playlists.splice(index, 1)
         this.saveToStorage()
       }
+    },
+    removeTracksFromPlaylist(playlistId: string, trackIds: Array<string | number | null>): number {
+      const index = this.playlists.findIndex((p) => p.id === playlistId)
+      if (index === -1) return 0
+
+      const pl = this.playlists[index]
+      const idSet = new Set(trackIds.map(String))
+      const before = pl.tracks.length
+      const newTracks = pl.tracks.filter((t) => !(t.id && idSet.has(String(t.id))))
+
+      if (newTracks.length !== before) {
+        this.playlists.splice(index, 1, {
+          ...pl,
+          tracks: newTracks,
+          updatedAt: Date.now()
+        })
+        this.saveToStorage()
+      }
+      return before - newTracks.length
     },
     toggleFavorite(track: PlaylistTrack): boolean {
       const fav = this.playlists.find((p) => p.id === 'favorite')
@@ -191,4 +256,3 @@ export const usePlaylistStore = defineStore('playlist', {
     }
   }
 })
-

@@ -11,6 +11,21 @@ const notification = useNotification()
  * @param data 插件通知数据，包含 pluginName、type、data 字段
  */
 function handlePluginNotice(_event: any, data: any): void {
+  // 处理插件 notify 消息
+  if (data.type === 'notify') {
+    const { pluginName, message, notifyType } = data
+    const method = notifyType === 'success' ? 'success'
+      : notifyType === 'error' ? 'error'
+      : notifyType === 'warning' ? 'warning'
+      : 'info'
+    notification[method]({
+      title: pluginName || '插件通知',
+      content: message,
+      duration: 4000
+    })
+    return
+  }
+
   if (data.type !== 'update') return
 
   const { pluginName, data: updateData } = data

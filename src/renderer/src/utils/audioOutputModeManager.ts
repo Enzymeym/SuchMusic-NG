@@ -2,18 +2,41 @@
  * 统一音频输出模式管理器
  *
  * 管理三种音频输出模式之间的切换：
- * 1. WebAudio (默认) — 通过 Web Audio API 输出到系统默认设备
- * 2. WASAPI Shared — 通过 WASAPI 共享模式输出
- * 3. WASAPI Exclusive — 通过 WASAPI 独占模式输出（最低延迟、bit-perfect）
+ * 1. Web Audio — 使用浏览器内置 AudioContext（跨平台默认）
+ * 2. WASAPI Shared — 通过 WASAPI 共享模式输出（仅 Windows）
+ * 3. WASAPI Exclusive — 通过 WASAPI 独占模式输出（仅 Windows，最低延迟、bit-perfect）
  *
  * 模式切换策略：
+ * - Web Audio 模式跨平台可用，非 Windows 平台唯一选项
+ * - WASAPI 仅在 Windows 平台可用
  * - 独占模式需要独占设备，切换时将停止当前播放
- * - 共享模式可在播放中无缝切换（使用 AudioContext 重连）
  * - 独占模式失败自动回退到共享模式
+ * - WASAPI 失败自动回退到 Web Audio
  */
 
 /// 音频输出模式类型
 export type AudioOutputMode = 'webaudio' | 'wasapi-shared' | 'wasapi-exclusive';
+
+// ====== 平台检测 ======
+
+/** 是否运行在 Windows 平台 */
+export function isWindowsPlatform(): boolean {
+  return (typeof process !== 'undefined' && process.platform === 'win32')
+    || (typeof navigator !== 'undefined' && (navigator?.userAgent?.includes('Windows') ?? false));
+}
+
+/** 获取当前平台可用的音频输出模式列表 */
+export function getAvailableOutputModes(): AudioOutputMode[] {
+  if (isWindowsPlatform()) {
+    return ['webaudio', 'wasapi-shared', 'wasapi-exclusive'];
+  }
+  return ['webaudio'];
+}
+
+/** 获取平台默认音频输出模式 */
+export function getDefaultOutputMode(): AudioOutputMode {
+  return isWindowsPlatform() ? 'wasapi-shared' : 'webaudio';
+}
 
 /// 音频设备信息接口
 export interface AudioDevice {
@@ -45,9 +68,27 @@ function getWasapiApi() {
 }
 
 /**
+ * 清洗 Rust N-API 错误消息，提取人类可读部分
+ *
+ * 原始格式可能是嵌套的 Rust Debug 输出，例如：
+ *   "Error: 创建 WASAPI 客户端失败: InitializationError(\"...\")"
+ * 此函数提取最内层的可读消息，同时保留错误码描述。
+ */
+export function cleanRustError(raw: string): string {
+  // 移除 N-API Error 包装前缀，如 "Error: 创建 WASAPI 客户端失败: "
+  let cleaned = raw.replace(/^Error:\s*创建\s+WASAPI\s+客户端失败:\s*/, '');
+
+  // 移除 Rust enum Debug wrapper，如 InitializationError("...") → "..."
+  // 匹配: EnumName("content") 其中 content 不包含未转义的引号
+  cleaned = cleaned.replace(/^\w+\("([^"]*)"\)$/, '$1');
+
+  return cleaned || raw;
+}
+
+/**
  * 音频输出模式管理器类
  *
- * 提供统一的音频输出接口，自动处理 WebAudio 和 WASAPI 模式之间的切换。
+ * 提供统一的音频输出接口，自动处理 WASAPI 模式之间的切换。
  *
  * # 使用示例
  *
@@ -62,14 +103,11 @@ function getWasapiApi() {
  *
  * // 输出音频数据
  * await manager.outputAudio(pcmData, 2, 44100);
- *
- * // 恢复 WebAudio 模式
- * await manager.switchMode('webaudio');
  * ```
  */
 export class AudioOutputModeManager {
   /** 当前输出模式 */
-  private currentMode: AudioOutputMode = 'webaudio';
+  private currentMode: AudioOutputMode = getDefaultOutputMode();
 
   /** WASAPI 引擎状态 */
   private wasapiState: WasapiEngineState = {
@@ -118,10 +156,10 @@ export class AudioOutputModeManager {
         this.wasapiUnavailableReason = '';
         return { available: true, reason: '' };
       }
-      this.wasapiUnavailableReason = checkResult.error || '未知错误';
+      this.wasapiUnavailableReason = cleanRustError(checkResult.error || '未知错误');
       return { available: false, reason: this.wasapiUnavailableReason };
     } catch (err) {
-      this.wasapiUnavailableReason = String(err);
+      this.wasapiUnavailableReason = cleanRustError(String(err));
       return { available: false, reason: this.wasapiUnavailableReason };
     }
   }
@@ -144,6 +182,16 @@ export class AudioOutputModeManager {
    */
   isWasapiMode(): boolean {
     return this.currentMode === 'wasapi-shared' || this.currentMode === 'wasapi-exclusive';
+  }
+
+  /**
+   * 检查是否为 Web Audio 模式
+   *
+   * # 返回值
+   * 返回 true 如果当前在使用 Web Audio
+   */
+  isWebAudioMode(): boolean {
+    return this.currentMode === 'webaudio';
   }
 
   /**
@@ -173,6 +221,8 @@ export class AudioOutputModeManager {
    * 返回设备信息数组
    */
   async enumerateDevices(): Promise<AudioDevice[]> {
+    if (!isWindowsPlatform()) return [];  // 非 Windows 平台无 WASAPI 设备
+
     try {
       const api = getWasapiApi();
       if (!api) return [];
@@ -225,6 +275,7 @@ export class AudioOutputModeManager {
       await this.destroyWasapi();
     }
 
+    // Web Audio 模式（跨平台，无需 Rust 端初始化）
     if (mode === 'webaudio') {
       this.currentMode = 'webaudio';
       this.onModeChanged?.('webaudio');
@@ -269,14 +320,14 @@ export class AudioOutputModeManager {
         return { success: true };
       }
 
-      // 记录失败原因并回退，不刷屏
-      this.wasapiUnavailableReason = result.error || '未知错误';
+      // 记录失败原因并回退到 Web Audio
+      this.wasapiUnavailableReason = cleanRustError(result.error || '未知错误');
       console.warn('[AudioOutput] WASAPI 不可用:', this.wasapiUnavailableReason);
       this.currentMode = 'webaudio';
       this.onModeChanged?.('webaudio');
-      return { success: false, error: result.error };
+      return { success: false, error: this.wasapiUnavailableReason };
     } catch (err) {
-      const msg = String(err);
+      const msg = cleanRustError(String(err));
       this.wasapiUnavailableReason = msg;
       console.warn('[AudioOutput] WASAPI 不可用:', msg);
       this.currentMode = 'webaudio';
@@ -303,6 +354,7 @@ export class AudioOutputModeManager {
       }
       return result;
     } catch (err) {
+      console.error('[AudioOutput] outputAudio 失败:', err);
       return { success: false, error: String(err) };
     }
   }
@@ -446,7 +498,7 @@ export class AudioOutputModeManager {
   getEngineDescription(): string {
     switch (this.currentMode) {
       case 'webaudio':
-        return 'Web Audio API (默认)';
+        return `Web Audio API（浏览器内置）`;
       case 'wasapi-shared':
         return `WASAPI 共享模式 — ${this.wasapiState.deviceName}`;
       case 'wasapi-exclusive':

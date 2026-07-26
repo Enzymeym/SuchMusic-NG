@@ -1,250 +1,231 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { NGrid, NGridItem, NIcon, NScrollbar, NButton } from 'naive-ui'
+import { NScrollbar, NGrid, NGridItem, NSlider } from 'naive-ui'
 import { useRouter } from 'vue-router'
-import defaultCover from '@renderer/assets/icon.png'
+import defaultCover from '@renderer/assets/default-cover.png'
 import { usePlayerStore } from '../stores/playerStore'
+import { useLocalMusicStore } from '../stores/localMusicStore'
+import { usePlaylistTheme } from '../composables/usePlaylistTheme'
 import { throttle } from '../utils/performance'
 
-
 const playerStore = usePlayerStore()
+const localMusicStore = useLocalMusicStore()
 const router = useRouter()
 
-// 响应式显示数量，确保只显示一行
-const displayLimit = ref(8)
+const currentTimeDisplay = ref(0)
 
-const updateDisplayLimit = () => {
-  // Use container width or window width to determine columns
-  // The layout has a sidebar (200px) + padding (32px), so content area is smaller than window
-  const width = document.documentElement.clientWidth
-
-  // We need to account for the sidebar (200px) and padding (32px)
-  // Effective content width = width - 232
-
-  // NGrid breakpoints are based on SCREEN width, not container width by default if responsive="screen"
-  // But our grid uses responsive="screen" which matches window width.
-  // Let's align exactly with the breakpoints:
-  // cols="2 s:3 m:4 l:5 xl:6 2xl:8"
-  // s: 640, m: 768, l: 1024, xl: 1280, 2xl: 1536
-
-  // Always show 2 rows
-  if (width >= 1536) { // 2xl (8 cols)
-    displayLimit.value = 16
-  } else if (width >= 1280) { // xl (6 cols)
-    displayLimit.value = 12
-  } else if (width >= 1024) { // l (5 cols)
-    displayLimit.value = 10
-  } else if (width >= 768) { // m (4 cols)
-    displayLimit.value = 8
-  } else if (width >= 640) { // s (3 cols)
-    displayLimit.value = 6
-  } else { // (2 cols)
-    displayLimit.value = 4
+let progressTimer: ReturnType<typeof setInterval> | null = null
+const startProgressTimer = () => {
+  if (progressTimer) return
+  progressTimer = setInterval(() => {
+    currentTimeDisplay.value = playerStore.positionMs
+  }, 250)
+}
+const stopProgressTimer = () => {
+  if (progressTimer) {
+    clearInterval(progressTimer)
+    progressTimer = null
   }
 }
 
-const navigateTo = (name: string) => {
-  router.push({ name })
-}
-
-// 初始化加载
 onMounted(() => {
   updateDisplayLimit()
   window.addEventListener('resize', throttle(updateDisplayLimit, 200))
-
   playerStore.loadHistory()
+  startProgressTimer()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', updateDisplayLimit)
+  stopProgressTimer()
 })
 
-const totalPlays = computed(() => playerStore.playHistory.length)
+const displayLimit = ref(8)
 
-const now = new Date()
-const monthNames = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '十一', '十二']
-const currentMonth = computed(() => monthNames[now.getMonth()] + '月')
-const currentYear = computed(() => now.getFullYear() + '年')
+const updateDisplayLimit = () => {
+  const width = document.documentElement.clientWidth
+  if (width >= 1536) { displayLimit.value = 16 }
+  else if (width >= 1280) { displayLimit.value = 12 }
+  else if (width >= 1024) { displayLimit.value = 10 }
+  else if (width >= 768) { displayLimit.value = 8 }
+  else if (width >= 640) { displayLimit.value = 6 }
+  else { displayLimit.value = 4 }
+}
 
-const monthlyPlays = computed(() => {
-  const currentMonthIdx = now.getMonth()
-  const currentYearVal = now.getFullYear()
-  return playerStore.playHistory.filter((record) => {
-    const d = new Date(record.timestamp)
-    return d.getMonth() === currentMonthIdx && d.getFullYear() === currentYearVal
-  }).length
+const nowPlayingCover = computed(() => playerStore.currentSong?.cover || defaultCover)
+
+const { accentColor, textColor } = usePlaylistTheme(() => nowPlayingCover.value)
+
+const currentProgress = computed(() => {
+  const song = playerStore.currentSong
+  if (!song || song.durationMs <= 0) return 0
+  return Math.min((currentTimeDisplay.value / song.durationMs) * 100, 100)
 })
 
-// Helper to find top item
-const getTopItem = (key: 'songId' | 'artist' | 'album') => {
-  if (playerStore.playHistory.length === 0) return null
+const formatTime = (seconds: number): string => {
+  if (!isFinite(seconds)) return '0:00'
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
 
-  const counts: Record<string, number> = {}
-  playerStore.playHistory.forEach((record) => {
-    const val = key === 'songId' ? String(record.songId) : record[key] || '未知'
-    if (!val) return
-    counts[val] = (counts[val] || 0) + 1
-  })
+const UNKNOWN_ARTIST = '\u672a\u77e5\u6b4c\u624b'
 
-  let maxVal: string | null = null
-  let maxCount = -1
+const recommendedSongs = computed(() => {
+  const history = playerStore.playHistory
+  const localSongs = localMusicStore.songs
 
-  for (const [k, v] of Object.entries(counts)) {
-    if (v > maxCount) {
-      maxCount = v
-      maxVal = k
+  const songs: { id: string | number; title: string; artist: string; cover: string }[] = []
+  const seenIds = new Set<string | number>()
+
+  for (const record of history) {
+    if (seenIds.has(record.songId)) continue
+    seenIds.add(record.songId)
+    songs.push({
+      id: record.songId,
+      title: record.title,
+      artist: record.artist,
+      cover: record.cover || defaultCover
+    })
+    if (songs.length >= 12) break
+  }
+
+  if (songs.length < 12 && localSongs.length > 0) {
+    const shuffled = [...localSongs].sort(() => Math.random() - 0.5)
+    for (const song of shuffled) {
+      if (seenIds.has(song.id)) continue
+      seenIds.add(song.id)
+      songs.push({
+        id: song.id,
+        title: song.name,
+        artist: song.ar?.[0]?.name || UNKNOWN_ARTIST,
+        cover: song.picUrl || song.al?.picUrl || defaultCover
+      })
+      if (songs.length >= 12) break
     }
   }
 
-  if (!maxVal) return null
+  return songs.slice(0, displayLimit.value)
+})
 
-  // Find the record for details
-  const record = playerStore.playHistory.find((r) =>
-    key === 'songId' ? String(r.songId) == maxVal : (r[key] || '未知') == maxVal
-  )
+const recommendedAlbums = computed(() => {
+  const albums = localMusicStore.albumList
+  if (albums.length === 0) return []
 
-  return {
-    ...record,
-    count: maxCount,
-    displayTitle: key === 'songId' ? record?.title : maxVal
+  const shuffled = [...albums].sort(() => Math.random() - 0.5)
+  return shuffled.slice(0, displayLimit.value).map(a => ({
+    name: a.name,
+    artist: a.artist,
+    cover: a.cover || defaultCover,
+    songCount: a.songs.length
+  }))
+})
+
+// Label text constants
+const L = {
+  songRecommend: '\u6b4c\u66f2\u63a8\u8350',
+  albumRecommend: '\u4e13\u8f91\u63a8\u8350',
+  noSongPlaying: '\u6682\u65e0\u64ad\u653e\u6b4c\u66f2\uff0c\u53bb\u9009\u62e9\u4e00\u9996\u6b4c\u66f2\u5f00\u59cb\u64ad\u653e\u5427',
+}
+const playSong = (songId: string | number) => {
+  const localSong = localMusicStore.songs.find(s => s.id === songId)
+  if (localSong) {
+    playerStore.setCurrentSong({
+      id: localSong.id,
+      title: localSong.name,
+      artist: localSong.ar?.[0]?.name || UNKNOWN_ARTIST,
+      cover: localSong.picUrl || localSong.al?.picUrl || defaultCover,
+      durationMs: localSong.dt || 0,
+      album: localSong.al?.name,
+      filePath: localSong.filePath
+    })
   }
 }
 
-const topSong = computed(() => getTopItem('songId'))
-const topArtist = computed(() => getTopItem('artist'))
-const topAlbum = computed(() => getTopItem('album'))
+const navigateToAlbum = (albumName: string) => {
+  router.push({ name: 'album-detail', params: { name: albumName } })
+}
 
-const statsBgImage = computed(() => {
-  return `url("${topSong.value?.cover || defaultCover}")`
-})
-
-const weeklyActivity = computed(() => {
-  const days = Array(7).fill(0)
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-
-  // Find most recent Monday
-  const dayOfWeek = today.getDay() // 0(Sun) - 6(Sat)
-  const distToMon = (dayOfWeek + 6) % 7 // Mon is 0 distance, Sun is 6
-  const monday = new Date(today.getTime() - distToMon * 24 * 60 * 60 * 1000)
-
-  playerStore.playHistory.forEach((record) => {
-    const d = new Date(record.timestamp)
-    if (d >= monday) {
-      const dayIndex = (d.getDay() + 6) % 7 // Mon=0, Sun=6
-      days[dayIndex]++
-    }
-  })
-
-  const max = Math.max(...days, 5) // At least 5 to avoid huge bars for 1 play
-  return days.map((count) => Math.round((count / max) * 100))
-})
 </script>
 
 <template>
   <div style="height: 100%">
-    <n-scrollbar style="height: 100%" content-style="padding: 16px 24px;">
+    <n-scrollbar style="height: 100%" content-style="padding: 16px 24px 32px;">
       <div class="home-view">
-        <div class="home-container">
-          <!-- Greeting Section -->
-          <div class="greeting-section">
-            <h1 class="greeting-title">
-              统计
-
-              <n-button secondary circle style="margin-top: 2px" @click="navigateTo('statistics')">
-                <n-icon size="20"><i class="mgc_right_line"></i></n-icon>
-              </n-button>
-
-            </h1>
-            <p class="greeting-sub">总共播放了 {{ totalPlays }} 次</p>
-          </div>
-        </div>
-
-        <div class="stats-section">
-          <div class="stats-card">
-            <!-- Left Column: Date & Total -->
-            <div class="stats-left">
-              <div class="date-group">
-                <div class="month">{{ currentMonth }}</div>
-                <div class="year">{{ currentYear }}</div>
+        <div v-if="playerStore.currentSong" class="now-playing-section">
+          <div class="np-bg-layer full" :style="{ backgroundImage: `url(${nowPlayingCover})` }"></div>
+          <div class="np-bg-reflection full" :style="{ backgroundImage: `url(${nowPlayingCover})` }"></div>
+          <div class="np-header-section">
+            <div class="np-header-content">
+              <div class="np-cover-wrapper full">
+                <img :src="nowPlayingCover" class="np-cover-img" :class="{ 'is-playing': playerStore.isPlaying }" />
               </div>
-
-              <div class="play-total-group">
-                <div class="total-count">{{ monthlyPlays }}</div>
-                <div class="total-label">本月播放</div>
-              </div>
-
-              <div class="play-btn-circle">
-                <n-icon size="24" color="white"><i class="mgc_play_fill"></i></n-icon>
-              </div>
-            </div>
-
-            <!-- Middle Column: Highlights -->
-            <div class="stats-middle">
-              <div class="column-header">精彩回顾</div>
-
-              <!-- Top Song -->
-              <div class="highlight-item big" v-if="topSong">
-                <img :src="topSong.cover || defaultCover" class="highlight-img" loading="lazy" decoding="async" />
-                <div class="highlight-info">
-                  <div class="song-name">{{ topSong.displayTitle }}</div>
-                  <div class="artist-name">{{ topSong.artist }}</div>
+              <div class="np-info-wrapper">
+                <div class="np-title" :style="{ color: textColor }">{{ playerStore.currentSong.title }}</div>
+                <div class="np-tags-row" :style="{ color: textColor }">
+                  <span>{{ playerStore.currentSong.artist || UNKNOWN_ARTIST }}</span>
                 </div>
-                <div class="play-times">{{ topSong.count }} <span class="unit">次</span></div>
-              </div>
-              <div class="highlight-item big" v-else style="justify-content: center; color: #999">
-                暂无播放记录
-              </div>
-
-              <!-- Bottom Row -->
-              <div class="highlight-row">
-                <div class="highlight-item small" v-if="topArtist">
-                  <img :src="topArtist.cover || defaultCover" class="highlight-img-small" loading="lazy"
-                    decoding="async" />
-                  <div class="highlight-info">
-                    <div class="tag">最爱艺人</div>
-                    <div class="name">{{ topArtist.displayTitle }}</div>
-                  </div>
+                <div v-if="playerStore.currentSong.album" class="np-desc-row" :style="{ color: textColor }">
+                  <span>{{ playerStore.currentSong.album }}</span>
                 </div>
-                <div class="highlight-item small" v-else>
-                  <div class="highlight-info">
-                    <div class="tag">最爱艺人</div>
-                    <div class="name">暂无</div>
-                  </div>
-                </div>
-
-                <div class="highlight-item small" v-if="topAlbum">
-                  <img :src="topAlbum.cover || defaultCover" class="highlight-img-small" loading="lazy"
-                    decoding="async" />
-                  <div class="highlight-info">
-                    <div class="tag">最爱专辑</div>
-                    <div class="name">{{ topAlbum.displayTitle }}</div>
-                  </div>
-                </div>
-                <div class="highlight-item small" v-else>
-                  <div class="highlight-info">
-                    <div class="tag">最爱专辑</div>
-                    <div class="name">暂无</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- Right Column: Activity -->
-            <div class="stats-right">
-              <div class="column-header">活跃动态（周）</div>
-              <div class="activity-chart">
-                <div class="chart-bar-wrapper" v-for="i in 7" :key="i">
-                  <div class="chart-bar" :style="{ height: weeklyActivity[i - 1] + '%' }"></div>
-                  <div class="chart-label">
-                    {{ ['一', '二', '三', '四', '五', '六', '日'][i - 1] }}
-                  </div>
+                <div class="np-actions-row">
+                  <span class="np-time" :style="{ color: textColor }">{{ formatTime(currentTimeDisplay / 1000) }}</span>
+                  <span>/</span>
+                  <span class="np-time" :style="{ color: textColor }">{{ formatTime((playerStore.currentSong.durationMs
+                    || 0) / 1000) }}</span>
                 </div>
               </div>
             </div>
           </div>
         </div>
-        <!-- Banners Section -->
+        <div v-else class="now-playing-section np-placeholder">
+          <div class="np-empty">
+            <i class="mgc_music_3_line" style="font-size: 48px; opacity: 0.3"></i>
+            <p style="margin-top: 12px; opacity: 0.5; font-size: 15px">{{ L.noSongPlaying }}</p>
+          </div>
+        </div>
+
+        <div v-if="recommendedSongs.length > 0" class="section-block">
+          <div class="section-header">
+            <h2 class="section-title">{{ L.songRecommend }}</h2>
+          </div>
+          <n-grid cols="2 s:3 m:4 l:5 xl:6 2xl:8" responsive="screen" :x-gap="16" :y-gap="16">
+            <n-grid-item v-for="song in recommendedSongs" :key="song.id">
+              <div class="recommend-card" @click="playSong(song.id)">
+                <div class="rc-cover-wrapper">
+                  <img :src="song.cover" class="rc-cover" loading="lazy" />
+                  <div class="rc-play-overlay"><i class="mgc_play_fill" style="font-size: 28px; color: white"></i></div>
+                </div>
+                <div class="rc-info">
+                  <div class="rc-title">{{ song.title }}</div>
+                  <div class="rc-subtitle">{{ song.artist }}</div>
+                </div>
+              </div>
+            </n-grid-item>
+          </n-grid>
+        </div>
+
+        <div v-if="recommendedAlbums.length > 0" class="section-block">
+          <div class="section-header">
+            <h2 class="section-title">{{ L.albumRecommend }}</h2>
+          </div>
+          <n-grid cols="2 s:3 m:4 l:5 xl:6 2xl:8" responsive="screen" :x-gap="16" :y-gap="16">
+            <n-grid-item v-for="album in recommendedAlbums" :key="album.name">
+              <div class="recommend-card" @click="navigateToAlbum(album.name)">
+                <div class="rc-cover-wrapper">
+                  <img :src="album.cover" class="rc-cover" loading="lazy" />
+                  <div class="rc-play-overlay"><i class="mgc_album_line" style="font-size: 28px; color: white"></i>
+                  </div>
+                </div>
+                <div class="rc-info">
+                  <div class="rc-title">{{ album.name }}</div>
+                  <div class="rc-subtitle">{{ album.artist }} · {{ album.songCount }} 首</div>
+                </div>
+              </div>
+            </n-grid-item>
+          </n-grid>
+        </div>
+
       </div>
     </n-scrollbar>
   </div>
@@ -252,252 +233,249 @@ const weeklyActivity = computed(() => {
 
 <style scoped>
 .home-view {
-  /* overflow-y: auto; handled by NScrollbar */
-}
-
-.home-container {}
-
-.greeting-section {}
-
-.greeting-title {
-  font-size: 32px;
-  font-weight: bold;
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.greeting-sub {
-  font-size: 14px;
-  color: #666;
-  margin: -6px 0 0 0;
-}
-
-.banners-section {
   display: flex;
   flex-direction: column;
-  margin-bottom: 32px;
+
+}
+
+.section-block {
   margin-top: 8px;
-}
-
-.left-banners {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.banner-title {
-  font-size: 24px;
-  font-weight: bold;
-}
-
-.section-header-row {
-  display: flex;
-  justify-content: start;
-  gap: 12px;
-  align-items: center;
-}
-
-.banner-card {
-  height: 100px;
-  /* Approximate height */
-  background-color: #f9f9f9;
-  border-radius: 12px;
-  cursor: pointer;
-  transition: transform 0.2s;
-}
-
-.banner-card:hover {
-  transform: translateY(-2px);
-  background-color: #f0f0f0;
-}
-
-.card-content {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  height: 100%;
-}
-
-.card-icon {
-  width: 60px;
-  height: 60px;
-  border-radius: 8px;
-}
-
-.card-title {
-  font-size: 18px;
-  font-weight: bold;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.card-desc {
-  font-size: 12px;
-  color: #666;
-  margin-top: 4px;
-}
-
-.toplist-section {
-  margin-top: 8px;
-}
-
-.toplist-sub {
-  font-size: 12px;
-  color: #888;
-  margin-top: 4px;
-}
-
-.right-banner {
-  flex: 1.5;
-}
-
-.fm-card {
-  height: 100%;
-  background-color: #333;
-  /* Dark background like image */
-  color: white;
-  border-radius: 12px;
-}
-
-.fm-content {
-  display: flex;
-  gap: 24px;
-  align-items: center;
-  height: 100%;
-}
-
-.fm-cover {
-  width: 140px;
-  height: 140px;
-  border-radius: 8px;
-}
-
-.fm-info {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  position: relative;
-}
-
-.fm-title {
-  font-size: 24px;
-  font-weight: bold;
-  margin-bottom: 8px;
-}
-
-.fm-artist,
-.fm-album {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.7);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 4px;
-}
-
-.fm-controls {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-top: 16px;
-}
-
-.fm-tag {
-  position: absolute;
-  bottom: 0;
-  right: 0;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.5);
-  display: flex;
-  align-items: center;
-  gap: 4px;
 }
 
 .section-header {
   margin-bottom: 16px;
-  padding-left: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .section-title {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: bold;
-  line-height: 1;
+  margin: 0;
 }
 
-.playlist-card {
-  cursor: pointer;
+.now-playing-section {
+  position: relative;
+  overflow: hidden;
+  width: calc(100% + 48px);
+  margin-left: -24px;
+  margin-right: -24px;
+  height: 330px;
+  z-index: 1;
+  border-radius: 0;
 }
 
-.artist-card {
+.np-bg-layer.full {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 380px;
+  background-size: cover;
+  background-position: center;
+  transform: scale(1.06);
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, black 0%, black 40%, transparent 85%);
+  mask-image: linear-gradient(to bottom, black 0%, black 40%, transparent 85%);
+  opacity: 1;
+}
+
+.np-bg-layer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  backdrop-filter: blur(100px) brightness(0.9);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, transparent 10%, black 60%);
+  mask-image: linear-gradient(to bottom, transparent 0%, transparent 10%, black 60%);
+  z-index: 1;
+}
+
+.np-bg-layer::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.137), rgba(0, 0, 0, 0) 80%, rgba(0, 0, 0, 0.8) 100%);
+  z-index: 2;
+}
+
+.np-bg-reflection.full {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 380px;
+  background-size: cover;
+  background-position: center;
+  transform: scaleY(-1) scale(1.06);
+  transform-origin: center;
+  filter: blur(40px) brightness(0.75);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 35%, black 100%);
+  mask-image: linear-gradient(to bottom, transparent 35%, black 100%);
+  z-index: 3;
+  pointer-events: none;
+  opacity: 0.65;
+}
+
+.np-header-section {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  cursor: pointer;
-  padding: 12px;
-  border-radius: 12px;
-  transition: background-color 0.2s;
-  will-change: transform;
-  /* Hint to browser */
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 60px 40px 12px 40px;
+  height: 300px;
+  min-height: 300px;
+  box-sizing: border-box;
+  color: white;
 }
 
-.artist-card:hover {
-  background-color: var(--n-color-modal);
+.np-header-content {
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
 }
 
-.artist-cover-wrapper {
-  width: 120px;
-  height: 120px;
-  border-radius: 50%;
+.np-cover-wrapper {
+  width: 200px;
+  height: auto;
+  aspect-ratio: 1/1;
+  flex-shrink: 0;
+  border-radius: 8px;
   overflow: hidden;
-  margin-bottom: 12px;
-  /* Removed heavy shadow */
-  /* box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); */
-  background-color: rgba(0, 0, 0, 0.05);
-  /* Placeholder bg */
+  margin-right: 24px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
 }
 
-.artist-cover {
+.np-cover-wrapper.full {
+  display: none;
+}
+
+.np-cover-img {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  /* Removed scale transition on image to improve performance */
-  /* transition: transform 0.3s; */
+  transition: transform 0.5s cubic-bezier(0.25, 0.1, 0.25, 1);
 }
 
-/*
-.artist-card:hover .artist-cover {
-  transform: scale(1.1);
+.np-cover-img.is-playing {
+  animation: coverSpin 20s linear infinite;
 }
-*/
 
-.artist-name {
+@keyframes coverSpin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.np-info-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding-bottom: 8px;
+}
+
+.np-title {
+  font-size: 40px;
+  font-weight: 800;
+  line-height: 1.1;
+  margin-bottom: 8px;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+}
+
+.np-tags-row {
+  display: flex;
+  gap: 8px;
   font-size: 15px;
-  font-weight: 600;
-  margin-bottom: 4px;
+  opacity: 0.9;
+  margin-bottom: 8px;
+  font-weight: 500;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
-.artist-alias {
+.np-desc-row {
+  font-size: 14px;
+  opacity: 0.8;
+  margin-bottom: 16px;
+  max-width: 600px;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+.np-actions-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 12px;
+  max-width: 400px;
+}
+
+.np-time {
   font-size: 12px;
-  color: var(--n-text-color-3);
-  text-align: center;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 }
 
-.cover-wrapper {
+.np-slider-wrapper {
+  display: none;
+}
+
+.np-placeholder {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.np-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.recommend-card {
+  cursor: pointer;
+  border-radius: 12px;
+  transition: transform 0.2s, background-color 0.2s;
+}
+
+.recommend-card:hover {
+  transform: translateY(-4px);
+}
+
+.recommend-card:hover .rc-play-overlay {
+  opacity: 1;
+}
+
+.recommend-card:hover .rc-cover {
+  transform: scale(1.05);
+}
+
+.rc-cover-wrapper {
   position: relative;
   width: 100%;
   padding-bottom: 100%;
-  /* Square aspect ratio */
   border-radius: 12px;
   overflow: hidden;
   margin-bottom: 8px;
+  background-color: rgba(0, 0, 0, 0.05);
 }
 
-.playlist-cover {
+.rc-cover {
   position: absolute;
   top: 0;
   left: 0;
@@ -507,30 +485,9 @@ const weeklyActivity = computed(() => {
   transition: transform 0.3s;
 }
 
-.playlist-card:hover .playlist-cover {
-  transform: scale(1.05);
-}
-
-.play-count {
+.rc-play-overlay {
   position: absolute;
-  top: 8px;
-  right: 8px;
-  background-color: rgba(0, 0, 0, 0.5);
-  color: white;
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.play-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
+  inset: 0;
   background-color: rgba(0, 0, 0, 0.3);
   display: flex;
   align-items: center;
@@ -539,22 +496,14 @@ const weeklyActivity = computed(() => {
   transition: opacity 0.3s;
 }
 
-.playlist-card:hover .play-overlay {
-  opacity: 1;
+.rc-info {
+  padding: 0 4px;
 }
 
-.playlist-card.disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
-}
-
-.playlist-card.disabled:hover .play-overlay {
-  opacity: 0;
-}
-
-.playlist-title {
+.rc-title {
   font-size: 14px;
-  line-height: 1.4;
+  font-weight: 600;
+  line-height: 1.3;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
@@ -562,293 +511,99 @@ const weeklyActivity = computed(() => {
   -webkit-box-orient: vertical;
 }
 
-
-.stats-section {
-  margin-bottom: 32px;
-  margin-top: 8px;
-}
-
-.stats-header {
-  margin-bottom: 12px;
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-}
-
-.stats-title {
-  font-size: 20px;
-  font-weight: bold;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-}
-
-.stats-subtitle {
+.rc-subtitle {
   font-size: 12px;
-  color: #666;
-}
-
-/* Left Column */
-.stats-left {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  padding-right: 24px;
-  border-right: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.month {
-  font-size: 36px;
-  font-weight: bold;
-  line-height: 1;
-}
-
-.year {
-  font-size: 16px;
-  opacity: 0.8;
-  margin-top: 4px;
-}
-
-.total-count {
-  font-size: 36px;
-  font-weight: bold;
-  line-height: 1;
-}
-
-.total-label {
-  font-size: 12px;
-  opacity: 0.8;
-  margin-top: 4px;
-}
-
-.play-btn-circle {
-  position: absolute;
-  right: 24px;
-  bottom: 6px;
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background-color: rgba(255, 255, 255, 0.1);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.play-btn-circle:hover {
-  background-color: rgba(255, 255, 255, 0.2);
-}
-
-/* Middle Column */
-.stats-middle {
-  max-width: 600px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.column-header {
-  font-size: 12px;
-  opacity: 0.8;
-  margin-bottom: 4px;
-}
-
-.highlight-item {
-  background-color: rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  padding: 12px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.highlight-item:hover {
-  background-color: rgba(255, 255, 255, 0.2);
-}
-
-.highlight-item.big {
-  padding: 16px;
-}
-
-.highlight-img {
-  width: 48px;
-  height: 48px;
-  border-radius: 8px;
-  object-fit: cover;
-}
-
-.highlight-img-small {
-  width: 36px;
-  height: 36px;
-  border-radius: 6px;
-  object-fit: cover;
-}
-
-.highlight-info {
-  flex: 1;
-  overflow: hidden;
-}
-
-.song-name,
-.name {
-  font-weight: bold;
-  white-space: nowrap;
+  color: var(--n-text-color-3);
+  margin-top: 3px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.song-name {
-  font-size: 16px;
+:root[data-theme='light'] .np-bg-layer::before {
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0) 80%, rgba(255, 255, 255, 0.9) 100%);
 }
 
-.artist-name,
-.tag {
-  font-size: 12px;
-  opacity: 0.8;
+:root[data-theme='light'] .np-bg-reflection {
+  filter: blur(40px) brightness(1.1);
+  opacity: 0.6;
 }
 
-.play-times {
-  text-align: right;
-  font-size: 16px;
-  font-weight: bold;
+:root[data-theme='light'] .np-header-section {
+  color: black;
 }
 
-.play-times .unit {
-  font-size: 12px;
-  font-weight: normal;
-  opacity: 0.8;
+:root[data-theme='light'] .np-title {
+  color: rgba(0, 0, 0, 0.74);
+  font-family: 'SHSC';
+  text-shadow: none;
 }
 
-.highlight-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
+:root[data-theme='light'] .np-tags-row {
+  color: rgba(0, 0, 0, 0.8);
+  text-shadow: none;
 }
 
-/* Right Column */
-.stats-right {
-  padding-left: 24px;
-  border-left: 1px solid rgba(255, 255, 255, 0.1);
-  display: flex;
-  flex-direction: column;
+:root[data-theme='light'] .np-desc-row {
+  color: rgba(0, 0, 0, 0.699);
+  text-shadow: none;
+  opacity: 0.9;
 }
 
-.activity-chart {
-  flex: 1;
-  display: flex;
-  padding-top: 4px;
-  align-items: flex-end;
-  justify-content: space-between;
+:root[data-theme='light'] .np-placeholder {
+  background: linear-gradient(135deg, #e8e8f0 0%, #dce0f0 50%, #cfd8f0 100%);
 }
 
-.chart-bar-wrapper {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  height: 100%;
-  justify-content: flex-end;
+:root[data-theme='light'] .np-empty {
+  color: rgba(0, 0, 0, 0.5);
 }
 
-.chart-bar {
-  width: 6px;
-  background-color: rgba(255, 255, 255, 0.3);
-  border-radius: 3px;
-  transition:
-    height 0.3s,
-    background-color 0.3s;
+html[data-theme='dark'] .np-title {
+  font-family: 'SHSC', serif;
+  color: white !important;
 }
 
-.chart-bar-wrapper:hover .chart-bar {
-  background-color: white;
+html[data-theme='dark'] .np-tags-row {
+  color: white !important;
 }
 
-.chart-label {
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.6);
+html[data-theme='dark'] .np-desc-row {
+  color: white !important;
 }
 
-.stats-card {
-  position: relative;
-  overflow: hidden;
-  border-radius: 16px;
-  padding: 24px;
-  color: white;
-  display: grid;
-  backdrop-filter: blur(100px);
-  grid-template-columns: 1.5fr 2fr 1fr;
-  gap: 24px;
-  min-height: 200px;
-  z-index: 1;
+html[data-theme='dark'] .np-time {
+  color: white !important;
 }
 
-@media (max-width: 950px) {
-
-  /* 窗口较小时调整统计卡片网格布局，隐藏活跃动态区域 */
-  .stats-card {
-    grid-template-columns: 1fr 1.5fr;
+@media (max-width: 768px) {
+  .now-playing-section {
+    height: 280px;
   }
 
-  .stats-right {
-    display: none !important;
-  }
-}
-
-.stats-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  /* Use a nice placeholder image */
-  background-image: v-bind(statsBgImage);
-  background-size: cover;
-  background-position: center;
-  /* Blur and darken */
-  filter: blur(60px) brightness(0.7);
-  z-index: -1;
-  transform: scale(1.5);
-  /* Prevent white edges from blur */
-}
-
-/* ========== 加载指示器样式 ========== */
-.section-loading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  min-height: 200px;
-  padding: 48px 0;
-}
-
-.loading-text {
-  font-size: 14px;
-  color: var(--n-text-color-3);
-}
-
-/* ========== 淡入模糊进入动画 ========== */
-.fade-blur-enter {
-  animation: fadeBlurIn 0.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
-}
-
-@keyframes fadeBlurIn {
-  from {
-    opacity: 0;
-    filter: blur(12px);
-    transform: translateY(16px);
+  .np-bg-layer {
+    height: 280px;
   }
 
-  to {
-    opacity: 1;
-    filter: blur(0);
-    transform: translateY(0);
+  .np-bg-reflection {
+    height: 280px;
+  }
+
+  .np-header-section {
+    padding: 40px 20px 12px 20px;
+    height: 250px;
+    min-height: 250px;
+  }
+
+  .np-cover-wrapper {
+    width: 120px;
+  }
+
+  .np-title {
+    font-size: 24px;
+  }
+
+  .np-actions-row {
+    max-width: 100%;
   }
 }
 </style>

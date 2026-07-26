@@ -2,10 +2,12 @@
 import { ref, watch, nextTick, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { usePlayerStore } from '../../stores/playerStore'
+import { useLocalMusicStore } from '../../stores/localMusicStore'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { webAudioEngine } from '../../audio/audio-engine'
+import { audioEngine } from '../../audio/audio-engine'
 import SoundEffectsModal from '../common/SoundEffectsModal.vue'
-import defaultCover from '@renderer/assets/icon.png'
+import LyricSearchModal from '../common/LyricSearchModal.vue'
+import defaultCover from '@renderer/assets/default-cover.png'
 import {
   NIcon,
   NSlider,
@@ -27,6 +29,7 @@ import { usePlayerLyrics } from './PlayerPage/usePlayerLyrics'
 
 // 初始化各模块
 const player = usePlayerStore()
+const localMusicStore = useLocalMusicStore()
 const settingsStore = useSettingsStore()
 const router = useRouter()
 
@@ -45,8 +48,7 @@ const {
   handleTouchStart,
   handleTouchMove,
   handleTouchEnd,
-  closePage,
-  downloadMusic
+  closePage
 } = usePlayerControls()
 
 const {
@@ -73,6 +75,7 @@ const {
 const {
   currentTime,
   lyricsData,
+  hasLyrics,
   translatedLyricsData,
   lyricsMode,
   lyricsBaseFontSize,
@@ -81,7 +84,9 @@ const {
   lyricsFontFamily,
   activePageIndex,
   handleMainScroll,
-  scrollToPage
+  scrollToPage,
+  fetchingLyrics,
+  markManualLyricsSelected
 } = usePlayerLyrics()
 
 // 向父组件发送事件（用于打开发送播放列表抽屉）
@@ -110,6 +115,100 @@ const showSoundEffectsModal = ref(false)
 
 /** 可视化控制弹窗 */
 const showVisualizerControls = ref(false)
+
+/** 歌词搜索选择弹窗 */
+const showLyricSearchModal = ref(false)
+
+/**
+ * 处理用户从搜索结果中选择歌词
+ * @param result 歌词结果
+ */
+const handleLyricSelect = async (result: {
+  lyrics: string
+  translatedLyrics: string
+  romanLyrics: string
+  wySongId?: string
+  coverUrl?: string
+  applyCover?: boolean
+  applySongInfo?: boolean
+  source?: 'netease' | 'qq'
+  mid?: string
+  name?: string
+  artists?: string
+  album?: string
+}): Promise<void> => {
+  markManualLyricsSelected()
+  if (result.lyrics) {
+    player.setLyrics(result.lyrics)
+  }
+  if (result.translatedLyrics) {
+    player.setTranslatedLyrics(result.translatedLyrics)
+  }
+
+  const filePath = player.currentSong?.filePath
+  const songId = player.currentSong?.id
+
+  // 更新播放器当前歌曲信息（内存中即时生效）
+  if (result.applySongInfo && player.currentSong) {
+    if (result.name) player.currentSong.title = result.name
+    if (result.artists) player.currentSong.artist = result.artists
+    if (result.album) player.currentSong.album = result.album
+  }
+
+  if (result.applyCover && result.coverUrl) {
+    player.setCover(result.coverUrl)
+  }
+
+  // 同步更新本地音乐库中对应歌曲信息
+  const localSong = localMusicStore.songs.find((s) => s.id === songId)
+  if (localSong) {
+    if (result.applySongInfo) {
+      if (result.name) localSong.name = result.name
+      if (result.artists) localSong.ar = result.artists.split(' / ').map((n) => ({ name: n.trim() }))
+      if (result.album) {
+        if (!localSong.al) {
+          localSong.al = { name: result.album }
+        } else {
+          localSong.al.name = result.album
+        }
+      }
+    }
+    if (result.applyCover && result.coverUrl) {
+      localSong.picUrl = result.coverUrl
+      if (localSong.al) {
+        localSong.al.picUrl = result.coverUrl
+      }
+    }
+  }
+
+  if (filePath) {
+    if (result.applySongInfo) {
+      try {
+        await window.electron.ipcRenderer.invoke('local-music:write-song-info', filePath, {
+          title: result.name,
+          artist: result.artists,
+          album: result.album,
+          lyrics: result.lyrics,
+          coverUrl: result.applyCover ? result.coverUrl : undefined
+        })
+      } catch (e) {
+        console.warn('[PlayerPage] Failed to write song info to audio file:', e)
+      }
+    } else if (result.applyCover && result.coverUrl) {
+      try {
+        await window.electron.ipcRenderer.invoke(
+          'local-music:write-cover',
+          filePath,
+          result.coverUrl
+        )
+      } catch (e) {
+        console.warn('[PlayerPage] Failed to write cover to audio file:', e)
+      }
+    }
+  }
+
+  showLyricSearchModal.value = false
+}
 
 /**
  * 歌词偏移预设选项
@@ -177,7 +276,7 @@ const handleMoreMenuSelect = (key: string) => {
   if (key.startsWith('playback-rate-')) {
     const rate = parseFloat(key.replace('playback-rate-', ''))
     settingsStore.playback.playbackRate = rate
-    webAudioEngine.setPlaybackRate(rate)
+    audioEngine.setPlaybackRate(rate)
     return
   }
 
@@ -243,6 +342,7 @@ watch(
         <div
           v-if="settingsStore.playback.visualizerEnabled"
           class="visualizer-layer"
+          :class="{ 'fade-out': isControlsVisible }"
         >
           <AudioVisualizer
             :size="settingsStore.playback.visualizerSize"
@@ -280,7 +380,7 @@ watch(
             <div
               :key="player.currentSong?.id || 'empty'"
               class="main-area"
-              :class="{ 'lyrics-mode': isLyricsMode }"
+              :class="{ 'lyrics-mode': isLyricsMode, 'no-lyrics': !hasLyrics }"
               @scroll="handleMainScroll"
             >
               <!-- Left Panel: Cover & Info (隐藏于歌词模式下) -->
@@ -311,7 +411,12 @@ watch(
               </div>
 
               <!-- Right Panel: Lyrics -->
-              <div class="right-panel" :class="{ 'lyrics-mode': isLyricsMode }" :style="{ flex: rightPanelFlex }">
+              <div
+                v-if="hasLyrics || isLyricsMode"
+                class="right-panel"
+                :class="{ 'lyrics-mode': isLyricsMode }"
+                :style="{ flex: rightPanelFlex }"
+              >
                 <!-- 歌词模式下的歌曲信息（顶部居中） -->
                 <div v-if="isLyricsMode" class="lyrics-mode-info">
                   <div class="song-title">{{ player.currentSong?.title || '未选择歌曲' }}</div>
@@ -324,6 +429,7 @@ watch(
                 </div>
 
                 <div
+                  v-if="hasLyrics"
                   class="lyrics-placeholder"
                   :class="[
                     { 'fullscreen-lyrics': isFullscreen },
@@ -340,24 +446,27 @@ watch(
                     :mode="lyricsMode"
                     :font-size="lyricsBaseFontSize"
                     :active-line-color="playerThemeColor"
+                    :loading="fetchingLyrics"
                   />
                 </div>
 
                 <!-- Side Tools (Right Edge) -->
-                <div class="side-tools" v-if="false">
-                  <n-button text class="side-btn">
-                    <n-icon size="20"><i class="mgc_copy_line"></i></n-icon>
-                  </n-button>
-                  <n-button text class="side-btn">
-                    <n-icon size="20"><i class="mgc_text_line"></i></n-icon>
+                <div v-if="hasLyrics && player.currentSong?.id" class="side-tools">
+                  <n-button
+                    text
+                    class="side-btn"
+                    :focusable="false"
+                    @click="showLyricSearchModal = true"
+                  >
+                    <n-icon size="22"><i class="mgc_search_2_line"></i></n-icon>
                   </n-button>
                 </div>
               </div>
             </div>
           </Transition>
 
-          <!-- Mobile Swipe Indicator（歌词模式下隐藏） -->
-          <div v-if="!isLyricsMode" class="mobile-indicator">
+          <!-- Mobile Swipe Indicator（歌词模式或无歌词时隐藏） -->
+          <div v-if="!isLyricsMode && hasLyrics" class="mobile-indicator">
             <div
               class="dot"
               :class="{ active: activePageIndex === 0 }"
@@ -378,14 +487,6 @@ watch(
                 <n-icon size="24" :color="isFavorite ? '#ef5350' : undefined">
                   <i :class="isFavorite ? 'mgc_heart_fill' : 'mgc_heart_line'"></i>
                 </n-icon>
-              </n-button>
-              <n-button
-                text
-                circle
-                @click="player.currentSong && downloadMusic(player.currentSong)"
-                class="mobile-action-btn"
-              >
-                <n-icon size="24"><i class="mgc_download_line"></i></n-icon>
               </n-button>
               <n-dropdown
                 trigger="click"
@@ -416,15 +517,6 @@ watch(
               <n-button v-if="!isFullscreen" quaternary class="action-btn" @click="closePage">
                 <n-icon size="24" style="transform: translateX(-5px) translateY(1px)"
                   ><i class="mgc_down_line"></i
-                ></n-icon>
-              </n-button>
-              <n-button
-                quaternary
-                class="action-btn"
-                @click="player.currentSong && downloadMusic(player.currentSong)"
-              >
-                <n-icon size="24" style="transform: translateX(-5px) translateY(1px)"
-                  ><i class="mgc_download_line"></i
                 ></n-icon>
               </n-button>
               <n-dropdown
@@ -476,12 +568,13 @@ watch(
 
               <div class="progress-bar-row">
                 <span class="time-text">{{ displayTime }}</span>
-                <div class="slider-container" @mousedown="startDrag" @touchstart="startDrag">
+                <div class="slider-container">
                   <n-slider
                     :value="progressPercent"
                     :tooltip="false"
                     @update:value="handleProgressUpdate"
-                    @update:value-end="endDrag"
+                    @dragstart="startDrag"
+                    @dragend="endDrag"
                   />
                 </div>
                 <span class="time-text">{{
@@ -492,9 +585,8 @@ watch(
 
             <!-- Right Actions -->
             <div class="footer-right desktop-only">
-              <!-- 音频可视化控制入口（暂隐藏） -->
+              <!-- 音频可视化控制入口 -->
               <n-popover
-                v-if="false"
                 v-model:show="showVisualizerControls"
                 trigger="click"
                 :show-arrow="false"
@@ -556,10 +648,18 @@ watch(
 
   <!-- 音效调节弹窗 -->
   <SoundEffectsModal v-model:show="showSoundEffectsModal" />
+
+  <!-- 歌词搜索选择弹窗 -->
+  <LyricSearchModal
+    v-model:show="showLyricSearchModal"
+    :title="player.currentSong?.title || ''"
+    :artist="player.currentSong?.artist || ''"
+    :current-cover="player.currentSong?.cover"
+    @select="handleLyricSelect"
+  />
 </template>
 
 <style scoped lang="scss">
 @use './PlayerPage/PlayerPage.scss';
 </style>
-
 

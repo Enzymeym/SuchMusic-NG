@@ -2,58 +2,83 @@
 /**
  * 首次设置向导组件（Naive UI 版本）
  * 在应用首次启动时引导用户完成初始配置：
- * 主题色 → 音效 → 本地音乐导入 → 完成
+ * 欢迎页 → 主题色 → 音频引擎 → 功能更新展示(4页)
  */
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import {
   NButton,
-  NInput,
   NIcon,
-  NSwitch,
   NCard,
   NText,
   NSpace,
-  NScrollbar,
-  NAlert,
-  useMessage
+  NButtonGroup,
+  NSelect,
+  NProgress,
+  NColorPicker,
+  useThemeVars
 } from 'naive-ui'
 import { useSetupWizardStore } from '../../stores/setupWizardStore'
-import { useSettingsStore } from '../../stores/settingsStore'
-import { useLocalMusicStore } from '../../stores/localMusicStore'
 import { setPrimaryColor } from '../../themes'
-import { THEME_COLOR_PRESETS, EQ_PRESETS } from '../../types/onboarding'
+import { THEME_COLOR_PRESETS } from '../../types/onboarding'
+import { type AudioOutputMode, getAvailableOutputModes } from '../../utils/audioOutputModeManager'
+import appIcon from '../../assets/icon.png'
 
 const wizardStore = useSetupWizardStore()
-const settingsStore = useSettingsStore()
-const localMusicStore = useLocalMusicStore()
-const message = useMessage()
+const themeVars = useThemeVars()
 
 // ===== 本地状态 =====
 
-/** 自定义颜色输入值 */
-const customColorInput = ref(wizardStore.customThemeColor)
+const slideDirection = ref(1)
+const localAudioMode = ref<AudioOutputMode>(wizardStore.audioOutputMode)
+const localAudioDeviceId = ref(wizardStore.audioOutputDeviceId)
+const audioDevices = ref<{ id: string; name: string; isDefault: boolean }[]>([])
+const devicesLoading = ref(false)
 
-/** 本地音乐扫描目录列表 */
-const selectedDirs = ref<string[]>([])
+const engineModeLabels: Record<AudioOutputMode, string> = {
+  webaudio: 'Web Audio',
+  'wasapi-shared': 'WASAPI（共享）',
+  'wasapi-exclusive': 'WASAPI（独占）'
+}
 
-/** 本地音乐扫描中 */
-const scanningLocal = ref(false)
-
-/** 本地音乐扫描结果统计 */
-const scanResult = ref<{ count: number } | null>(null)
+const engineModeDescriptions: Record<AudioOutputMode, string> = {
+  webaudio: '浏览器内置引擎，跨平台兼容性最佳，适合日常使用',
+  'wasapi-shared': '低延迟共享模式，与其他应用共用音频设备',
+  'wasapi-exclusive': '独占音频设备，最低延迟，适合 Hi-Fi 播放'
+}
 
 // ===== 步骤计算 =====
 
-/** 当前步骤是否为自定义颜色模式 */
 const isCustomTheme = computed(() => wizardStore.selectedThemePreset === 'custom')
+
+/** 下拉菜单颜色选项 */
+const colorSelectOptions = computed(() => {
+  const presets = THEME_COLOR_PRESETS.map((p) => ({
+    label: p.label,
+    value: p.value
+  }))
+  presets.push({ label: '自定义', value: 'custom' })
+  return presets
+})
+const currentStepId = computed(() => wizardStore.currentStep?.id || '')
+const isWelcomeStep = computed(() => currentStepId.value === 'welcome')
+const isFeatureStep = computed(() => currentStepId.value.startsWith('feature-'))
+const isThemeStep = computed(() => currentStepId.value === 'theme')
+const isAudioEngineStep = computed(() => currentStepId.value === 'audio-engine')
+const availableModes = computed(() => getAvailableOutputModes())
 
 // ===== 步骤切换 =====
 
 const handleNext = (): void => {
+  if (currentStepId.value === 'audio-engine') {
+    wizardStore.setAudioOutputMode(localAudioMode.value)
+    wizardStore.setAudioOutputDeviceId(localAudioDeviceId.value)
+  }
+  slideDirection.value = 1
   wizardStore.next()
 }
 
 const handlePrev = (): void => {
+  slideDirection.value = -1
   wizardStore.prev()
 }
 
@@ -69,78 +94,100 @@ const handleSkipCurrentStep = (): void => {
   wizardStore.skipCurrentStep()
 }
 
+const goToStep = (index: number): void => {
+  if (index < wizardStore.currentStepIndex) {
+    slideDirection.value = -1
+  } else if (index > wizardStore.currentStepIndex) {
+    slideDirection.value = 1
+  }
+  wizardStore.goTo(index)
+}
+
 // ===== 主题色处理 =====
 
 const selectThemePreset = (presetValue: string): void => {
   wizardStore.setThemePreset(presetValue)
-  customColorInput.value = wizardStore.customThemeColor
   setPrimaryColor(wizardStore.activeColor)
 }
 
-const handleCustomColorChange = (): void => {
-  const color = customColorInput.value.trim()
-  if (/^#[0-9a-fA-F]{6}$/.test(color)) {
-    wizardStore.setCustomThemeColor(color)
-    setPrimaryColor(color)
+const handleCustomColorChange = (color: string): void => {
+  wizardStore.setCustomThemeColor(color)
+  setPrimaryColor(color)
+}
+
+// ===== 音频引擎处理 =====
+
+const selectAudioMode = (mode: AudioOutputMode): void => {
+  localAudioMode.value = mode
+  if (mode === 'webaudio') {
+    localAudioDeviceId.value = ''
   }
+  refreshAudioDevices()
 }
 
-// ===== 音效处理 =====
-
-const selectEqPreset = (presetValue: string): void => {
-  wizardStore.setEqPreset(presetValue)
-}
-
-// ===== 本地音乐处理 =====
-
-const handleSelectMusicFolder = async (): Promise<void> => {
-  if (!window.electron?.ipcRenderer) return
-  try {
-    const result = (await window.electron.ipcRenderer.invoke('local-music:choose-scan-dirs')) as {
-      canceled: boolean
-      dirs: string[]
-    }
-    if (result.canceled || !Array.isArray(result.dirs) || !result.dirs.length) return
-    const merged = new Set([...selectedDirs.value, ...result.dirs])
-    selectedDirs.value = Array.from(merged)
-  } catch (err) {
-    console.error('选择文件夹失败', err)
-    message.error('选择文件夹失败，请重试')
-  }
-}
-
-const removeDir = (dir: string): void => {
-  selectedDirs.value = selectedDirs.value.filter((d) => d !== dir)
-}
-
-const handleScanLocalMusic = async (): Promise<void> => {
-  if (selectedDirs.value.length === 0) {
-    message.warning('请先选择音乐文件夹')
+const refreshAudioDevices = async (): Promise<void> => {
+  if (localAudioMode.value === 'webaudio') {
+    audioDevices.value = []
     return
   }
-  scanningLocal.value = true
-  scanResult.value = null
+  devicesLoading.value = true
   try {
-    settingsStore.local.scanDirs = [...selectedDirs.value]
-    await localMusicStore.scanMusic()
-    scanResult.value = { count: localMusicStore.songs.length }
-  } catch (err) {
-    console.error('扫描本地音乐失败', err)
-    message.error('扫描失败，请检查文件夹权限')
+    const api = localAudioMode.value.startsWith('wasapi')
+      ? (window as any).api?.wasapi
+      : null
+    if (!api?.enumerateDevices) {
+      audioDevices.value = []
+      return
+    }
+    const result = await api.enumerateDevices()
+    if (result?.success && Array.isArray(result.devices)) {
+      audioDevices.value = result.devices.map((d: any) => ({
+        id: d.id || d.deviceId || '',
+        name: d.name || '未知设备',
+        isDefault: d.isDefault ?? false
+      }))
+
+      // 若未选择设备，自动选中系统默认设备（或首个可用设备）
+      if (!localAudioDeviceId.value) {
+        const defaultDevice = audioDevices.value.find((d) => d.isDefault) || audioDevices.value[0]
+        if (defaultDevice) {
+          localAudioDeviceId.value = defaultDevice.id
+        }
+      }
+    }
+  } catch {
+    // 静默处理
   } finally {
-    scanningLocal.value = false
+    devicesLoading.value = false
   }
 }
 
-// ===== 完成步骤辅助 =====
+// 进入音频引擎页时自动加载设备
+watch(isAudioEngineStep, (isActive) => {
+  if (isActive) refreshAudioDevices()
+})
+
+onMounted(() => {
+  if (isAudioEngineStep.value) {
+    refreshAudioDevices()
+  }
+})
 
 const getPresetLabel = (value: string): string => {
   if (value === 'custom') return '自定义'
   return THEME_COLOR_PRESETS.find((p) => p.value === value)?.label || value
 }
 
-const getEqLabel = (value: string): string => {
-  return EQ_PRESETS.find((p) => p.value === value)?.label || value
+const getDotStyle = (idx: number): Record<string, string> => {
+  const isActive = idx === wizardStore.currentStepIndex
+  const isCompleted = idx < wizardStore.currentStepIndex
+  if (isActive) {
+    return { backgroundColor: themeVars.value.primaryColor, opacity: '1' }
+  }
+  if (isCompleted) {
+    return { backgroundColor: themeVars.value.primaryColor, opacity: '0.5' }
+  }
+  return {}
 }
 </script>
 
@@ -150,298 +197,188 @@ const getEqLabel = (value: string): string => {
       <div v-if="wizardStore.isActive" class="setup-wizard-overlay">
         <div class="wizard-backdrop"></div>
 
-        <n-card class="wizard-card" :bordered="false" content-style="display: flex; flex-direction: column; flex: 1; padding: 0; overflow: hidden;">
-          <!-- 顶部步骤条 -->
-          <div class="wizard-steps-header">
-            <div
-              v-for="(step, idx) in wizardStore.steps"
-              :key="step.id"
-              class="wizard-step-item"
-              :class="{
-                active: idx === wizardStore.currentStepIndex,
-                completed: idx < wizardStore.currentStepIndex
-              }"
-            >
-              <div class="step-bullet" :class="{ active: idx === wizardStore.currentStepIndex, completed: idx < wizardStore.currentStepIndex }">
-                <n-icon v-if="idx < wizardStore.currentStepIndex" size="14">
-                  <i class="mgc_check_line"></i>
-                </n-icon>
-                <span v-else class="step-num">{{ idx + 1 }}</span>
-              </div>
-              <n-text depth="3" class="step-label" :class="{ active: idx === wizardStore.currentStepIndex }">
-                {{ step.title }}
-              </n-text>
+        <n-card class="wizard-card" :bordered="false"
+          content-style="display: flex; flex-direction: column; flex: 1; padding: 0;">
+          <!-- 类轮播图指示点 -->
+          <div class="wizard-dots-header">
+            <div class="wizard-dots" :style="{ '--wizard-dot-hover-color': themeVars.primaryColor }">
+              <span v-for="(_, idx) in wizardStore.steps" :key="idx" class="wizard-dot"
+                :class="{ active: idx === wizardStore.currentStepIndex, completed: idx < wizardStore.currentStepIndex }"
+                :style="getDotStyle(idx)"
+                @click="goToStep(idx)"></span>
             </div>
           </div>
 
           <!-- 内容区域 -->
-          <n-scrollbar style="flex: 1; min-height: 280px;">
-            <div class="wizard-content">
-              <!-- 步骤1：选择主题色 -->
-              <div v-if="wizardStore.currentStep?.id === 'theme'" class="step-body">
-                <div class="step-header">
-                  <div class="step-icon-bg" style="background: linear-gradient(135deg, #667eea, #764ba2)">
-                    <n-icon size="28" color="#fff"><i class="mgc_palette_line"></i></n-icon>
+          <div style="flex: 1; overflow: visible;">
+            <Transition :name="slideDirection === 1 ? 'step-slide-forward' : 'step-slide-backward'" mode="out-in">
+              <div class="wizard-content" :key="wizardStore.currentStep?.id">
+
+                <!-- ==================== 欢迎页 ==================== -->
+                <div v-if="isWelcomeStep" class="step-body welcome-body">
+                  <img :src="appIcon" alt="Such Logo" class="welcome-logo" />
+                  <div class="welcome-text">
+                    <n-text tag="h2" class="welcome-title">欢迎使用 Such Music</n-text>
+                    <n-text depth="2" class="welcome-desc">
+                      下面将进行一些基础设置
+                    </n-text>
                   </div>
-                  <h2 class="step-title">选择主题色</h2>
-                  <n-text depth="3">挑选你喜欢的颜色，打造专属的音乐空间</n-text>
+                  <n-button icon-placement="right"  type="primary" size="large" @click="handleNext" class="welcome-next-btn">
+                    下一步
+                    <template #icon>
+                      <i class="mgc_right_line"></i>
+                    </template>
+                  </n-button>
                 </div>
 
-                <!-- 预设色板 -->
-                <div class="color-grid">
-                  <div
-                    v-for="preset in THEME_COLOR_PRESETS"
-                    :key="preset.value"
-                    class="color-item"
-                    :class="{ selected: wizardStore.selectedThemePreset === preset.value }"
-                    @click="selectThemePreset(preset.value)"
-                  >
-                    <div class="color-dot" :style="{ background: preset.color }">
-                      <n-icon v-if="wizardStore.selectedThemePreset === preset.value" size="16" color="#fff">
-                        <i class="mgc_check_line"></i>
+                <!-- ==================== 主题色 ==================== -->
+                <div v-else-if="isThemeStep" class="step-body step-body-left">
+                  <div class="step-title-container">
+                  <div class="step-title-row step-title-row-left">
+                    <n-icon size="24" :color="themeVars.primaryColor">
+                      <i class="mgc_palette_line"></i>
+                    </n-icon>
+                    <n-text class="step-title-text">{{ wizardStore.currentStep?.title }}</n-text>
+                  </div>
+                  <n-text depth="3" class="step-subtitle-text step-subtitle-text-left">{{
+                    wizardStore.currentStep?.subtitle }}</n-text>
+                  </div>
+                  <!-- 预设色下拉选择 -->
+                  <n-select v-model:value="wizardStore.selectedThemePreset" :options="colorSelectOptions"
+                    placeholder="选择预设主题色" style="max-width: 320px" :to="false" :consistent-menu-width="false"
+                    @update:value="selectThemePreset" />
+
+                  <!-- 自定义颜色选择器 -->
+                  <div v-if="isCustomTheme" class="custom-color-row">
+                    <n-color-picker
+                      :value="wizardStore.customThemeColor"
+                      :modes="['hex']"
+                      :show-alpha="false"
+                      size="small"
+                      style="width: 120px"
+                      @update:value="handleCustomColorChange"
+                    />
+                    <n-text depth="3" style="font-size: 13px;">{{ wizardStore.customThemeColor }}</n-text>
+                  </div>
+
+                  <!-- 实时预览条 -->
+                  <div class="theme-preview-bar" :style="{ backgroundColor: wizardStore.activeColor }">
+                    <n-text style="color: #fff; font-weight: 500;">预览效果</n-text>
+                  </div>
+                </div>
+
+                <!-- ==================== 音频引擎 ==================== -->
+                <div v-else-if="isAudioEngineStep" class="step-body step-body-left">
+                  <div class="step-title-container">
+                    <div class="step-title-row step-title-row-left">
+                      <n-icon size="24" :color="themeVars.primaryColor">
+                        <i class="mgc_speaker_line"></i>
                       </n-icon>
+                      <n-text class="step-title-text">{{ wizardStore.currentStep?.title }}</n-text>
                     </div>
-                    <n-text depth="3" class="color-name" :class="{ selected: wizardStore.selectedThemePreset === preset.value }">
-                      {{ preset.label }}
+                    <n-text depth="3" class="step-subtitle-text step-subtitle-text-left">{{
+                      wizardStore.currentStep?.subtitle }}</n-text>
+                  </div>
+
+
+                  <div class="engine-mode-group">
+                    <n-text strong style="margin-bottom: 8px; display: block;">音频输出模式</n-text>
+                    <n-button-group>
+                      <n-button v-for="mode in availableModes" :key="mode"
+                        :type="localAudioMode === mode ? 'primary' : 'default'" size="small"
+                        @click="selectAudioMode(mode)">
+                        {{ engineModeLabels[mode] }}
+                      </n-button>
+                    </n-button-group>
+                    <n-text depth="3" class="engine-desc">
+                      {{ engineModeDescriptions[localAudioMode] }}
                     </n-text>
                   </div>
 
-                  <!-- 自定义颜色 -->
-                  <div
-                    class="color-item"
-                    :class="{ selected: isCustomTheme }"
-                    @click="selectThemePreset('custom')"
-                  >
-                    <div class="color-dot custom-dot" :style="{ background: wizardStore.customThemeColor }">
-                      <n-icon v-if="isCustomTheme" size="16" color="#fff"><i class="mgc_check_line"></i></n-icon>
-                    </div>
-                    <n-text depth="3" class="color-name" :class="{ selected: isCustomTheme }">自定义</n-text>
+                  <div v-if="localAudioMode !== 'webaudio'" class="engine-device-group">
+                    <n-text strong style="margin-bottom: 8px; display: block;">输出设备</n-text>
+                    <n-space align="center" style="width: 100%">
+                      <n-select v-model:value="localAudioDeviceId" :loading="devicesLoading" :options="audioDevices.map(d => ({
+                        label: `${d.name}${d.isDefault ? ' (默认)' : ''}`,
+                        value: d.id
+                      }))" style="flex: 1; max-width: 400px" placeholder="选择音频输出设备..." :to="false"
+                        :consistent-menu-width="false" />
+                    </n-space>
+                    <n-text depth="3" class="engine-desc">
+                      {{ audioDevices.length > 0 ? `已发现 ${audioDevices.length} 个音频设备` : '正在搜索设备...' }}
+                    </n-text>
                   </div>
                 </div>
 
-                <!-- 自定义颜色输入 -->
-                <transition name="slide-down">
-                  <n-space v-if="isCustomTheme" justify="center" align="center" :size="12">
-                    <div class="color-preview-block" :style="{ background: wizardStore.customThemeColor }"></div>
-                    <n-input
-                      v-model:value="customColorInput"
-                      placeholder="#2C8EFD"
-                      maxlength="7"
-                      style="width: 180px"
-                      @blur="handleCustomColorChange"
-                      @keydown.enter="handleCustomColorChange"
-                    />
-                  </n-space>
-                </transition>
+                <!-- ==================== 功能更新页 ==================== -->
+                <div v-else-if="isFeatureStep" class="step-body step-body-left">
+                  <template v-if="currentStepId === 'feature-4'">
+                    <div class="done-section done-section-left">
+                      <n-icon size="48" :color="themeVars.primaryColor">
+                        <i class="mgc_rocket_line"></i>
+                      </n-icon>
+                      <n-text tag="h2" class="done-title">{{ wizardStore.currentStep?.title }}</n-text>
+                      <n-text depth="2" class="done-subtitle">{{ wizardStore.currentStep?.subtitle }}</n-text>
 
-                <!-- 实时预览条 -->
-                <div class="theme-preview-bar" :style="{ background: wizardStore.activeColor }">
-                  <n-text style="color: #fff; font-weight: 500;">预览效果</n-text>
-                </div>
-              </div>
-
-              <!-- 步骤2：音效设置 -->
-              <div v-else-if="wizardStore.currentStep?.id === 'sound'" class="step-body">
-                <div class="step-header">
-                  <div class="step-icon-bg" style="background: linear-gradient(135deg, #f093fb, #f5576c)">
-                    <n-icon size="28" color="#fff"><i class="mgc_equalizer_line"></i></n-icon>
-                  </div>
-                  <h2 class="step-title">音效设置</h2>
-                  <n-text depth="3">选择适合的均衡器预设，优化听感体验</n-text>
-                </div>
-
-                <!-- EQ 开关行 -->
-                <div class="setting-row">
-                  <n-text strong>启用均衡器</n-text>
-                  <n-switch v-model:value="wizardStore.eqEnabled" />
-                </div>
-
-                <!-- EQ 预设选择 -->
-                <transition name="slide-down">
-                  <div v-if="wizardStore.eqEnabled" class="eq-cards">
-                    <n-card
-                      v-for="preset in EQ_PRESETS"
-                      :key="preset.value"
-                      size="small"
-                      :bordered="true"
-                      class="eq-card"
-                      :class="{ selected: wizardStore.selectedEqPreset === preset.value }"
-                      :style="wizardStore.selectedEqPreset === preset.value
-                        ? { borderColor: 'var(--n-primary-color)', background: 'var(--n-primary-color-suppl)' }
-                        : {}"
-                      @click="selectEqPreset(preset.value)"
-                    >
-                      <n-space justify="space-between" align="center">
-                        <n-text strong>{{ preset.label }}</n-text>
-                        <n-icon v-if="wizardStore.selectedEqPreset === preset.value" color="var(--n-primary-color)" size="18">
-                          <i class="mgc_check_circle_fill"></i>
-                        </n-icon>
+                      <n-space vertical :size="6" class="done-summary">
+                        <div class="summary-row">
+                          <div class="summary-dot" :style="{ backgroundColor: wizardStore.activeColor }"></div>
+                          <div>
+                            <n-text depth="3" style="font-size: 12px; display: block;">主题色</n-text>
+                            <n-text strong>{{ getPresetLabel(wizardStore.selectedThemePreset) }}</n-text>
+                          </div>
+                        </div>
+                        <div class="summary-row">
+                          <n-icon size="20" :color="themeVars.primaryColor"><i class="mgc_speaker_line"></i></n-icon>
+                          <div>
+                            <n-text depth="3" style="font-size: 12px; display: block;">音频引擎</n-text>
+                            <n-text strong>{{ engineModeLabels[wizardStore.audioOutputMode] }}</n-text>
+                          </div>
+                        </div>
                       </n-space>
-                      <n-text depth="3" style="font-size: 12px; line-height: 1.4;">{{ preset.description }}</n-text>
-                    </n-card>
-                  </div>
-                </transition>
+                    </div>
+                  </template>
 
-                <!-- 可视化开关行 -->
-                <div class="setting-row">
-                  <div>
-                    <n-text strong>音频可视化</n-text>
-                    <br>
-                    <n-text depth="3" style="font-size: 12px;">播放时在背景中显示动态频谱效果</n-text>
-                  </div>
-                  <n-switch v-model:value="wizardStore.visualizerEnabled" />
-                </div>
-              </div>
-
-              <!-- 步骤3：导入本地音乐 -->
-              <div v-else-if="wizardStore.currentStep?.id === 'local-music'" class="step-body">
-                <div class="step-header">
-                  <div class="step-icon-bg" style="background: linear-gradient(135deg, #4facfe, #00f2fe)">
-                    <n-icon size="28" color="#fff"><i class="mgc_folder_2_line"></i></n-icon>
-                  </div>
-                  <h2 class="step-title">导入本地音乐</h2>
-                  <n-text depth="3">选择音乐文件夹，将本地歌曲加入曲库</n-text>
+                  <template v-else>
+                    <div class="feature-section feature-section-left">
+                      <n-icon size="48" :color="themeVars.primaryColor">
+                        <i :class="wizardStore.currentStep?.icon || 'mgc_sparkles_line'"></i>
+                      </n-icon>
+                      <n-text tag="h3" class="feature-title">功能更新 {{ currentStepId.replace('feature-', '') }}/3</n-text>
+                      <n-text depth="2" class="feature-subtitle">{{ wizardStore.currentStep?.subtitle }}</n-text>
+                      <n-progress type="line" :percentage="parseInt(currentStepId.replace('feature-', '')) * 33"
+                        :height="4" :show-indicator="false" :color="themeVars.primaryColor" style="max-width: 260px;" />
+                    </div>
+                  </template>
                 </div>
 
-                <!-- 已选目录列表 -->
-                <n-space v-if="selectedDirs.length > 0" vertical :size="6">
-                  <div v-for="dir in selectedDirs" :key="dir" class="dir-row">
-                    <n-icon size="18" color="#e6a23c"><i class="mgc_folder_fill"></i></n-icon>
-                    <n-text class="dir-path-text">{{ dir }}</n-text>
-                    <n-button text size="tiny" type="error" @click="removeDir(dir)">
-                      <template #icon><n-icon><i class="mgc_close_line"></i></n-icon></template>
+                <!-- 底部导航 -->
+                <div v-if="!isWelcomeStep" class="wizard-nav">
+                  <n-space>
+                    <n-button v-if="wizardStore.currentStep?.skippable" text size="small"
+                      @click="handleSkipCurrentStep">
+                      跳过此步
                     </n-button>
-                  </div>
-                </n-space>
+                    <n-button text size="small" depth="3" @click="handleSkip">
+                      跳过全部设置
+                    </n-button>
+                  </n-space>
 
-                <!-- 空状态 -->
-                <div v-else class="empty-hint">
-                  <n-icon size="44" depth="3"><i class="mgc_folder_open_line"></i></n-icon>
-                  <n-text depth="3">尚未选择任何文件夹</n-text>
+                  <n-space>
+                    <n-button v-if="wizardStore.currentStepIndex > 0 && !isWelcomeStep" @click="handlePrev">
+                      上一步
+                    </n-button>
+                    <n-button v-if="!wizardStore.isLastStep" type="primary" @click="handleNext">
+                      下一步
+                    </n-button>
+                    <n-button v-else type="primary" @click="handleComplete">
+                      <template #icon><n-icon><i class="mgc_rocket_line"></i></n-icon></template>
+                      开始使用
+                    </n-button>
+                  </n-space>
                 </div>
-
-                <!-- 操作按钮 -->
-                <n-space justify="center" :size="12">
-                  <n-button dashed @click="handleSelectMusicFolder">
-                    <template #icon><n-icon><i class="mgc_folder_add_line"></i></n-icon></template>
-                    选择音乐文件夹
-                  </n-button>
-                  <n-button
-                    v-if="selectedDirs.length > 0"
-                    type="primary"
-                    :loading="scanningLocal"
-                    @click="handleScanLocalMusic"
-                  >
-                    {{ scanningLocal ? '扫描中...' : '开始扫描' }}
-                  </n-button>
-                </n-space>
-
-                <!-- 扫描结果 -->
-                <transition name="slide-down">
-                  <n-alert v-if="scanResult" type="success" :bordered="false">
-                    <template #icon><n-icon><i class="mgc_check_circle_fill"></i></n-icon></template>
-                    已扫描到 <strong>{{ scanResult.count }}</strong> 首本地歌曲
-                  </n-alert>
-                </transition>
-
-                <n-text depth="3" style="text-align: center; font-size: 12px;">
-                  你也可以稍后在「设置 → 本地」中添加音乐文件夹
-                </n-text>
               </div>
-
-              <!-- 步骤4：准备就绪 -->
-              <div v-else-if="wizardStore.currentStep?.id === 'done'" class="step-body">
-                <div class="step-header">
-                  <div class="done-icon-bg">
-                    <n-icon size="36" color="#fff"><i class="mgc_celebrate_line"></i></n-icon>
-                  </div>
-                  <h2 class="step-title">一切就绪！</h2>
-                  <n-text depth="3">以下是你的初始配置，随时可在设置中调整</n-text>
-                </div>
-
-                <!-- 设置摘要 -->
-                <n-space vertical :size="6">
-                  <div class="summary-row">
-                    <div class="summary-dot" :style="{ background: wizardStore.activeColor }"></div>
-                    <div>
-                      <n-text depth="3" style="font-size: 12px; display: block;">主题色</n-text>
-                      <n-text strong>{{ getPresetLabel(wizardStore.selectedThemePreset) }}</n-text>
-                    </div>
-                  </div>
-
-                  <div class="summary-row">
-                    <n-icon size="20" color="var(--n-primary-color)"><i class="mgc_equalizer_line"></i></n-icon>
-                    <div>
-                      <n-text depth="3" style="font-size: 12px; display: block;">均衡器</n-text>
-                      <n-text strong>{{ wizardStore.eqEnabled ? getEqLabel(wizardStore.selectedEqPreset) : '未启用' }}</n-text>
-                    </div>
-                  </div>
-
-                  <div class="summary-row">
-                    <n-icon size="20" color="var(--n-primary-color)"><i class="mgc_live_line"></i></n-icon>
-                    <div>
-                      <n-text depth="3" style="font-size: 12px; display: block;">音频可视化</n-text>
-                      <n-text strong>{{ wizardStore.visualizerEnabled ? '已启用' : '未启用' }}</n-text>
-                    </div>
-                  </div>
-
-                  <div v-if="scanResult" class="summary-row">
-                    <n-icon size="20" color="var(--n-primary-color)"><i class="mgc_folder_fill"></i></n-icon>
-                    <div>
-                      <n-text depth="3" style="font-size: 12px; display: block;">本地音乐</n-text>
-                      <n-text strong>{{ scanResult.count }} 首歌曲</n-text>
-                    </div>
-                  </div>
-
-                </n-space>
-
-                <n-text depth="2" style="text-align: center; margin-top: 8px;">
-                  开始探索 Such Music，发现更多好音乐吧
-                </n-text>
-              </div>
-            </div>
-          </n-scrollbar>
-
-          <!-- 底部导航栏 -->
-          <div class="wizard-footer">
-            <n-space>
-              <n-button
-                v-if="wizardStore.currentStep?.skippable"
-                text
-                size="small"
-                @click="handleSkipCurrentStep"
-              >
-                跳过此步
-              </n-button>
-              <n-button text size="small" depth="3" @click="handleSkip">
-                跳过全部设置
-              </n-button>
-            </n-space>
-
-            <n-space>
-              <n-button
-                v-if="wizardStore.currentStepIndex > 0"
-                @click="handlePrev"
-              >
-                上一步
-              </n-button>
-              <n-button
-                v-if="!wizardStore.isLastStep"
-                type="primary"
-                @click="handleNext"
-              >
-                下一步
-              </n-button>
-              <n-button
-                v-else
-                type="primary"
-                @click="handleComplete"
-                :style="{ background: 'linear-gradient(135deg, #667eea, #764ba2)', border: 'none' }"
-              >
-                <template #icon><n-icon><i class="mgc_rocket_line"></i></n-icon></template>
-                开始使用
-              </n-button>
-            </n-space>
+            </Transition>
           </div>
         </n-card>
       </div>
@@ -464,6 +401,7 @@ const getEqLabel = (value: string): string => {
 .wizard-fade-leave-active {
   transition: opacity 0.4s ease;
 }
+
 .wizard-fade-enter-from,
 .wizard-fade-leave-to {
   opacity: 0;
@@ -477,204 +415,149 @@ const getEqLabel = (value: string): string => {
   -webkit-backdrop-filter: blur(20px);
 }
 
-/* ===== 向导卡片 ===== */
 .wizard-card {
   width: 680px;
   max-width: calc(100vw - 48px);
+  height: 560px;
   max-height: calc(100vh - 64px);
 }
 
-/* ===== 顶部步骤条 ===== */
-.wizard-steps-header {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 24px 32px 0;
+/* ===== 轮播图指示点 ===== */
+.wizard-dots-header {
+  padding: 20px 32px 0;
   flex-shrink: 0;
-}
-
-.wizard-step-item {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  position: relative;
-  max-width: 120px;
-}
-
-/* 连接线 */
-.wizard-step-item:not(:last-child)::after {
-  content: '';
-  position: absolute;
-  top: 13px;
-  left: calc(50% + 14px);
-  width: calc(100% + 8px - 28px);
-  height: 2px;
-  background: var(--n-border-color);
-  transition: background 0.3s;
-}
-
-.wizard-step-item.completed::after {
-  background: var(--n-primary-color);
-}
-
-.step-bullet {
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: var(--n-action-color);
-  border: 2px solid var(--n-border-color);
-  display: flex;
-  align-items: center;
   justify-content: center;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--n-text-color-3);
-  transition: all 0.3s;
 }
 
-.step-bullet.active {
-  background: var(--n-primary-color);
-  border-color: var(--n-primary-color);
-  color: #fff;
-  box-shadow: 0 2px 8px rgba(44, 142, 253, 0.25);
+.wizard-dots {
+  display: flex;
+  gap: 8px;
 }
 
-.step-bullet.completed {
-  background: var(--n-primary-color);
-  border-color: var(--n-primary-color);
-  color: #fff;
+.wizard-dot {
+  width: 20px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--n-border-color);
+  cursor: pointer;
+  transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.step-num {
-  font-size: 12px;
-  font-weight: 700;
+.wizard-dot:hover {
+  background: var(--wizard-dot-hover-color, #2C8EFD);
+  opacity: 0.7;
 }
 
-.step-label {
-  font-size: 11px;
-  white-space: nowrap;
-  text-align: center;
+.wizard-dot.active {
+  width: 32px;
+  border-radius: 3px;
+  cursor: default;
 }
 
-.step-label.active {
-  font-weight: 600;
-  color: var(--n-text-color) !important;
+.wizard-dot.completed {
+  /* 背景色由内联样式根据主题主色控制 */
 }
 
 /* ===== 内容区域 ===== */
 .wizard-content {
-  padding: 24px 40px 8px;
+  padding: 20px 40px 20px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.step-title-container {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
 }
 
 .step-body {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  flex: 1;
 }
 
-.step-header {
-  text-align: center;
-  margin-bottom: 2px;
+/* 非欢迎页统一居左 */
+.step-body-left {
+  align-items: flex-start;
 }
 
-.step-icon-bg {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 10px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
-}
-
-.done-icon-bg {
-  width: 68px;
-  height: 68px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #667eea, #764ba2);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 10px;
-  box-shadow: 0 6px 24px rgba(102, 126, 234, 0.3);
-}
-
-.step-title {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--n-text-color);
-  margin: 0 0 4px;
-}
-
-/* ===== 主题色 ===== */
-.color-grid {
+/* ===== 通用步骤标题 ===== */
+.step-title-row {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   justify-content: center;
   gap: 10px;
 }
 
-.color-item {
+.step-title-row-left {
+  justify-content: flex-start;
+}
+
+.step-title-text {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.step-subtitle-text {
+  text-align: center;
+  font-size: 13px;
+}
+
+.step-subtitle-text-left {
+  text-align: left;
+}
+
+/* ===== 欢迎页 ===== */
+.welcome-body {
+  align-items: center;
+  justify-content: center;
+  padding-top: 10px;
+  padding-bottom: 20px;
+}
+
+.welcome-logo {
+  width: 80px;
+  height: 80px;
+  border-radius: 18px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+
+.welcome-text {
+  text-align: center;
+  margin-top: 4px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  cursor: pointer;
-  padding: 6px 8px;
-  border-radius: 10px;
-  transition: background 0.2s;
+  gap: -24px;
 }
 
-.color-item:hover {
-  background: var(--n-action-color-hover);
+.welcome-title {
+  font-size: 28px;
+  font-weight: 700;
+  margin: 0 0 8px;
 }
 
-.color-item.selected {
-  background: var(--n-primary-color-suppl);
+.welcome-desc {
+  font-size: 15px;
+  transform: translateY(-25%);
+  line-height: 1.7;
 }
 
-.color-dot {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
+.welcome-next-btn {
+  margin-top: 8px;
+  min-width: 160px;
+}
+
+/* ===== 主题色 ===== */
+.custom-color-row {
   display: flex;
   align-items: center;
-  justify-content: center;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
-  transition: transform 0.2s, box-shadow 0.2s;
-}
-
-.color-item:hover .color-dot {
-  transform: scale(1.06);
-}
-
-.color-item.selected .color-dot {
-  box-shadow: 0 0 0 3px var(--n-color), 0 0 0 5px var(--n-primary-color);
-}
-
-.custom-dot {
-  background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red) !important;
-}
-
-.color-name {
-  font-size: 11px !important;
-}
-
-.color-name.selected {
-  color: var(--n-primary-color) !important;
-  font-weight: 600;
-}
-
-.color-preview-block {
-  width: 38px;
-  height: 38px;
-  border-radius: 8px;
-  border: 2px solid var(--n-border-color);
-  flex-shrink: 0;
+  gap: 12px;
 }
 
 .theme-preview-bar {
@@ -686,58 +569,83 @@ const getEqLabel = (value: string): string => {
   opacity: 0.9;
 }
 
-/* ===== 音效 ===== */
-.setting-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
+/* ===== 音频引擎 ===== */
+.engine-mode-group {
+  padding: 12px 14px;
   background: var(--n-action-color);
   border-radius: 10px;
+  width: 100%;
 }
 
-.eq-cards {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 8px;
+.engine-desc {
+  font-size: 12px;
+  display: block;
+  margin-top: 8px;
 }
 
-.eq-card {
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.eq-card:hover {
-  border-color: var(--n-primary-color) !important;
-}
-
-/* ===== 本地音乐 ===== */
-.dir-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+.engine-device-group {
+  padding: 12px 14px;
   background: var(--n-action-color);
-  border-radius: 8px;
+  border-radius: 10px;
+  width: 100%;
 }
 
-.dir-path-text {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-}
-
-.empty-hint {
+/* ===== 功能更新页 ===== */
+.feature-section {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 24px;
+  gap: 14px;
+  padding: 30px 0 10px;
+  text-align: center;
 }
 
-/* ===== 摘要行 ===== */
+.feature-section-left {
+  align-items: flex-start;
+  text-align: left;
+}
+
+.feature-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.feature-subtitle {
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+/* ===== 完成页 ===== */
+.done-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 20px 0 10px;
+  text-align: center;
+}
+
+.done-section-left {
+  align-items: flex-start;
+  text-align: left;
+}
+
+.done-title {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.done-subtitle {
+  font-size: 15px;
+}
+
+.done-summary {
+  width: 100%;
+  max-width: 320px;
+}
+
 .summary-row {
   display: flex;
   align-items: center;
@@ -755,11 +663,13 @@ const getEqLabel = (value: string): string => {
 }
 
 /* ===== 底部导航 ===== */
-.wizard-footer {
+.wizard-nav {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 32px 22px;
+  padding: 20px 16px 10px;
+  margin-top: 12px;
+  border-top: 1px solid var(--n-border-color);
   flex-shrink: 0;
 }
 
@@ -768,41 +678,70 @@ const getEqLabel = (value: string): string => {
 .slide-down-leave-active {
   transition: all 0.3s ease;
 }
+
 .slide-down-enter-from,
 .slide-down-leave-to {
   opacity: 0;
   transform: translateY(-6px);
 }
 
+.step-slide-forward-enter-active,
+.step-slide-forward-leave-active,
+.step-slide-backward-enter-active,
+.step-slide-backward-leave-active {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.step-slide-forward-enter-from {
+  opacity: 0;
+  transform: translateX(40px);
+}
+
+.step-slide-forward-leave-to {
+  opacity: 0;
+  transform: translateX(-40px);
+}
+
+.step-slide-backward-enter-from {
+  opacity: 0;
+  transform: translateX(-40px);
+}
+
+.step-slide-backward-leave-to {
+  opacity: 0;
+  transform: translateX(40px);
+}
+
 /* ===== 响应式 ===== */
 @media (max-width: 720px) {
   .wizard-card {
     max-width: calc(100vw - 24px);
+    height: auto;
+    min-height: 420px;
+    max-height: calc(100vh - 48px);
   }
-  .wizard-steps-header {
-    padding: 18px 16px 0;
-    gap: 2px;
+
+  .wizard-dots-header {
+    padding: 16px 16px 0;
   }
-  .step-label {
-    font-size: 10px !important;
-  }
-  .step-bullet {
-    width: 22px;
-    height: 22px;
-  }
+
   .wizard-content {
-    padding: 18px 20px 8px;
+    padding: 16px 20px 8px;
   }
-  .wizard-footer {
-    padding: 10px 16px 16px;
+
+  .wizard-nav {
+    padding: 10px 0 0;
     flex-direction: column;
     gap: 8px;
   }
-  .eq-cards {
-    grid-template-columns: 1fr;
+
+  .welcome-title {
+    font-size: 22px;
   }
-  .step-title {
-    font-size: 17px;
+
+  .welcome-logo {
+    width: 64px;
+    height: 64px;
   }
 }
 </style>

@@ -2,6 +2,7 @@ import { ipcMain, app, dialog } from 'electron'
 import { promises as fs } from 'fs'
 import { join, extname, basename, dirname } from 'path'
 import { loadNativeDecoder } from '../services/nativeDecoder'
+import { writeAudioMeta } from '../utils/musicMetaWriter'
 
 // 本地音乐扫描结果的数据结构
 interface LocalMusicTrack {
@@ -15,17 +16,25 @@ interface LocalMusicTrack {
   coverId?: string
 }
 
+// 懒加载 music-metadata 模块缓存，避免每次 get-meta 重复 import
+let _mmParseFile: ((filePath: string, options?: Record<string, unknown>) => Promise<unknown>) | null = null
+
+async function getMusicMetadataParser(): Promise<(filePath: string, options?: Record<string, unknown>) => Promise<unknown>> {
+  if (_mmParseFile) return _mmParseFile
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mm = await import('music-metadata')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  _mmParseFile = (mm as any).parseFile as (filePath: string, options?: any) => Promise<any>
+  return _mmParseFile
+}
+
 export function registerLocalMusicHandlers(): void {
   const { decode_audio_to_pcm } = loadNativeDecoder()
 
   // 按需读取单个音频文件的元数据（时长 + 封面）
   ipcMain.handle('local-music:get-meta', async (_event, filePath: string) => {
     try {
-      // 动态导入 music-metadata (ESM)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mm = await import('music-metadata')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const parseFile = (mm as any).parseFile as (filePath: string, options?: any) => Promise<any>
+      const parseFile = await getMusicMetadataParser()
 
       // 优先尝试带时长分析的解析
       let metadata: unknown
@@ -162,41 +171,85 @@ export function registerLocalMusicHandlers(): void {
   // 保存音乐标签元数据 (目前支持 MP3/FLAC/WAV)
   ipcMain.handle('local-music:write-meta', async (_event, filePath: string, tags: any) => {
     try {
-      const ext = extname(filePath).toLowerCase()
-
-      // 如果有封面图片数据，转换为 Buffer
-      if (tags.image && typeof tags.image.imageBuffer === 'string') {
-        tags.image.imageBuffer = Buffer.from(tags.image.imageBuffer, 'base64')
-      }
-
-      if (ext === '.mp3') {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const NodeID3 = require('node-id3')
-        const buffer = await fs.readFile(filePath)
-
-        // 更新 tags
-        // node-id3 的 update 方法返回一个新的 buffer
-        const success = NodeID3.update(tags, buffer)
-
-        if (!success || success instanceof Error) {
-          throw new Error('更新标签失败')
-        }
-
-        // 写入文件
-        await fs.writeFile(filePath, success as Buffer)
-        return true
-      } else if (ext === '.flac') {
-        return await writeFlacTag(filePath, tags)
-      } else if (ext === '.wav') {
-        return await writeWavTag(filePath, tags)
-      } else {
-        throw new Error(`不支持的文件格式: ${ext}`)
-      }
+      return await writeAudioMeta(filePath, tags)
     } catch (error) {
       console.error('Failed to write meta:', filePath, error)
       throw error
     }
   })
+
+  // 根据封面 URL 下载并写入音频文件标签
+  ipcMain.handle(
+    'local-music:write-cover',
+    async (_event, filePath: string, coverUrl: string) => {
+      if (!filePath || !coverUrl) {
+        throw new Error('filePath 和 coverUrl 不能为空')
+      }
+      try {
+        const response = await fetch(coverUrl)
+        if (!response.ok) {
+          throw new Error(`下载封面失败: HTTP ${response.status}`)
+        }
+        const contentType = response.headers.get('content-type') || 'image/jpeg'
+        const arrayBuffer = await response.arrayBuffer()
+        const buffer = Buffer.from(arrayBuffer)
+        return await writeAudioMeta(filePath, {
+          image: {
+            imageBuffer: buffer,
+            mime: contentType
+          }
+        })
+      } catch (error) {
+        console.error('Failed to write cover from url:', filePath, coverUrl, error)
+        throw error
+      }
+    }
+  )
+
+  // 根据网络歌曲信息写入音频文件标签（歌名、歌手、专辑、歌词、封面）
+  ipcMain.handle(
+    'local-music:write-song-info',
+    async (
+      _event,
+      filePath: string,
+      info: {
+        title?: string
+        artist?: string
+        album?: string
+        lyrics?: string
+        coverUrl?: string
+      }
+    ) => {
+      if (!filePath) {
+        throw new Error('filePath 不能为空')
+      }
+      try {
+        const tags: import('../utils/musicMetaWriter').MusicMetaTags = {}
+        if (info.title?.trim()) tags.title = info.title.trim()
+        if (info.artist?.trim()) tags.artist = info.artist.trim()
+        if (info.album?.trim()) tags.album = info.album.trim()
+        if (info.lyrics?.trim()) tags.lyrics = info.lyrics.trim()
+
+        if (info.coverUrl) {
+          const response = await fetch(info.coverUrl)
+          if (!response.ok) {
+            throw new Error(`下载封面失败: HTTP ${response.status}`)
+          }
+          const contentType = response.headers.get('content-type') || 'image/jpeg'
+          const arrayBuffer = await response.arrayBuffer()
+          tags.image = {
+            imageBuffer: Buffer.from(arrayBuffer),
+            mime: contentType
+          }
+        }
+
+        return await writeAudioMeta(filePath, tags)
+      } catch (error) {
+        console.error('Failed to write song info:', filePath, info, error)
+        throw error
+      }
+    }
+  )
 
   ipcMain.handle('local-music:choose-scan-dirs', async () => {
     const result = await dialog.showOpenDialog({
@@ -231,10 +284,12 @@ export function registerLocalMusicHandlers(): void {
         return
       }
 
+      const subDirs: string[] = []
+
       for (const entry of entries) {
         const fullPath = join(dir, entry.name)
         if (entry.isDirectory()) {
-          await walk(fullPath)
+          subDirs.push(fullPath)
           continue
         }
 
@@ -261,6 +316,11 @@ export function registerLocalMusicHandlers(): void {
           dt: undefined,
           quality: 'Standard'
         })
+      }
+
+      // 并行遍历子目录
+      if (subDirs.length > 0) {
+        await Promise.all(subDirs.map((subDir) => walk(subDir)))
       }
     }
 
@@ -312,151 +372,3 @@ export function registerLocalMusicHandlers(): void {
   })
 }
 
-// Helper function to write FLAC tags
-async function writeFlacTag(filePath: string, tags: any): Promise<boolean> {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const flac = require('flac-metadata')
-
-  // 读取整个 FLAC 文件到内存（通常体积可接受，且实现简单可靠）
-  const fileBuffer = await fs.readFile(filePath)
-
-  // 校验 FLAC 头部标记
-  if (fileBuffer.toString('utf8', 0, 4) !== 'fLaC') {
-    throw new Error('文件不是合法的 FLAC 格式')
-  }
-
-  let offset = 4
-  const keptBlocks: Buffer[] = []
-  let last = false
-
-  // 遍历所有原始 MetaDataBlock，保留除 VORBIS_COMMENT / PICTURE 之外的块
-  // 这样可以保留 STREAMINFO / SEEKTABLE 等信息，仅替换标签和封面
-  while (!last) {
-    const header = fileBuffer.readUInt32BE(offset)
-    const isLast = (header >>> 31) !== 0
-    const type = (header >>> 24) & 0x7f
-    const length = header & 0x00ffffff
-
-    const block = fileBuffer.slice(offset, offset + 4 + length)
-
-    if (
-      type !== flac.Processor.MDB_TYPE_VORBIS_COMMENT &&
-      type !== flac.Processor.MDB_TYPE_PICTURE
-    ) {
-      keptBlocks.push(block)
-    }
-
-    offset += 4 + length
-    last = isLast
-  }
-
-  // offset 之后即为音频帧数据
-  const audioData = fileBuffer.slice(offset)
-
-  // 清除保留块的 isLast 标记（最高位），后续由新插入的最后一个块设置
-  const fixedKeptBlocks: Buffer[] = keptBlocks.map((b) => {
-    const buf = Buffer.from(b) // 拷贝一份，避免修改原 buffer
-    const header = buf.readUInt32BE(0)
-    const newHeader = header & 0x7fffffff
-    buf.writeUInt32BE(newHeader >>> 0, 0)
-    return buf
-  })
-
-  // 组装 Vorbis Comment comments
-  const comments: string[] = [
-    `TITLE=${tags.title || ''}`,
-    `ARTIST=${tags.artist || ''}`,
-    `ALBUM=${tags.album || ''}`,
-    `DATE=${tags.year || ''}`,
-    `LYRICS=${(tags.unsynchronisedLyrics?.text || '').replace(/\r\n/g, '\n')}`
-  ]
-
-  // 创建 Vorbis Comment 块（先暂时不设置 isLast，后面统一处理）
-  const vorbisBlock = flac.data.MetaDataBlockVorbisComment.create(
-    false,
-    'such-pc-ng',
-    comments
-  )
-  const vorbisBuffer: Buffer = vorbisBlock.publish()
-
-  // 如果有封面，则再创建一个 Picture 块
-  let pictureBuffer: Buffer | null = null
-  if (tags.image && tags.image.imageBuffer) {
-    const { imageBuffer, mime, description } = tags.image
-    const pictureBlock = flac.data.MetaDataBlockPicture.create(
-      true, // 暂时标记为最后一个块，后续可能调整
-      3, // 3 = Front Cover
-      mime || 'image/jpeg',
-      description || '',
-      0,
-      0,
-      0,
-      0,
-      imageBuffer
-    )
-    pictureBuffer = pictureBlock.publish()
-  }
-
-  // 修正 Vorbis / Picture 的 isLast 标记，保证只有最后一个块设置 isLast=1
-  const blocksToWrite: Buffer[] = [...fixedKeptBlocks]
-
-  if (pictureBuffer) {
-    // Vorbis 不是最后一个块
-    const vorbisHeader = vorbisBuffer.readUInt32BE(0) & 0x7fffffff
-    vorbisBuffer.writeUInt32BE(vorbisHeader >>> 0, 0)
-    // Picture 是最后一个块（create 时已设置 isLast=true）
-    blocksToWrite.push(vorbisBuffer, pictureBuffer)
-  } else {
-    // 只有 Vorbis，需要将其标记为最后一个块
-    const vorbisHeader = vorbisBuffer.readUInt32BE(0) | 0x80000000
-    vorbisBuffer.writeUInt32BE(vorbisHeader >>> 0, 0)
-    blocksToWrite.push(vorbisBuffer)
-  }
-
-  // 计算新文件大小并组装：'fLaC' + 所有 metadata blocks + 原始音频数据
-  const metaSize = blocksToWrite.reduce((sum, b) => sum + b.length, 0)
-  const outBuffer = Buffer.alloc(4 + metaSize + audioData.length)
-
-  outBuffer.write('fLaC', 0, 'ascii')
-  let pos = 4
-  for (const b of blocksToWrite) {
-    b.copy(outBuffer, pos)
-    pos += b.length
-  }
-  audioData.copy(outBuffer, pos)
-
-  await fs.writeFile(filePath, outBuffer)
-  return true
-}
-
-// Helper function to write WAV tags
-async function writeWavTag(filePath: string, tags: any): Promise<boolean> {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { WaveFile } = require('wavefile')
-
-  const buffer = await fs.readFile(filePath)
-  const wav = new WaveFile(buffer)
-
-  // Set ID3v2 tags
-  // Note: WaveFile might throw if file format is invalid, handle in try/catch block outside
-
-  if (tags.title) wav.setTag('TIT2', tags.title)
-  if (tags.artist) wav.setTag('TPE1', tags.artist)
-  if (tags.album) wav.setTag('TALB', tags.album)
-  if (tags.year) wav.setTag('TYER', String(tags.year))
-
-  // Image
-  if (tags.image && tags.image.imageBuffer) {
-    wav.setTag('APIC', {
-      type: 3,
-      data: tags.image.imageBuffer,
-      mime: tags.image.mime || 'image/jpeg',
-      description: tags.image.description || ''
-    })
-  }
-
-  // Write back
-  const newBuffer = wav.toBuffer()
-  await fs.writeFile(filePath, newBuffer)
-  return true
-}

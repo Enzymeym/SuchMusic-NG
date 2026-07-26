@@ -2,6 +2,7 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 import MainLayout from '../layout/MainLayout.vue'
 
 // 路由懒加载
+const HomeView = () => import('../views/HomeView.vue')
 const StatisticsView = () => import('../views/StatisticsView.vue')
 const LocalMusicView = () => import('../views/LocalMusicView.vue')
 const PlaylistView = () => import('../views/PlaylistView.vue')
@@ -9,9 +10,13 @@ const PlaylistDetailView = () => import('../views/PlaylistDetailView.vue')
 const RecentPlayView = () => import('../views/RecentPlayView.vue')
 const SearchView = () => import('../views/SearchView.vue')
 const SingerView = () => import('../views/SingerView.vue')
+const SingerDetailView = () => import('../views/SingerDetailView.vue')
 const AlbumView = () => import('../views/AlbumView.vue')
+const AlbumDetailView = () => import('../views/AlbumDetailView.vue')
 const DesktopLyricView = () => import('../views/DesktopLyricView.vue')
 const TaskbarLyricView = () => import('../views/TaskbarLyricView.vue')
+const PluginView = () => import('../views/PluginView.vue')
+const PluginDetailView = () => import('../views/PluginDetailView.vue')
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -22,12 +27,12 @@ const router = createRouter({
       children: [
         {
           path: '',
-          name: 'statistics',
-          component: StatisticsView
+          name: 'home',
+          component: HomeView
         },
         {
-          path: 'local',
-          name: 'local',
+          path: 'song',
+          name: 'song',
           component: LocalMusicView
         },
         {
@@ -51,14 +56,39 @@ const router = createRouter({
           component: SingerView
         },
         {
+          path: 'singer/:name',
+          name: 'singer-detail',
+          component: SingerDetailView
+        },
+        {
           path: 'album',
           name: 'album',
           component: AlbumView
         },
         {
+          path: 'album/:name',
+          name: 'album-detail',
+          component: AlbumDetailView
+        },
+        {
           path: 'search',
           name: 'search',
           component: SearchView
+        },
+        {
+          path: 'statistics',
+          name: 'statistics',
+          component: StatisticsView
+        },
+        {
+          path: 'plugins',
+          name: 'plugins',
+          component: PluginView
+        },
+        {
+          path: 'plugin/:id',
+          name: 'plugin-detail',
+          component: PluginDetailView
         }
       ]
     },

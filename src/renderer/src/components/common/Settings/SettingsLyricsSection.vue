@@ -583,7 +583,7 @@ const playerBackgroundStyleOptions = [
           v-model:value="settingsStore.playback.desktopLyricsColor"
           :show-alpha="true"
           :modes="['hex']"
-          style="width: 120px"
+          class="desktop-lyrics-color-picker"
         />
       </div>
     </n-card>
@@ -605,7 +605,7 @@ const playerBackgroundStyleOptions = [
           v-model:value="settingsStore.playback.desktopLyricsActiveColor"
           :show-alpha="true"
           :modes="['hex']"
-          style="width: 120px"
+          class="desktop-lyrics-color-picker"
         />
       </div>
     </n-card>

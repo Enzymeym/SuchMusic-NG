@@ -9,3 +9,9 @@
 .n-drawer-mask {
     backdrop-filter: blur(10px);
 }
+
+/* 提高 NaiveUI 弹层容器层级，确保始终置顶 */
+.n-modal-container,
+.n-message-container {
+    z-index: 100000 !important;
+}

@@ -329,6 +329,98 @@ export const fetchImageAsDataURL = async (src: string): Promise<string> => {
   })
 }
 
+export interface AdaptiveTextColorOptions {
+  /** 采样区域，使用相对坐标（0-1），默认全图 */
+  region?: { x: number; y: number; w: number; h: number }
+  /** 亮度阈值（0-1），默认 0.5，低于阈值返回白色，否则返回黑色 */
+  threshold?: number
+}
+
+/**
+ * 计算图片指定区域的平均亮度，返回推荐的前景色
+ * @param src - 图片源，可以是 URL 字符串或 HTMLImageElement
+ * @param options - 自适应文字颜色选项
+ * @returns 返回 'black' 或 'white'
+ */
+export const getAdaptiveTextColor = async (
+  src: string | HTMLImageElement,
+  options?: AdaptiveTextColorOptions
+): Promise<'black' | 'white'> => {
+  const threshold = options?.threshold ?? 0.5
+  const region = options?.region ?? { x: 0, y: 0, w: 1, h: 1 }
+
+  let img: HTMLImageElement
+  if (typeof src === 'string') {
+    img = await loadImageSafe(src)
+  } else {
+    img = src
+  }
+
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    throw new Error('canvas 2d context not available')
+  }
+
+  const naturalWidth = img.naturalWidth || img.width
+  const naturalHeight = img.naturalHeight || img.height
+  if (!naturalWidth || !naturalHeight) {
+    throw new Error('image has no valid size')
+  }
+
+  canvas.width = naturalWidth
+  canvas.height = naturalHeight
+  ctx.drawImage(img, 0, 0, naturalWidth, naturalHeight)
+
+  let imageData: ImageData
+  try {
+    imageData = ctx.getImageData(0, 0, naturalWidth, naturalHeight)
+  } catch (e) {
+    if (typeof src === 'string') {
+      const dataUrl = await fetchImageAsDataURL(src)
+      const img2 = await loadImageSafe(dataUrl)
+      canvas.width = img2.naturalWidth || img2.width
+      canvas.height = img2.naturalHeight || img2.height
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(img2, 0, 0, canvas.width, canvas.height)
+      try {
+        imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+      } catch (e2) {
+        throw new Error('failed to read image data (maybe strict CORS), consider using a proxy')
+      }
+    } else {
+      throw new Error('failed to read image data from canvas')
+    }
+  }
+
+  const { width, height, data } = imageData
+  const x0 = Math.max(0, Math.floor(width * region.x))
+  const y0 = Math.max(0, Math.floor(height * region.y))
+  const x1 = Math.min(width, Math.floor(width * (region.x + region.w)))
+  const y1 = Math.min(height, Math.floor(height * (region.y + region.h)))
+
+  let totalLuminance = 0
+  let count = 0
+
+  for (let y = y0; y < y1; y += 2) {
+    for (let x = x0; x < x1; x += 2) {
+      const idx = (y * width + x) * 4
+      const r = data[idx]
+      const g = data[idx + 1]
+      const b = data[idx + 2]
+      const a = data[idx + 3]
+      if (a < 32) continue
+      const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+      totalLuminance += luminance
+      count++
+    }
+  }
+
+  if (count === 0) return 'white'
+  const avgLuminance = totalLuminance / count
+  return avgLuminance < threshold ? 'white' : 'black'
+}
+
 /**
  * 从图片中提取主色、中性色等调色板信息
  * @param src - 图片源，可以是 URL 字符串或 HTMLImageElement

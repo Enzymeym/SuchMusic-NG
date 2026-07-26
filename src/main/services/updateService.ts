@@ -221,7 +221,7 @@ export async function downloadUpdate(url: string): Promise<string> {
       }
     })
       .then((response) => {
-        const total = parseInt(response.headers['content-length'] || '0', 10)
+        const total = parseInt(String(response.headers['content-length'] || '0'), 10)
         let downloaded = 0
         let lastReported = 0
         const startTime = Date.now()

@@ -7,7 +7,7 @@ import type { LyricPlayerRef } from '../AMLL/LyricPlayer.vue'
 import { parseLyricsToCore } from '../../../utils/lyric/lyricParser'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePlayerStore } from '../../../stores/playerStore'
-import { webAudioEngine } from '../../../audio/audio-engine'
+import { audioEngine } from '../../../audio/audio-engine'
 
 const settingsStore = useSettingsStore()
 const playerStore = usePlayerStore()
@@ -42,6 +42,10 @@ const props = defineProps({
   activeLineColor: {
     type: String,
     default: '#fff'
+  },
+  loading: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -87,6 +91,15 @@ const appleLyrics = computed<CoreLyricLine[]>(() => {
 
 const currentTimeMs = computed(() => Math.round(props.currentTime * 1000))
 
+const hasLyrics = computed(() => {
+  if (!props.lyrics) return false
+  if (typeof props.lyrics === 'string') return props.lyrics.trim().length > 0
+  if (Array.isArray(props.lyrics)) return props.lyrics.length > 0
+  return true
+})
+
+const showLoading = computed(() => props.loading && !hasLyrics.value)
+
 const enableBlur = computed(() => settingsStore.playback.lyricsBlurEnabled)
 
 const enableSpring = computed(() => settingsStore.playback.lyricsSpringEnabled)
@@ -111,11 +124,11 @@ const handleLineClick = (event: any) => {
 
   const targetMs = Math.round(startTime)
 
-  webAudioEngine.seek(targetMs)
+  audioEngine.seek(targetMs)
   playerStore.setPosition(targetMs)
 
   if (!playerStore.isPlaying) {
-    void webAudioEngine.resume()
+    void audioEngine.resume()
     playerStore.setPlaying(true)
   }
 }
@@ -152,30 +165,35 @@ watch([hidePassedLines, appleLyrics], ([enabled]) => {
 
 <template>
   <div class="lyric-player-container lyric-am">
-    <LyricsView
-      v-if="mode === 'suth'"
-      :lyrics="suthLyrics"
-      :current-time="currentTime"
-      :font-size="fontSize"
-      :line-gap="lineGap"
-      :active-line-color="activeLineColor"
-    />
-    <AMLLLyricPlayer
-      v-else
-      ref="lyricPlayerRef"
-      :lyric-lines="appleLyrics"
-      :current-time="currentTimeMs"
-      :playing="true"
-      :enable-blur="enableBlur"
-      :enable-spring="enableSpring"
-      :hide-passed-lines="hidePassedLines"
-      :word-fade-width="wordFadeWidth"
-      class="am-lyric"
-      :style="{
-        '--amll-lp-color': 'var(--player-accent-color, rgba(255, 255, 255, 0.95))'
-      }"
-      @line-click="handleLineClick"
-    />
+    <div v-if="showLoading" class="lyric-loading">
+      <span>正在加载歌词...</span>
+    </div>
+    <template v-else>
+      <LyricsView
+        v-if="mode === 'suth'"
+        :lyrics="suthLyrics"
+        :current-time="currentTime"
+        :font-size="fontSize"
+        :line-gap="lineGap"
+        :active-line-color="activeLineColor"
+      />
+      <AMLLLyricPlayer
+        v-else
+        ref="lyricPlayerRef"
+        :lyric-lines="appleLyrics"
+        :current-time="currentTimeMs"
+        :playing="true"
+        :enable-blur="enableBlur"
+        :enable-spring="enableSpring"
+        :hide-passed-lines="hidePassedLines"
+        :word-fade-width="wordFadeWidth"
+        class="am-lyric"
+        :style="{
+          '--amll-lp-color': 'var(--player-accent-color, rgba(255, 255, 255, 0.95))'
+        }"
+        @line-click="handleLineClick"
+      />
+    </template>
   </div>
 </template>
 

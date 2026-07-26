@@ -265,8 +265,9 @@ export const usePlayerStore = defineStore('player', {
       // 为了触发 watch 监听器，创建一个新的对象引用
       this.currentSong = { ...song }
       this.positionMs = 0
-      this.isPlaying = true
       this.shouldAutoPlay = true // 用户主动切歌，自动播放
+      // isPlaying 由 PlayerBar.doLoadAndPlaySong 在音频引擎成功启动后设置，
+      // 避免在播放失败（如文件不存在）时出现 UI 状态不一致
       this.recordPlay(song)
     }
   },
@@ -285,9 +286,25 @@ export const usePlayerStore = defineStore('player', {
     },
     // 保存播放器状态（当前歌曲、歌单、进度等）
     savePlayerState() {
+      // 剥离大字段以避免 localStorage 配额溢出（base64 封面、歌词等可能达数 MB）
+      const stripSong = (song: PlayerSong | null) => {
+        if (!song) return null
+        return {
+          id: song.id,
+          title: song.title,
+          artist: song.artist,
+          album: song.album,
+          durationMs: song.durationMs,
+          filePath: song.filePath,
+          source: song.source,
+          sourceSongId: song.sourceSongId,
+          cover:
+            song.cover && song.cover.startsWith('data:') ? '' : song.cover
+        } as PlayerSong
+      }
       const state = {
-        currentSong: this.currentSong,
-        playlist: this.playlist,
+        currentSong: stripSong(this.currentSong),
+        playlist: this.playlist.map(stripSong),
         playMode: this.playMode,
         currentIndex: this.currentIndex,
         volume: this.volume,
@@ -327,6 +344,28 @@ export const usePlayerStore = defineStore('player', {
           console.error('Failed to parse player state', e)
         }
       }
+    },
+    /**
+     * 根据本地歌曲已加载的封面恢复当前歌曲和播放队列封面
+     * 启动时从持久化恢复的状态会剥离 base64 封面，本地音乐扫描完后调用此方法补全
+     */
+    restoreCoversFromLocalSongs(localSongs: { id: string | number; picUrl?: string }[]): void {
+      const coverMap = new Map<string | number, string>()
+      localSongs.forEach((song) => {
+        if (song.picUrl) {
+          coverMap.set(song.id, song.picUrl)
+        }
+      })
+
+      if (this.currentSong && this.currentSong.id != null && !this.currentSong.cover && coverMap.has(this.currentSong.id)) {
+        this.currentSong.cover = coverMap.get(this.currentSong.id)!
+      }
+
+      this.playlist.forEach((song) => {
+        if (song.id != null && !song.cover && coverMap.has(song.id)) {
+          song.cover = coverMap.get(song.id)!
+        }
+      })
     },
     // 记录一次播放
     recordPlay(song: PlayerSong) {
@@ -414,6 +453,7 @@ export const usePlayerStore = defineStore('player', {
       // 仅当歌曲不同时才重置进度，同歌曲更新时保留现有进度
       if (!isSameSong) {
         this.positionMs = 0
+        this.shouldAutoPlay = true // 用户主动切歌，自动播放
       }
 
       // 更新 currentIndex
@@ -481,6 +521,23 @@ export const usePlayerStore = defineStore('player', {
         this.playlist[index] = {
           ...this.playlist[index],
           translatedLyrics: lyrics
+        }
+      }
+    },
+    /**
+     * 更新当前歌曲封面
+     * 直接修改属性而非创建新对象，避免触发 currentSong 的 watcher 导致重复加载
+     * @param cover 封面 URL
+     */
+    setCover(cover: string): void {
+      if (!this.currentSong || !cover) return
+      this.currentSong.cover = cover
+
+      const index = this.playlist.findIndex((s) => s.id === this.currentSong?.id)
+      if (index !== -1) {
+        this.playlist[index] = {
+          ...this.playlist[index],
+          cover
         }
       }
     },

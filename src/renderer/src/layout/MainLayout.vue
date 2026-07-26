@@ -1,13 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { NLayout, NLayoutSider, NLayoutHeader, NLayoutContent, NLayoutFooter } from 'naive-ui'
+import { NLayout, NLayoutSider, NLayoutHeader, NLayoutContent, NLayoutFooter, NWatermark } from 'naive-ui'
 import { usePlayerStore } from '../stores/playerStore'
 import { throttle } from '../utils/performance'
-
-const AppSidebar = defineAsyncComponent(() => import('../components/layout/AppSidebar.vue'))
-const AppHeader = defineAsyncComponent(() => import('../components/layout/AppHeader.vue'))
-const PlayerBar = defineAsyncComponent(() => import('../components/layout/PlayerBar.vue'))
+import AppSidebar from '../components/layout/AppSidebar.vue'
+import AppHeader from '../components/layout/AppHeader.vue'
+import PlayerBar from '../components/layout/PlayerBar.vue'
 
 const route = useRoute()
 const player = usePlayerStore()
@@ -20,6 +19,7 @@ const isImmersive = computed(() => {
 
 const collapsed = ref(false)
 let wasSmall = false // 记录上一次是否为小窗口状态
+let wasPlayerPageShown = false // 记录侧边栏收起前播放页是否打开
 
 const handleResize = () => {
   // 播放页显示时，完全忽略 resize 事件，不要记录任何东西
@@ -57,12 +57,35 @@ watch(() => player.isPlayerPageShown, (isShown) => {
   }
 })
 
+// 监听侧边栏折叠状态，收起时销毁播放页实例，展开时重新创建
+watch(collapsed, (isCollapsed) => {
+  if (isCollapsed) {
+    // 收起时记录当前播放页状态并关闭
+    wasPlayerPageShown = player.isPlayerPageShown
+    if (wasPlayerPageShown) {
+      player.setPlayerPageShown(false)
+    }
+  } else {
+    // 展开时恢复播放页
+    if (wasPlayerPageShown) {
+      wasPlayerPageShown = false
+      player.setPlayerPageShown(true)
+    }
+  }
+})
+
+// 内容区 padding：统一 60px 避让 header
+const contentContainerRef = ref<HTMLElement>()
+
 onMounted(() => {
   wasSmall = window.innerWidth < 850
   if (wasSmall) {
-    collapsed.value = true // 初始化时如果是小窗口，则直接折叠
+    collapsed.value = true
   }
   window.addEventListener('resize', throttle(handleResize, 200))
+  if (contentContainerRef.value) {
+    contentContainerRef.value.style.paddingTop = '60px'
+  }
 })
 
 onUnmounted(() => {
@@ -71,44 +94,40 @@ onUnmounted(() => {
 </script>
 
 <template>
+
   <n-layout class="main-layout" content-style="display: flex; flex-direction: column; height: 100%;">
     <!-- Main Content Area (Sidebar + Header/Content) -->
+    <n-watermark content="Beta 测试版本" cross fullscreen :font-size="16" :line-height="16" :width="384" :height="384"
+      :x-offset="12" :y-offset="60" :rotate="-15" />
     <n-layout has-sider class="middle-layout" :style="collapsed ? 'position: relative;' : ''">
-        <n-layout-sider
-        width="240"
-        :bordered="!collapsed"
-        collapse-mode="width"
-        :collapsed-width="0"
-        :native-scrollbar="false"
-        class="sidebar"
-        :style="[
+      <n-layout-sider width="240" :bordered="!collapsed" collapse-mode="width" :collapsed-width="0"
+        :native-scrollbar="false" class="sidebar" :style="[
           { backgroundColor: collapsed ? 'transparent' : '', overflow: 'visible', zIndex: 100 },
           { opacity: player.isPlayerPageShown ? 0 : 1, pointerEvents: player.isPlayerPageShown ? 'none' : 'auto', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }
-        ]"
-        :collapsed="collapsed"
-      >
+        ]" :collapsed="collapsed">
         <AppSidebar :collapsed="collapsed" @update:collapsed="collapsed = $event" />
       </n-layout-sider>
 
-      <n-layout class="content-layout" content-style="display: flex; flex-direction: column; height: 100%; position: relative;">
+      <n-layout class="content-layout"
+        content-style="display: flex; flex-direction: column; height: 100%; position: relative;">
         <n-layout-header class="header" :style="[
-          { position: 'absolute', top: 0, left: collapsed ? '52px' : 0, right: 0, zIndex: 10, width: collapsed ? 'calc(100% - 52px)' : '100%' },
+          { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 1000, width: '100%', backgroundColor: 'transparent' },
           { opacity: player.isPlayerPageShown ? 0 : 1, pointerEvents: player.isPlayerPageShown ? 'none' : 'auto', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }
         ]">
-          <AppHeader />
+          <AppHeader :collapsed="collapsed" />
         </n-layout-header>
 
         <n-layout-content
           content-style="padding: 0; height: 100%; box-sizing: border-box; display: flex; flex-direction: column;"
-          class="main-content"
-        >
-          <div class="content-container" :class="{ 'immersive-container': isImmersive }">
+          class="main-content">
+          <div ref="contentContainerRef" class="content-container" :class="{ 'immersive-container': isImmersive }">
             <router-view v-slot="{ Component, route }">
-              <transition name="fade-slide" mode="out-in">
-                <keep-alive :include="['statistics', 'local', 'playlist', 'recent', 'playlist-square', 'toplist', 'singer', 'album']">
+              <PageTransition>
+                <keep-alive
+                  :include="['home', 'statistics', 'local', 'playlist', 'recent', 'playlist-square', 'toplist', 'singer', 'album']">
                   <component :is="Component" :key="route.fullPath" />
                 </keep-alive>
-              </transition>
+              </PageTransition>
             </router-view>
 
           </div>
@@ -133,7 +152,8 @@ onUnmounted(() => {
 .middle-layout {
   flex: 1;
   background-color: #F6F6F6 !important;
-  overflow: hidden; /* Ensure scroll stays within content */
+  overflow: hidden;
+  /* Ensure scroll stays within content */
   z-index: 1;
 }
 
@@ -167,9 +187,11 @@ html[data-theme='dark'] .header {
 
 .header {
   height: 64px;
-  z-index: 100; /* 提高层级，浮动在内容之上 */
-  background: transparent;
-  position: absolute; /* 绝对定位 */
+  z-index: 100;
+  /* 提高层级，浮动在内容之上 */
+  background: transparent !important;
+  position: absolute;
+  /* 绝对定位 */
   top: 0;
   left: 0;
   width: 100%;
@@ -181,7 +203,7 @@ html[data-theme='dark'] .header {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  padding-top: 64px; /* 为 Header 留出空间 */
+  /* 为 Header 留出空间 */
 }
 
 /* 针对歌单详情页（或其他全屏沉浸页）去除顶部 padding */
@@ -207,46 +229,32 @@ html[data-theme='dark'] .header {
 }
 
 .content-container {
-  contain: layout style paint;
   max-width: 1600px;
   margin: 0 auto;
   width: 100%;
   height: 100%;
+  padding-top: 0px !important;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  overflow: hidden;
-  /* 默认情况下，为所有页面添加顶部内边距，避让悬浮的 Header */
-  padding-top: 60px;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* 沉浸式页面容器：去除顶部内边距，内容直接顶到顶部，且去除最大宽度限制 */
 .immersive-container {
+  max-width: none !important;
+  /* 让沉浸式页面占满全屏宽度 */
   padding-top: 0 !important;
-  max-width: none !important; /* 让沉浸式页面占满全屏宽度 */
 }
 
 .footer {
   background-color: #fff;
   border: none;
-  z-index: 100; /* Raise above middle-layout so progress bar overflow is visible */
-  flex-shrink: 0; /* Prevent shrinking */
+  z-index: 100;
+  /* Raise above middle-layout so progress bar overflow is visible */
+  flex-shrink: 0;
+  /* Prevent shrinking */
   position: relative;
-}
-
-/* Page Transition Animation */
-.fade-slide-enter-active,
-.fade-slide-leave-active {
-  transition: opacity 0.3s ease, transform 0.3s ease;
-}
-
-.fade-slide-enter-from {
-  opacity: 0;
-  transform: translateX(10px);
-}
-
-.fade-slide-leave-to {
-  opacity: 0;
-  transform: translateX(-10px);
 }
 </style>

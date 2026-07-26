@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { NIcon, NScrollbar, NInput, NTag } from 'naive-ui'
-import defaultCover from '@renderer/assets/icon.png'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
+import { NIcon, NScrollbar, NInput } from 'naive-ui'
+import defaultCover from '@renderer/assets/default-cover.png'
 import { usePlayerStore } from '../stores/playerStore'
 import { useLocalMusicStore } from '../stores/localMusicStore'
+import { albumCache, type AlbumInfo } from '../stores/albumCache'
 
 const playerStore = usePlayerStore()
 const localMusicStore = useLocalMusicStore()
+const router = useRouter()
 
 onMounted(() => {
   playerStore.loadHistory()
@@ -14,82 +17,8 @@ onMounted(() => {
 
 const searchQuery = ref('')
 
-interface AlbumInfo {
-  name: string
-  artist: string
-  cover: string
-  playCount: number
-  songCount: number
-  songs: { id: string | number; title: string; artist: string; cover: string; album?: string; filePath?: string; durationMs?: number }[]
-}
-
-const albums = computed<AlbumInfo[]>(() => {
-  const albumMap = new Map<string, AlbumInfo>()
-
-  // 从播放历史聚合
-  playerStore.playHistory.forEach((record) => {
-    const albumName = record.album || '未知专辑'
-    if (!albumMap.has(albumName)) {
-      albumMap.set(albumName, {
-        name: albumName,
-        artist: record.artist || '未知歌手',
-        cover: '',
-        playCount: 0,
-        songCount: 0,
-        songs: []
-      })
-    }
-    const info = albumMap.get(albumName)!
-    info.playCount++
-    if (!info.cover && record.cover) {
-      info.cover = record.cover
-    }
-    if (!info.songs.find(s => s.id === record.songId)) {
-      info.songs.push({
-        id: record.songId,
-        title: record.title,
-        artist: record.artist,
-        cover: record.cover,
-        album: record.album,
-        filePath: record.filePath
-      })
-    }
-  })
-
-  // 从本地音乐补充
-  localMusicStore.songs.forEach((song) => {
-    const albumName = song.al?.name || '未知专辑'
-    if (!albumMap.has(albumName)) {
-      albumMap.set(albumName, {
-        name: albumName,
-        artist: song.ar?.[0]?.name || '未知歌手',
-        cover: '',
-        playCount: 0,
-        songCount: 0,
-        songs: []
-      })
-    }
-    const info = albumMap.get(albumName)!
-    if (!info.cover && song.picUrl) {
-      info.cover = song.picUrl
-    }
-    if (!info.cover && song.al?.picUrl) {
-      info.cover = song.al.picUrl
-    }
-    if (!info.songs.find(s => s.id === song.id)) {
-      info.songs.push({
-        id: song.id,
-        title: song.name,
-        artist: song.ar?.[0]?.name || '未知歌手',
-        cover: song.picUrl || song.al?.picUrl || '',
-        album: albumName,
-        filePath: song.filePath,
-        durationMs: song.dt
-      })
-    }
-  })
-
-  return Array.from(albumMap.values())
+const albums = computed(() => {
+  return localMusicStore.albumList
 })
 
 const filteredAlbums = computed(() => {
@@ -100,20 +29,17 @@ const filteredAlbums = computed(() => {
   )
 })
 
-const playAlbumSongs = (album: AlbumInfo) => {
-  if (album.songs.length === 0) return
-  const playlist = album.songs.map(s => ({
-    id: s.id,
-    title: s.title,
-    artist: s.artist,
-    cover: s.cover || defaultCover,
-    durationMs: s.durationMs || 0,
-    album: s.album,
-    filePath: s.filePath
-  }))
-  playerStore.setPlaylist(playlist)
-  playerStore.playSongAtIndex(0)
+const openAlbumDetail = (album: AlbumInfo) => {
+  router.push('/album/' + encodeURIComponent(album.name))
 }
+
+// 同步到缓存，供 AlbumDetailView 使用
+watch(albums, (list) => {
+  albumCache.clear()
+  for (const a of list) {
+    albumCache.set(a.name, a)
+  }
+}, { immediate: true })
 </script>
 
 <template>
@@ -121,25 +47,27 @@ const playAlbumSongs = (album: AlbumInfo) => {
     <n-scrollbar style="height: 100%" content-style="padding: 16px 24px;">
       <div class="album-view">
         <!-- Header -->
-        <div class="header-section">
-          <div class="header-content">
-            <div class="header-left">
-              <h1 class="page-title">专辑</h1>
-              <p class="page-subtitle">{{ albums.length }} 张专辑</p>
-            </div>
-            <div class="header-right">
-              <n-input
-                v-model:value="searchQuery"
-                placeholder="搜索专辑或歌手..."
-                clearable
-                round
-                :style="{ width: '240px' }"
-              >
-                <template #prefix>
-                  <n-icon><i class="mgc_search_line"></i></n-icon>
-                </template>
-              </n-input>
-            </div>
+        <div class="header">
+          <div class="title">
+            专辑
+            <span class="subtitle">
+              <i class="mgc_album_2_line"></i> {{ albums.length }} 张</span>
+          </div>
+          <div class="actions">
+            <n-input
+              v-model:value="searchQuery"
+              placeholder="模糊搜索"
+              clearable
+              round
+              class="search-input"
+              style="width: 200px"
+            >
+              <template #prefix>
+                <n-icon size="18" color="#999">
+                  <i class="mgc_search_2_line"></i>
+                </n-icon>
+              </template>
+            </n-input>
           </div>
         </div>
 
@@ -149,7 +77,7 @@ const playAlbumSongs = (album: AlbumInfo) => {
             v-for="album in filteredAlbums"
             :key="album.name"
             class="album-card"
-            @click="playAlbumSongs(album)"
+            @click="openAlbumDetail(album)"
           >
             <div class="album-cover-wrapper">
               <img
@@ -165,13 +93,6 @@ const playAlbumSongs = (album: AlbumInfo) => {
             <div class="album-info">
               <div class="album-name" :title="album.name">{{ album.name }}</div>
               <div class="album-artist" :title="album.artist">{{ album.artist }}</div>
-              <div class="album-stats">
-                <n-tag size="small" :bordered="false" type="info">
-                  {{ album.songCount }} 首
-                </n-tag>
-                <span class="stat-sep">·</span>
-                <span class="stat-plays">{{ album.playCount }} 次播放</span>
-              </div>
             </div>
           </div>
         </div>
@@ -193,28 +114,42 @@ const playAlbumSongs = (album: AlbumInfo) => {
 }
 
 /* Header */
-.header-section {
-  margin: 8px 0 24px 0;
-}
-
-.header-content {
+.header {
   display: flex;
+  background-color: #F6F6F6;
   justify-content: space-between;
-  align-items: flex-start;
-  gap: 24px;
+  align-items: center;
+  margin-top: 8px;
+  margin-bottom: 14px;
+  padding: 8px 0px 4px;
+  z-index: 10;
+  border-radius: 8px;
 }
 
-.page-title {
-  font-size: 28px;
-  font-weight: 700;
-  margin: 0 0 4px 0;
-  color: var(--n-text-color);
+html[data-theme='dark'] .header {
+  background-color: rgba(255, 255, 255, 0);
 }
 
-.page-subtitle {
+html[data-theme='dark'] .search-input {
+  --n-color: rgba(255, 255, 255, 0.1) !important;
+  --n-color-focus: rgba(255, 255, 255, 0.15) !important;
+  --n-border: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+.title {
+  font-size: 27px;
+  font-weight: bold;
+}
+
+.subtitle {
   font-size: 14px;
-  color: var(--n-text-color-3);
-  margin: 0;
+  color: #999;
+  margin-left: 8px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
 }
 
 /* Album Grid */
@@ -239,6 +174,7 @@ const playAlbumSongs = (album: AlbumInfo) => {
   transform: translateY(-4px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
   border-color: var(--n-primary-color);
+  background: var(--n-primary-color-suppl);
 }
 
 .album-cover-wrapper {
@@ -255,11 +191,7 @@ const playAlbumSongs = (album: AlbumInfo) => {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.album-card:hover .album-cover {
-  transform: scale(1.06);
+  border-radius: 16px;
 }
 
 .album-play-overlay {
@@ -278,10 +210,11 @@ const playAlbumSongs = (album: AlbumInfo) => {
 }
 
 .album-info {
-  padding: 14px;
+  padding: 12px 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  text-align: left;
 }
 
 .album-name {
@@ -296,26 +229,10 @@ const playAlbumSongs = (album: AlbumInfo) => {
 
 .album-artist {
   font-size: 12px;
-  color: var(--n-text-color-2);
+  color: #999;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.album-stats {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  margin-top: 4px;
-}
-
-.stat-sep {
-  color: var(--n-text-color-3);
-}
-
-.stat-plays {
-  color: var(--n-text-color-3);
 }
 
 /* Empty */
@@ -335,11 +252,6 @@ const playAlbumSongs = (album: AlbumInfo) => {
 
 /* Responsive */
 @media (max-width: 768px) {
-  .header-content {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
   .albums-grid {
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     gap: 14px;

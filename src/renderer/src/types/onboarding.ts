@@ -1,106 +1,3 @@
-/**
- * 引导步骤配置接口
- * 定义每个引导步骤的目标元素、提示内容和位置等
- */
-export interface OnboardingStep {
-  /** 步骤唯一标识 */
-  id: string
-  /** 步骤标题 */
-  title: string
-  /** 步骤描述文本 */
-  description: string
-  /** 目标元素的 CSS 选择器，用于定位高亮区域 */
-  targetSelector: string
-  /**
-   * 提示框相对于目标元素的显示位置
-   * 自动布局模式下会根据可用空间智能调整
-   */
-  placement: 'top' | 'bottom' | 'left' | 'right' | 'auto'
-  /**
-   * 高亮区域的 padding（像素），用于扩大聚焦区域
-   * 使高亮框比目标元素稍大，视觉效果更好
-   */
-  spotlightPadding?: number
-  /** 步骤图标类名（mingcute 图标） */
-  icon?: string
-}
-
-/**
- * 引导进度状态
- */
-export interface OnboardingState {
-  /** 当前步骤索引（从 0 开始） */
-  currentStepIndex: number
-  /** 是否已完成全部引导 */
-  isCompleted: boolean
-  /** 是否正在显示引导 */
-  isActive: boolean
-  /** 所有引导步骤 */
-  steps: OnboardingStep[]
-}
-
-/**
- * 引导步骤配置列表
- * 定义首次用户引导的全部步骤
- */
-export const ONBOARDING_STEPS: OnboardingStep[] = [
-  {
-    id: 'sidebar',
-    title: '侧边栏导航',
-    description:
-      '在这里可以快速切换不同页面：首页发现音乐、管理您的歌单、浏览本地音乐文件、查看最近播放记录。点击左上角按钮可以折叠侧边栏获得更大视野。',
-    targetSelector: '.sidebar',
-    placement: 'right',
-    spotlightPadding: 8,
-    icon: 'mgc_menu_line'
-  },
-  {
-    id: 'search',
-    title: '全局搜索',
-    description:
-      '在搜索框中输入关键词，可以同时搜索本地音乐、在线歌曲、歌手和歌单。支持模糊搜索和智能联想，快速找到您想听的音乐。',
-    targetSelector: '.search-bar',
-    placement: 'bottom',
-    spotlightPadding: 4,
-    icon: 'mgc_search_line'
-  },
-  {
-    id: 'settings',
-    title: '设置中心',
-    description:
-      '点击齿轮图标打开设置面板，您可以在这里调整外观主题、播放偏好、音源选择、歌词显示等个性化配置，让 Such Music 更符合您的使用习惯。',
-    targetSelector: '.right-controls .action-btn',
-    placement: 'bottom',
-    spotlightPadding: 4,
-    icon: 'mgc_settings_3_line'
-  },
-  {
-    id: 'player-bar',
-    title: '播放控制栏',
-    description:
-      '底部播放栏是音乐播放的核心控制区。您可以播放/暂停、切换上下曲、调整音量、查看当前播放进度。点击封面区域可以展开完整的播放器页面，享受沉浸式的音乐体验。',
-    targetSelector: '.footer',
-    placement: 'top',
-    spotlightPadding: 8,
-    icon: 'mgc_music_fill'
-  },
-  {
-    id: 'playlist-queue',
-    title: '播放列表与队列',
-    description:
-      '在播放栏右侧可以查看和管理当前播放队列。您可以添加歌曲到队列、调整播放顺序、切换播放模式（列表循环/单曲循环/随机播放），灵活控制您的聆听体验。',
-    targetSelector: '.footer',
-    placement: 'top',
-    spotlightPadding: 8,
-    icon: 'mgc_playlist_line'
-  }
-]
-
-/**
- * localStorage 存储键名
- */
-export const ONBOARDING_STORAGE_KEY = 'such-onboarding-state'
-
 // ============================================================
 // 首次设置向导相关类型
 // ============================================================
@@ -188,6 +85,13 @@ export const EQ_PRESETS: EqPreset[] = [
  */
 export const SETUP_WIZARD_STEPS: SetupWizardStep[] = [
   {
+    id: 'welcome',
+    title: '欢迎使用 Such',
+    subtitle: '一款精致的本地音乐播放器，为你带来卓越的听觉享受',
+    icon: 'mgc_celebrate_line',
+    skippable: false
+  },
+  {
     id: 'theme',
     title: '选择主题色',
     subtitle: '挑选你喜欢的颜色，打造专属的音乐空间',
@@ -195,24 +99,38 @@ export const SETUP_WIZARD_STEPS: SetupWizardStep[] = [
     skippable: false
   },
   {
-    id: 'sound',
-    title: '音效设置',
-    subtitle: '选择适合的均衡器预设，优化听感体验',
-    icon: 'mgc_equalizer_line',
+    id: 'audio-engine',
+    title: '音频引擎',
+    subtitle: '选择适合你设备的音频输出模式，获得最佳音质',
+    icon: 'mgc_speaker_line',
     skippable: false
   },
   {
-    id: 'local-music',
-    title: '导入本地音乐',
-    subtitle: '选择音乐文件夹，将本地歌曲加入曲库',
-    icon: 'mgc_folder_2_line',
+    id: 'feature-1',
+    title: '新功能更新',
+    subtitle: '本次版本带来了诸多体验优化',
+    icon: 'mgc_sparkles_line',
     skippable: true
   },
   {
-    id: 'done',
+    id: 'feature-2',
+    title: '新功能更新',
+    subtitle: '更强大的音频播放能力',
+    icon: 'mgc_headphone_line',
+    skippable: true
+  },
+  {
+    id: 'feature-3',
+    title: '新功能更新',
+    subtitle: '更灵活的音乐管理方式',
+    icon: 'mgc_folder_star_line',
+    skippable: true
+  },
+  {
+    id: 'feature-4',
     title: '准备就绪',
     subtitle: '一切就绪，开始享受音乐吧',
-    icon: 'mgc_celebrate_line',
+    icon: 'mgc_rocket_line',
     skippable: false
   }
 ]

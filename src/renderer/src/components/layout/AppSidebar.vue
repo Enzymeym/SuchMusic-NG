@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { h, ref, watch, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { MenuOption, NTag, NTooltip, useThemeVars } from 'naive-ui'
+import { MenuOption, NTooltip, useThemeVars } from 'naive-ui'
 import SidebarNavigation from '../common/SidebarNavigation.vue'
 
 const props = defineProps<{ collapsed: boolean }>()
@@ -51,37 +51,46 @@ const renderIcon = (iconClass: string) => {
   return () => h('i', { class: iconClass, style: 'font-size: 18px;' })
 }
 
-const activeKey = ref<string>('discover')
+const activeKey = ref<string>('home')
 
 // Sync activeKey with route
 watch(
   () => route.path,
   (newPath) => {
-    if (newPath === '/') activeKey.value = 'statistics'
+    if (newPath === '/') activeKey.value = 'home'
+    else if (newPath === '/statistics') activeKey.value = 'statistics'
     else if (newPath === '/playlist') activeKey.value = 'favorites'
-    else if (newPath === '/local') activeKey.value = 'local'
+    else if (newPath === '/song') activeKey.value = 'song'
     else if (newPath === '/recent') activeKey.value = 'recent'
     else if (newPath === '/singer') activeKey.value = 'singer'
     else if (newPath === '/album') activeKey.value = 'album'
+    else if (newPath === '/plugins') activeKey.value = 'plugins'
   },
   { immediate: true }
 )
 
 // Handle menu selection
 watch(activeKey, (newKey) => {
-  if (newKey === 'statistics') router.push('/')
+  if (newKey === 'home') router.push('/')
+  else if (newKey === 'statistics') router.push('/statistics')
   else if (newKey === 'favorites') router.push('/playlist')
-  else if (newKey === 'local') router.push('/local')
+  else if (newKey === 'song') router.push('/song')
   else if (newKey === 'recent') router.push('/recent')
   else if (newKey === 'singer') router.push('/singer')
-  else if (newKey === 'album') router.push('/album')
+    else if (newKey === 'album') router.push('/album')
+    else if (newKey === 'plugins') router.push('/plugins')
 })
 
 const menuOptions: MenuOption[] = [
   {
-    label: '统计',
-    key: 'statistics',
-    icon: renderIcon('mgc_chart_bar_line')
+    label: '首页',
+    key: 'home',
+    icon: renderIcon('mgc_home_3_line')
+  },
+  {
+    label: '歌曲',
+    key: 'song',
+    icon: renderIcon('mgc_music_3_line')
   },
   {
     label: '歌单',
@@ -99,15 +108,20 @@ const menuOptions: MenuOption[] = [
     icon: renderIcon('mgc_album_line')
   },
   {
-    label: '本地',
-    key: 'local',
-    icon: renderIcon('mgc_folder_2_line')
-  },
-  {
     label: '最近',
     key: 'recent',
     icon: renderIcon('mgc_history_line')
-  }
+  },
+  {
+    label: '统计',
+    key: 'statistics',
+    icon: renderIcon('mgc_chart_bar_line')
+  },
+  {
+    label: '插件',
+    key: 'plugins',
+    icon: renderIcon('mgc_cube_3d_line')
+  },
 ]
 </script>
 
@@ -120,7 +134,6 @@ const menuOptions: MenuOption[] = [
           <img src="../../assets/icon.png" alt="Logo" class="logo-img" />
           <span class="logo-text">
             Such
-            <n-tag type="info" size="small" round> Next Gen </n-tag>
           </span>
         </div>
 
@@ -160,11 +173,8 @@ const menuOptions: MenuOption[] = [
               <!-- Menu Items -->
               <n-tooltip v-for="item in menuOptions" :key="item.key" placement="right">
                 <template #trigger>
-                  <div
-                    class="capsule-item"
-                    :class="{ active: activeKey === item.key }"
-                    @click="activeKey = item.key as string"
-                  >
+                  <div class="capsule-item" :class="{ active: activeKey === item.key }"
+                    @click="activeKey = item.key as string">
                     <component :is="item.icon" />
                   </div>
                 </template>
@@ -183,7 +193,8 @@ const menuOptions: MenuOption[] = [
   display: flex;
   flex-direction: column;
   height: 100%;
-  position: relative; /* For float collapse button positioning */
+  position: relative;
+  /* For float collapse button positioning */
 }
 
 .full-menu {
@@ -247,16 +258,20 @@ const menuOptions: MenuOption[] = [
 
 /* Float Collapse Button */
 .float-collapse-btn {
-  position: fixed; /* 使用 fixed 定位脱离侧边栏局部流，直接相对视口定位 */
-  top: calc(50vh - 40px); /* 屏幕正中央，减去底部播放器一半的高度以达到视觉居中 */
-  left: 240px; /* 展开状态下侧边栏的宽度 */
+  position: fixed;
+  /* 使用 fixed 定位脱离侧边栏局部流，直接相对视口定位 */
+  top: calc(50vh - 40px);
+  /* 屏幕正中央，减去底部播放器一半的高度以达到视觉居中 */
+  left: 240px;
+  /* 展开状态下侧边栏的宽度 */
   /* transform: translateY(-50%) 会使其基于自身高度居中 */
   transform: translate(-50%, -50%);
   width: 24px;
   height: 48px;
   background-color: var(--n-color);
   border: 1px solid var(--n-border-color);
-  border-radius: 12px; /* 修改为小胶囊形状 */
+  border-radius: 12px;
+  /* 修改为小胶囊形状 */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -264,7 +279,8 @@ const menuOptions: MenuOption[] = [
   color: var(--n-text-color-3);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
   transition: all 0.2s;
-  z-index: 1000; /* 提高层级确保不被遮挡 */
+  z-index: 1000;
+  /* 提高层级确保不被遮挡 */
   -webkit-app-region: no-drag;
 }
 
@@ -308,7 +324,8 @@ html[data-theme='dark'] .float-collapse-btn {
   top: 0;
   left: 0;
   width: 100%;
-  pointer-events: none; /* Changed from auto to none */
+  pointer-events: none;
+  /* Changed from auto to none */
 }
 
 .drag-area {
@@ -316,7 +333,8 @@ html[data-theme='dark'] .float-collapse-btn {
   top: 11px;
   left: 0;
   width: 100%;
-  height: 60px; /* 匹配 header 的高度 */
+  height: 60px;
+  /* 匹配 header 的高度 */
   -webkit-app-region: drag;
   z-index: 10;
   pointer-events: auto;
@@ -357,7 +375,8 @@ html[data-theme='dark'] .float-collapse-btn {
   transform: translateY(-50%);
   width: 4px;
   height: 48px;
-  background-color: rgba(0, 0, 0, 0.2); /* 加深浅色模式下的灰色 */
+  background-color: rgba(0, 0, 0, 0.2);
+  /* 加深浅色模式下的灰色 */
   border-radius: 0 4px 4px 0;
   opacity: 0.8;
   transition:
@@ -433,7 +452,8 @@ html[data-theme='dark'] .capsule-tab {
 .capsule-item.active {
   background-color: v-bind('activeBgColor');
   color: v-bind('themeVars.primaryColor');
-  box-shadow: none; /* 移除额外阴影，保持扁平 */
+  box-shadow: none;
+  /* 移除额外阴影，保持扁平 */
 }
 
 html[data-theme='dark'] .capsule-item.active {

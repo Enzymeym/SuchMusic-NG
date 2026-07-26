@@ -15,6 +15,17 @@
   }
 }
 
+/* 桌面歌词颜色选择器宽度限制 */
+.desktop-lyrics-color-picker {
+  width: 120px;
+  max-width: 120px;
+
+  .n-color-picker-trigger {
+    width: 120px !important;
+    min-width: auto !important;
+  }
+}
+
 /* 侧边栏标题区域布局 */
 .sider-header {
   display: flex;

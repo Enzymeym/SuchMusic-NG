@@ -6,25 +6,6 @@ declare global {
     api: {
       rustAudio: any
       audioEngine: any
-      ffmpegEngine: {
-        create: () => Promise<{ success: boolean; engineId?: string; error?: string }>
-        destroy: () => Promise<boolean>
-        load: (filePath: string) => Promise<{ success: boolean; streamInfo?: any; error?: string }>
-        loadData: (buffer: ArrayBuffer) => Promise<{ success: boolean; streamInfo?: any; error?: string }>
-        decodeFrame: () => Promise<{ success: boolean; frame?: any; error?: string }>
-        decodeAll: () => Promise<{ success: boolean; samples?: number[]; error?: string }>
-        seek: (positionMs: number) => Promise<{ success: boolean; error?: string }>
-        play: () => Promise<{ success: boolean; error?: string }>
-        pause: () => Promise<{ success: boolean; error?: string }>
-        stop: () => Promise<{ success: boolean; error?: string }>
-        reset: () => Promise<{ success: boolean; error?: string }>
-        getState: () => Promise<string>
-        getStreamInfo: () => Promise<any | null>
-        getDsdParams: () => Promise<any | null>
-        isFormatSupported: (extension: string) => Promise<boolean>
-        isFfmpegExclusive: (extension: string) => Promise<boolean>
-        getVersion: () => Promise<string>
-      }
       wasapi: {
         enumerateDevices: () => Promise<{ success: boolean; devices?: any[]; error?: string }>
         create: (sampleRate: number, channels: number, mode: 'Shared' | 'Exclusive', deviceId?: string) =>
@@ -41,13 +22,6 @@ declare global {
         }>
         getVersion: () => Promise<{ success: boolean; version?: string; error?: string }>
       }
-      ffmpegInstaller: {
-        check: () => Promise<{ success: boolean; installed: boolean; status: string; dllsFound?: string[]; missingDlls?: string[]; error?: string }>
-        install: () => void
-        getDir: () => Promise<{ dir: string }>
-        onProgress: (callback: (progress: { status: string; downloadedBytes: number; totalBytes: number; percent: number; speedBps: number; estimatedSeconds: number; error?: string }) => void) => () => void
-        onResult: (callback: (result: { success: boolean; installed: boolean; status: string; error?: string }) => void) => () => void
-      }
       updater: {
         check: (channel: 'stable' | 'beta') => Promise<any>
         download: (url: string) => Promise<any>
@@ -58,6 +32,26 @@ declare global {
         offProgress: (callback: (progress: { downloaded: number; total: number; percent: number; speed: number }) => void) => void
         onAutoCheckResult: (callback: (result: any) => void) => void
         offAutoCheckResult: (callback: (result: any) => void) => void
+      }
+      plugins: {
+        load: (filePath: string) => Promise<{ success: boolean; manifest?: any; state?: string; error?: string }>
+        remove: (pluginId: string) => Promise<{ success: boolean; error?: string }>
+        setActive: (pluginId: string | null) => Promise<{ success: boolean; error?: string }>
+        call: (pluginId: string, methodName: string, ...args: any[]) => Promise<{ success: boolean; result?: any; error?: string }>
+        checkUpdate: (pluginId: string) => Promise<{ success: boolean; result?: any; error?: string }>
+        list: () => Promise<{ success: boolean; plugins?: any[] }>
+        selectFile: () => Promise<{ success: boolean; filePath?: string; canceled?: boolean }>
+        selectDirectory: () => Promise<{ success: boolean; filePath?: string; canceled?: boolean }>
+        onNotice: (callback: (data: any) => void) => () => void
+        onLog: (callback: (level: string, ...args: any[]) => void) => () => void
+        onConfirmRequest: (callback: (request: any) => void) => () => void
+        onBatchConfirmRequest: (callback: (request: any) => void) => () => void
+        respondConfirm: (response: { requestId: string; confirmed: boolean; skipSession: boolean }) => Promise<void>
+        respondBatchConfirm: (response: { requestId: string; confirmed: boolean; rejectedOpIds?: string[]; skipSession: boolean }) => Promise<void>
+        onEmit: (callback: (data: { pluginId: string; eventName: string; args: any[] }) => void) => () => void
+        onPropsChanged: (callback: (data: { pluginId: string; props: Record<string, any> }) => void) => () => void
+        onPlaylistOp: (callback: (request: any) => void) => () => void
+        respondPlaylistOp: (response: { requestId: string; success: boolean; error?: string; result?: any }) => Promise<void>
       }
     }
   }

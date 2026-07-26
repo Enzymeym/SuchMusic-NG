@@ -1,7 +1,15 @@
-import { shell, BrowserWindow, app } from 'electron'
+import { shell, BrowserWindow, app, nativeImage } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
-import icon from '../../../resources/icon.png?asset'
+
+function getIconPath(): string {
+  // 在开发环境中使用相对路径，在生产环境中使用 asarUnpack 的实际路径
+  if (is.dev) {
+    return join(__dirname, '../../../resources/icon.png')
+  }
+  // 打包后 resources/ 通过 asarUnpack 解压到 app.asar.unpacked/resources/
+  return join(process.resourcesPath, 'app.asar.unpacked', 'resources', 'icon.png')
+}
 
 let mainWindow: BrowserWindow | undefined
 
@@ -16,7 +24,7 @@ export function createWindow(): void {
     height: 670,
     show: false,
     autoHideMenuBar: true,
-    icon,
+    icon: nativeImage.createFromPath(getIconPath()),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -52,9 +60,10 @@ export function createWindow(): void {
 
   mainWindow.on('close', (event) => {
     // 如果不是真的要退出，并且用户设置了最小化到托盘，就隐藏窗口
+    // 但如果托盘未创建，则不允许隐藏窗口（否则无法恢复或退出）
     if (!(app as any).isQuiting) {
       const closeAction = (app as any).closeAction || 'minimize'
-      if (closeAction === 'minimize') {
+      if (closeAction === 'minimize' && (app as any).hasTray !== false) {
         event.preventDefault()
         mainWindow?.hide()
       }

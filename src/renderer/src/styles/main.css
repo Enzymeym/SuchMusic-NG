@@ -49,3 +49,23 @@ html[data-theme='dark'] body {
 .n-scrollbar > .n-scrollbar-container > .n-scrollbar-content {
   padding-top: 0 !important;
 }
+
+/* 全局禁止文本与图片拖拽/选择，保持音乐播放器风格 */
+* {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+img,
+svg {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+/* 允许输入框、文本域内正常选择，避免影响编辑 */
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}

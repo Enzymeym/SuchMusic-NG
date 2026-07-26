@@ -1,17 +1,20 @@
 import { ref, computed } from 'vue'
 import { usePlayerStore } from '../../../stores/playerStore'
-import { webAudioEngine } from '../../../audio/audio-engine'
+import { audioEngine } from '../../../audio/audio-engine'
 
 /**
  * 进度条相关的组合式函数
- * 处理进度条拖动、时间格式化等功能
+ * 使用 NaiveUI n-slider 的 @dragstart / @dragend 事件区分拖拽和点击
  */
 export function usePlayerProgress() {
   const player = usePlayerStore()
 
-  // 进度条拖动状态
+  // 进度条拖拽状态
   const isDraggingProgress = ref(false)
   const dragValue = ref(0)
+
+  // 防止 endDrag 后立即触发 handleProgressUpdate 造成 double-seek
+  let _lastSeekTime = 0
 
   /**
    * 格式化时间为 mm:ss 格式
@@ -47,24 +50,46 @@ export function usePlayerProgress() {
   })
 
   /**
-   * 处理进度更新
-   * @param val 进度值
+   * 执行 seek 跳转
    */
-  const handleProgressUpdate = (val: number): void => {
-    // 始终更新拖拽值，保证 UI 与滑块一致
-    dragValue.value = val
+  const doSeek = (percent: number) => {
+    if (!player.currentSong || player.currentSong.durationMs <= 0) return
 
-    // 非拖拽场景（例如点击或键盘调节），直接跳转进度
-    if (!isDraggingProgress.value) {
-      if (!player.currentSong || player.currentSong.durationMs <= 0) return
-      const ratio = Math.min(Math.max(val, 0), 100) / 100
-      const targetMs = player.currentSong.durationMs * ratio
-      webAudioEngine.seek(targetMs)
-    }
+    const ratio = Math.min(Math.max(percent, 0), 100) / 100
+    const targetMs = player.currentSong.durationMs * ratio
+
+    // 防止短时间重复 seek
+    const now = Date.now()
+    if (now - _lastSeekTime < 200) return
+    _lastSeekTime = now
+
+    player.setPosition(targetMs)
+    audioEngine.seek(targetMs)
   }
 
   /**
-   * 开始拖拽进度条
+   * 处理进度更新（点击和拖拽都会触发）
+   * 点击时 isDraggingProgress = false → 立即 seek
+   * 拖拽时 isDraggingProgress = true → 仅更新 dragValue，seek 由 endDrag 处理
+   */
+  const handleProgressUpdate = (val: number): void => {
+    dragValue.value = val
+
+    // 拖拽中：仅更新 dragValue，seek 由 endDrag 统一处理
+    if (isDraggingProgress.value) return
+
+    // 非拖拽场景（点击进度条）→ 立即跳转
+    if (!player.currentSong || player.currentSong.durationMs <= 0) return
+
+    // 防止轮询更新 player.positionMs 触发滑块 @update:value 造成反馈循环
+    const currentPercent = (player.positionMs / player.currentSong.durationMs) * 100
+    if (Math.abs(val - currentPercent) < 0.5) return
+
+    doSeek(val)
+  }
+
+  /**
+   * 拖拽开始（由 n-slider @dragstart 触发）
    */
   const startDrag = (): void => {
     // 初始化拖拽起点为当前播放进度，避免进度条跳变
@@ -75,26 +100,17 @@ export function usePlayerProgress() {
     }
 
     isDraggingProgress.value = true
-    window.addEventListener('mouseup', endDrag)
-    window.addEventListener('touchend', endDrag)
   }
 
   /**
-   * 结束拖拽进度条
+   * 拖拽结束（由 n-slider @dragend 触发）
    */
   const endDrag = (): void => {
-    if (!isDraggingProgress.value) return
-
     isDraggingProgress.value = false
-    window.removeEventListener('mouseup', endDrag)
-    window.removeEventListener('touchend', endDrag)
 
     if (!player.currentSong || player.currentSong.durationMs <= 0) return
 
-    // 根据拖拽结果计算目标位置并跳转
-    const ratio = Math.min(Math.max(dragValue.value, 0), 100) / 100
-    const targetMs = player.currentSong.durationMs * ratio
-    webAudioEngine.seek(targetMs)
+    doSeek(dragValue.value)
   }
 
   return {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, watch, defineAsyncComponent } from 'vue'
+import { ref, nextTick, onMounted, onUnmounted, computed, watch, defineAsyncComponent } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NConfigProvider,
@@ -9,17 +9,17 @@ import {
   NDialogProvider
 } from 'naive-ui'
 import 'mingcute_icon/font/Mingcute.css'
-// 引入 highlight.js 提供代码高亮能力
-import hljs from 'highlight.js'
 import { themeOverridesRef, setPrimaryColor } from './themes'
 import { useSettingsStore } from './stores/settingsStore'
 import { usePlayerStore } from './stores/playerStore'
+import { usePlaylistStore } from './stores/playlistStore'
+import { useLocalMusicStore } from './stores/localMusicStore'
 import { useAutoNaiveTheme } from './themes/autoNaiveTheme'
 import PluginUpdateNotifier from './components/common/PluginUpdateNotifier.vue'
-import OnboardingOverlay from './components/common/OnboardingOverlay.vue'
 import SetupWizard from './components/common/SetupWizard.vue'
-import { useOnboardingStore } from './stores/onboardingStore'
+import SplashScreen from './components/common/SplashScreen.vue'
 import { useSetupWizardStore } from './stores/setupWizardStore'
+import { audioEngine } from './audio/audio-engine'
 
 const UpdateNotification = defineAsyncComponent(
   () => import('./components/common/UpdateNotification.vue')
@@ -30,7 +30,6 @@ setPrimaryColor('#2C8EFD')
 
 // 从设置中读取用户配置的主题色并应用
 const settingsStore = useSettingsStore()
-const onboardingStore = useOnboardingStore()
 const setupWizardStore = useSetupWizardStore()
 if (!settingsStore.appearance.themeColorFollowsCover && settingsStore.appearance.customThemeColor) {
   setPrimaryColor(settingsStore.appearance.customThemeColor)
@@ -42,9 +41,25 @@ const route = useRoute()
 const isDesktopLyric = computed(() => route.name === 'desktop-lyric')
 
 const playerStore = usePlayerStore()
+const playlistStore = usePlaylistStore()
+const localMusicStore = useLocalMusicStore()
 
 // 初始化时恢复播放器状态
 playerStore.loadPlayerState()
+
+// 初始化时加载歌单数据（确保右键菜单在任何页面都可用）
+playlistStore.loadFromStorage()
+
+// 启动时自动扫描本地音乐，确保专辑/歌手页面数据完整
+localMusicStore.scanMusic().catch(() => { /* 静默失败，用户可手动扫描 */ })
+
+// 开屏动画状态控制
+const appReady = ref(false)
+const splashHidden = ref(false)
+
+function handleSplashFadeOutComplete() {
+  splashHidden.value = true
+}
 
 // 监听关键状态变化并保存，使用自定义防抖函数
 
@@ -103,6 +118,14 @@ watch(
   { immediate: true }
 )
 
+// 重启设置向导
+function handleRestartSetupWizard() {
+  setupWizardStore.reset()
+  setTimeout(() => {
+    setupWizardStore.start()
+  }, 100)
+}
+
 // 在组件卸载时清除定时器和事件监听器
 onUnmounted(() => {
   if (saveInterval) {
@@ -118,6 +141,7 @@ onUnmounted(() => {
     window.electron.ipcRenderer.removeAllListeners('player:control')
     window.electron.ipcRenderer.removeAllListeners('plugin:hot-updated')
   }
+  window.removeEventListener('setup-wizard:restart', handleRestartSetupWizard)
 })
 
 onMounted(() => {
@@ -126,32 +150,30 @@ onMounted(() => {
       switch (action) {
         case 'play':
           if (!playerStore.isPlaying) {
-            import('./audio/audio-engine').then(async ({ webAudioEngine }) => {
-              if (playerStore.currentSong) {
-                await webAudioEngine.play()
+            if (playerStore.currentSong) {
+              audioEngine.play().then(() => {
                 playerStore.setPlaying(true)
-              }
-            })
+              })
+            }
           }
           break
         case 'pause':
           if (playerStore.isPlaying) {
-            import('./audio/audio-engine').then(async ({ webAudioEngine }) => {
-              await webAudioEngine.pause()
+            audioEngine.pause().then(() => {
               playerStore.setPlaying(false)
             })
           }
           break
         case 'toggle':
-          import('./audio/audio-engine').then(async ({ webAudioEngine }) => {
-            if (playerStore.isPlaying) {
-              await webAudioEngine.pause()
+          if (playerStore.isPlaying) {
+            audioEngine.pause().then(() => {
               playerStore.setPlaying(false)
-            } else if (playerStore.currentSong) {
-              await webAudioEngine.play()
+            })
+          } else if (playerStore.currentSong) {
+            audioEngine.play().then(() => {
               playerStore.setPlaying(true)
-            }
-          })
+            })
+          }
           break
         case 'next':
           playerStore.playNext()
@@ -165,59 +187,52 @@ onMounted(() => {
       }
     })
 
-    // 首次使用引导流程：设置向导 > 功能引导
-    // 延迟确保 DOM 完全渲染后再开始
-    setTimeout(() => {
+    // 首次使用引导流程：仅显示设置向导
+    // 使用 requestAnimationFrame 确保 DOM 完全渲染后再开始
+    const startSetupWizard = () => {
       if (!setupWizardStore.isCompleted) {
-        // 未完成设置向导 → 先显示设置向导
         setupWizardStore.start()
-        // 监听设置向导完成后，自动启动功能引导
-        const stopWatch = watch(
-          () => setupWizardStore.isActive,
-          (active) => {
-            if (!active && setupWizardStore.isCompleted && !onboardingStore.isCompleted) {
-              // 设置向导已完成，延迟启动功能引导
-              setTimeout(() => {
-                onboardingStore.start()
-              }, 400)
-              stopWatch()
-            }
-          }
-        )
-      } else if (!onboardingStore.isCompleted) {
-        // 设置向导已完成，但功能引导未完成 → 直接启动功能引导
-        onboardingStore.start()
       }
-    }, 500)
+    }
+
+    // 等待两帧确保 DOM 渲染完成，然后标记应用就绪
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        startSetupWizard()
+        // 应用就绪后触发开屏淡出
+        nextTick(() => {
+          appReady.value = true
+        })
+      })
+    })
+  } else {
+    // 桌面歌词窗口不需要开屏
+    appReady.value = true
   }
 
-  // 监听全局事件：允许从设置等位置重新启动引导
-  window.addEventListener('onboarding:restart', () => {
-    onboardingStore.restart()
-  })
+  // 监听全局事件：允许从设置等位置重新启动设置向导
+  window.addEventListener('setup-wizard:restart', handleRestartSetupWizard)
 })
 
 
 </script>
 
 <template>
-  <n-config-provider
-    :theme="isDesktopLyric ? null : theme"
-    :theme-overrides="themeOverridesRef"
-    :hljs="hljs"
-  >
+  <template v-if="!isDesktopLyric">
+    <SplashScreen :visible="!appReady" @fade-out-complete="handleSplashFadeOutComplete" />
+  </template>
+
+  <n-config-provider :theme="isDesktopLyric ? null : theme" :theme-overrides="themeOverridesRef">
     <n-global-style v-if="!isDesktopLyric" />
     <n-notification-provider>
       <n-message-provider>
-      <n-dialog-provider>
-        <update-notification />
-        <PluginUpdateNotifier />
-        <SetupWizard />
-        <OnboardingOverlay />
-        <router-view />
-      </n-dialog-provider>
-    </n-message-provider>
-  </n-notification-provider>
+        <n-dialog-provider>
+          <update-notification />
+          <PluginUpdateNotifier />
+          <SetupWizard />
+          <router-view v-show="splashHidden || isDesktopLyric" />
+        </n-dialog-provider>
+      </n-message-provider>
+    </n-notification-provider>
   </n-config-provider>
 </template>
-

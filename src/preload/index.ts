@@ -121,6 +121,10 @@ class AudioEngineManager {
     return ipcRenderer.invoke('audio-engine:seek', this.ensureEngineId(), positionMs);
   }
 
+  async seekAndPlay(positionMs: number): Promise<{ success: boolean; error?: string }> {
+    return ipcRenderer.invoke('audio-engine:seek-and-play', this.ensureEngineId(), positionMs);
+  }
+
   async setVolume(volume: number): Promise<{ success: boolean; error?: string }> {
     return ipcRenderer.invoke('audio-engine:set-volume', this.ensureEngineId(), volume);
   }
@@ -263,6 +267,51 @@ class AudioEngineManager {
 
   // === 生命周期 ===
 
+  /**
+   * 读取原始音频文件 Buffer（用于 Web Audio 浏览器原生解码）
+   * @param filePath 文件路径
+   * @returns 文件原始 Buffer
+   */
+  async readAudioFile(filePath: string): Promise<{
+    success: boolean;
+    data?: Uint8Array;
+    error?: string;
+  }> {
+    return ipcRenderer.invoke('audio-engine:read-audio-file', filePath)
+  }
+
+  /**
+   * 一次性解码全部音频并返回处理后的 PCM Buffer
+   * 用于 Web Audio API 播放模式
+   * @returns PCM 数据（Uint8Array 形式的 f32 PCM）、采样率、声道数
+   */
+  async decodeAllProcessed(): Promise<{
+    success: boolean;
+    data?: Uint8Array;
+    sampleRate?: number;
+    channels?: number;
+    isPartial?: boolean;
+    error?: string;
+  }> {
+    return ipcRenderer.invoke('audio-engine:decode-processed', this.ensureEngineId());
+  }
+
+  /**
+   * 快速解码前 N 个采样（渐进式播放）
+   * @param targetSamples 目标采样数（每声道）
+   * @returns PCM 数据
+   */
+  async decodePartial(targetSamples: number): Promise<{
+    success: boolean;
+    data?: Uint8Array;
+    sampleRate?: number;
+    channels?: number;
+    isPartial?: boolean;
+    error?: string;
+  }> {
+    return ipcRenderer.invoke('audio-engine:decode-partial', this.ensureEngineId(), targetSamples);
+  }
+
   async reset(): Promise<{ success: boolean; error?: string }> {
     return ipcRenderer.invoke('audio-engine:reset', this.ensureEngineId());
   }
@@ -275,108 +324,6 @@ class AudioEngineManager {
 
 const audioEngineManager = new AudioEngineManager();
 
-// FFmpeg 引擎管理器
-class AudioEngineFfmpegManager {
-  private currentEngineId: string | null = null;
-
-  async create(): Promise<{ success: boolean; engineId?: string; error?: string }> {
-    const result = await ipcRenderer.invoke('ffmpeg-engine:create');
-    if (result.success) {
-      this.currentEngineId = result.engineId;
-      return { success: true, engineId: result.engineId };
-    }
-    return { success: false, error: result.error };
-  }
-
-  getEngineId(): string | null {
-    return this.currentEngineId;
-  }
-
-  async destroy(): Promise<boolean> {
-    if (!this.currentEngineId) return false;
-    const result = await ipcRenderer.invoke('ffmpeg-engine:destroy', this.currentEngineId);
-    if (result.success) {
-      this.currentEngineId = null;
-    }
-    return result.success;
-  }
-
-  private ensureEngineId(): string {
-    if (!this.currentEngineId) {
-      throw new Error('FFmpeg 引擎未初始化，请先调用 create()');
-    }
-    return this.currentEngineId;
-  }
-
-  async load(filePath: string): Promise<{ success: boolean; streamInfo?: any; error?: string }> {
-    return ipcRenderer.invoke('ffmpeg-engine:load', this.ensureEngineId(), filePath);
-  }
-
-  async loadData(buffer: ArrayBuffer): Promise<{ success: boolean; streamInfo?: any; error?: string }> {
-    return ipcRenderer.invoke('ffmpeg-engine:load-data', this.ensureEngineId(), buffer);
-  }
-
-  async decodeFrame(): Promise<{ success: boolean; frame?: any; error?: string }> {
-    return ipcRenderer.invoke('ffmpeg-engine:decode-frame', this.ensureEngineId());
-  }
-
-  async decodeAll(): Promise<{ success: boolean; samples?: number[]; error?: string }> {
-    return ipcRenderer.invoke('ffmpeg-engine:decode-all', this.ensureEngineId());
-  }
-
-  async seek(positionMs: number): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('ffmpeg-engine:seek', this.ensureEngineId(), positionMs);
-  }
-
-  async play(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('ffmpeg-engine:play', this.ensureEngineId());
-  }
-
-  async pause(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('ffmpeg-engine:pause', this.ensureEngineId());
-  }
-
-  async stop(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('ffmpeg-engine:stop', this.ensureEngineId());
-  }
-
-  async reset(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('ffmpeg-engine:reset', this.ensureEngineId());
-  }
-
-  async getState(): Promise<string> {
-    const result = await ipcRenderer.invoke('ffmpeg-engine:get-state', this.ensureEngineId());
-    return result.state ?? 'idle';
-  }
-
-  async getStreamInfo(): Promise<any | null> {
-    const result = await ipcRenderer.invoke('ffmpeg-engine:get-stream-info', this.ensureEngineId());
-    return result.info ?? null;
-  }
-
-  async getDsdParams(): Promise<any | null> {
-    const result = await ipcRenderer.invoke('ffmpeg-engine:get-dsd-params', this.ensureEngineId());
-    return result.params ?? null;
-  }
-
-  async isFormatSupported(extension: string): Promise<boolean> {
-    const result = await ipcRenderer.invoke('ffmpeg-engine:is-format-supported', extension);
-    return result.supported ?? false;
-  }
-
-  async isFfmpegExclusive(extension: string): Promise<boolean> {
-    const result = await ipcRenderer.invoke('ffmpeg-engine:is-exclusive', extension);
-    return result.exclusive ?? false;
-  }
-
-  async getVersion(): Promise<string> {
-    const result = await ipcRenderer.invoke('ffmpeg-engine:get-version');
-    return result.version ?? '';
-  }
-}
-
-const audioEngineFfmpegManager = new AudioEngineFfmpegManager();
-
 const api = {
   rustAudio: audioEngineManager,
 
@@ -388,6 +335,7 @@ const api = {
     pause: () => audioEngineManager.pause(),
     stop: () => audioEngineManager.stop(),
     seek: (positionMs: number) => audioEngineManager.seek(positionMs),
+    seekAndPlay: (positionMs: number) => audioEngineManager.seekAndPlay(positionMs),
     setVolume: (volume: number) => audioEngineManager.setVolume(volume),
     getVolume: () => audioEngineManager.getVolume(),
     setLoopMode: (mode: LoopMode) => audioEngineManager.setLoopMode(mode),
@@ -422,6 +370,12 @@ const api = {
 
     reset: () => audioEngineManager.reset(),
 
+    decodeAllProcessed: () => audioEngineManager.decodeAllProcessed(),
+
+    decodePartial: (targetSamples: number) => audioEngineManager.decodePartial(targetSamples),
+
+    readAudioFile: (filePath: string) => audioEngineManager.readAudioFile(filePath),
+
     on: (channel: string, callback: (...args: any[]) => void) => {
       const validChannels = ['audio-engine:ended', 'audio-engine:error', 'audio-engine:progress', 'audio-engine:stateChange'];
       if (validChannels.includes(channel)) {
@@ -438,27 +392,29 @@ const api = {
     }),
 
     getVersion: () => AudioEngineManager.getVersion(),
-  },
 
-  // FFmpeg 音频引擎 (第二个引擎，用于 DSF/DSD/DFF 等格式)
-  ffmpegEngine: {
-    create: () => audioEngineFfmpegManager.create(),
-    destroy: () => audioEngineFfmpegManager.destroy(),
-    load: (filePath: string) => audioEngineFfmpegManager.load(filePath),
-    loadData: (buffer: ArrayBuffer) => audioEngineFfmpegManager.loadData(buffer),
-    decodeFrame: () => audioEngineFfmpegManager.decodeFrame(),
-    decodeAll: () => audioEngineFfmpegManager.decodeAll(),
-    seek: (positionMs: number) => audioEngineFfmpegManager.seek(positionMs),
-    play: () => audioEngineFfmpegManager.play(),
-    pause: () => audioEngineFfmpegManager.pause(),
-    stop: () => audioEngineFfmpegManager.stop(),
-    reset: () => audioEngineFfmpegManager.reset(),
-    getState: () => audioEngineFfmpegManager.getState(),
-    getStreamInfo: () => audioEngineFfmpegManager.getStreamInfo(),
-    getDsdParams: () => audioEngineFfmpegManager.getDsdParams(),
-    isFormatSupported: (extension: string) => audioEngineFfmpegManager.isFormatSupported(extension),
-    isFfmpegExclusive: (extension: string) => audioEngineFfmpegManager.isFfmpegExclusive(extension),
-    getVersion: () => audioEngineFfmpegManager.getVersion(),
+    setFftCallback: (callback: (spectrum: number[]) => void) => {
+      const engineId = audioEngineManager.getEngineId();
+      if (!engineId) return () => {};
+
+      let lastFftTime = 0;
+      const FFT_THROTTLE_MS = 60; // 约 16fps，平衡流畅度与性能
+
+      const handler = (_event: any, spectrum: number[]) => {
+        const now = Date.now();
+        if (now - lastFftTime < FFT_THROTTLE_MS) return;
+        lastFftTime = now;
+        callback(spectrum);
+      };
+      ipcRenderer.on('audio-engine:fft-data', handler);
+      ipcRenderer.send('audio-engine:set-fft-callback', engineId);
+
+      return () => {
+        ipcRenderer.removeListener('audio-engine:fft-data', handler);
+        // 通知主进程停止从 Rust 引擎推送 FFT 数据
+        ipcRenderer.send('audio-engine:remove-fft-callback', engineId);
+      };
+    },
   },
 
   // WASAPI 音频输出 (独占/共享模式)
@@ -474,23 +430,6 @@ const api = {
     flush: (engineId: string) => ipcRenderer.invoke('wasapi:flush', engineId),
     getState: (engineId: string) => ipcRenderer.invoke('wasapi:get-state', engineId),
     getVersion: () => ipcRenderer.invoke('wasapi:get-version'),
-  },
-
-  // FFmpeg 解码器安装管理
-  ffmpegInstaller: {
-    check: () => ipcRenderer.invoke('ffmpeg-installer:check'),
-    install: () => ipcRenderer.send('ffmpeg-installer:install'),
-    getDir: () => ipcRenderer.invoke('ffmpeg-installer:get-dir'),
-    onProgress: (callback: (progress: any) => void) => {
-      const handler = (_event: any, progress: any) => callback(progress);
-      ipcRenderer.on('ffmpeg-installer:progress', handler);
-      return () => { ipcRenderer.removeListener('ffmpeg-installer:progress', handler); };
-    },
-    onResult: (callback: (result: any) => void) => {
-      const handler = (_event: any, result: any) => callback(result);
-      ipcRenderer.on('ffmpeg-installer:result', handler);
-      return () => { ipcRenderer.removeListener('ffmpeg-installer:result', handler); };
-    },
   },
 
   updater: {
@@ -560,6 +499,82 @@ const api = {
         ipcRenderer.removeListener('update:autoCheckResult', wrapper)
       }
     }
+  },
+
+  // ========== 插件系统 ==========
+  plugins: {
+    /** 加载插件 */
+    load: (filePath: string) => ipcRenderer.invoke('plugin:load', filePath),
+    /** 移除插件 */
+    remove: (pluginId: string) => ipcRenderer.invoke('plugin:remove', pluginId),
+    /** 设置活跃插件 */
+    setActive: (pluginId: string | null) => ipcRenderer.invoke('plugin:set-active', pluginId),
+    /** 调用插件方法 */
+    call: (pluginId: string, methodName: string, ...args: any[]) =>
+      ipcRenderer.invoke('plugin:call', pluginId, methodName, ...args),
+    /** 检查插件更新 */
+    checkUpdate: (pluginId: string) => ipcRenderer.invoke('plugin:check-update', pluginId),
+    /** 获取已加载插件列表 */
+    list: () => ipcRenderer.invoke('plugin:list'),
+    /** 选择插件文件 */
+    selectFile: () => ipcRenderer.invoke('plugin:select-file'),
+    /** 选择目录 */
+    selectDirectory: () => ipcRenderer.invoke('plugin:select-directory'),
+
+    // ========== 事件监听 ==========
+    /** 监听插件通知 */
+    onNotice: (callback: (data: any) => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('plugin:notice', handler)
+      return () => { ipcRenderer.removeListener('plugin:notice', handler) }
+    },
+    /** 监听插件日志 */
+    onLog: (callback: (level: string, ...args: any[]) => void) => {
+      const handler = (_event: any, level: string, ...args: any[]) => callback(level, ...args)
+      ipcRenderer.on('plugin:log', handler)
+      return () => { ipcRenderer.removeListener('plugin:log', handler) }
+    },
+    /** 监听敏感操作确认请求 */
+    onConfirmRequest: (callback: (request: any) => void) => {
+      const handler = (_event: any, request: any) => callback(request)
+      ipcRenderer.on('plugin:request-confirm', handler)
+      return () => { ipcRenderer.removeListener('plugin:request-confirm', handler) }
+    },
+    /** 监听批量敏感操作确认请求 */
+    onBatchConfirmRequest: (callback: (request: any) => void) => {
+      const handler = (_event: any, request: any) => callback(request)
+      ipcRenderer.on('plugin:request-batch-confirm', handler)
+      return () => { ipcRenderer.removeListener('plugin:request-batch-confirm', handler) }
+    },
+    /** 响应敏感操作确认 */
+    respondConfirm: (response: { requestId: string; confirmed: boolean; skipSession: boolean }) =>
+      ipcRenderer.invoke('plugin:confirm-response', response),
+    /** 响应批量敏感操作确认 */
+    respondBatchConfirm: (response: { requestId: string; confirmed: boolean; rejectedOpIds?: string[]; skipSession: boolean }) =>
+      ipcRenderer.invoke('plugin:batch-confirm-response', response),
+    /** 监听插件 emit 事件 */
+    onEmit: (callback: (data: { pluginId: string; eventName: string; args: any[] }) => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('plugin:emit', handler)
+      return () => { ipcRenderer.removeListener('plugin:emit', handler) }
+    },
+    /** 监听插件 props 变更（setProps 触发） */
+    onPropsChanged: (callback: (data: { pluginId: string; props: Record<string, any> }) => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('plugin:props-changed', handler)
+      return () => { ipcRenderer.removeListener('plugin:props-changed', handler) }
+    },
+
+    // ========== 歌单操作 ==========
+    /** 监听歌单操作请求 */
+    onPlaylistOp: (callback: (request: any) => void) => {
+      const handler = (_event: any, request: any) => callback(request)
+      ipcRenderer.on('plugin:playlist-op', handler)
+      return () => { ipcRenderer.removeListener('plugin:playlist-op', handler) }
+    },
+    /** 响应歌单操作 */
+    respondPlaylistOp: (response: any) =>
+      ipcRenderer.invoke('plugin:playlist-op-response', response)
   }
 }
 

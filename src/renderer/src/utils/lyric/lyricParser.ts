@@ -9,8 +9,15 @@ import { parseLrc as parseBetterLrc } from './ParseLrc'
 const METADATA_HEADER_REGEX = /^\[(ti|ar|al|by|offset|kana|roma):/
 
 /**
+ * YRC JSON 元数据行匹配正则
+ * 网易云 YRC 内容可能包含 {"t":毫秒,"c":[...]} 格式的歌曲元信息（作曲、编曲等）
+ */
+const YRC_JSON_META_REGEX = /^\{"t":\d+,"c":/
+
+/**
  * 剥离歌词内容中的元数据头信息
  * 过滤掉 [ti:] [ar:] [al:] [by:] [offset:] [kana:] [roma:] 开头的行
+ * 以及 YRC JSON 元数据行（{"t":...,"c":[...]}）
  * 保留真正的歌词行（YRC 的 [数字,数字] 和 LRC 的 [mm:ss.xx]）
  * @param content 原始歌词文本（可能包含元数据头）
  * @returns 去除元数据头后的干净歌词文本
@@ -22,6 +29,7 @@ export function stripLyricMetadata(content: string): string {
     const trimmed = line.trim()
     if (!trimmed) return false
     if (METADATA_HEADER_REGEX.test(trimmed)) return false
+    if (YRC_JSON_META_REGEX.test(trimmed)) return false
     return true
   })
   return cleanedLines.join('\n')
@@ -59,7 +67,8 @@ function mergeTranslatedLyrics(mainLines: CoreLyricLine[], translatedContent?: s
 
 /**
  * 自定义 YRC 逐字歌词解析器
- * QQ 音乐 YRC 格式: [行起始ms,行时长ms]词1(词1起始ms,词1时长ms)词2(词2起始ms,词2时长ms)...
+ * 网易云 YRC 格式: [行起始ms,行时长ms](词1起始ms,词1时长ms,flag)词1(词2起始ms,词2时长ms,flag)词2...
+ * QQ 音乐 YRC 格式: [行起始ms,行时长ms]词1(词1起始ms,词1时长ms)词2...
  * 替代 AMLL WASM parseYrc（该函数对此格式变体返回空 words）
  * @param content 剥离元数据后的 YRC 纯文本
  * @returns CoreLyricLine 数组（含逐字时间戳）
@@ -70,8 +79,8 @@ function parseYrcCustom(content: string): CoreLyricLine[] {
 
   // 匹配行级时间戳: [数字,数字]
   const lineTimeRegex = /^\[(\d+),(\d+)\]/
-  // 匹配词级时间戳: (数字,数字) — 全局匹配同一行中的所有词时间戳
-  const wordTimeRegex = /\((\d+),(\d+)\)/g
+  // 匹配词级时间戳（网易云带 flag，QQ 不带 flag）
+  const wordTimeRegexGlobal = /\((\d+),(\d+)(?:,\d+)?\)/g
 
   for (const rawLine of rawLines) {
     const trimmed = rawLine.trim()
@@ -87,31 +96,60 @@ function parseYrcCustom(content: string): CoreLyricLine[] {
     // 去掉行级时间戳，得到词+词级时间戳的文本
     const textPart = trimmed.slice(lineMatch[0].length)
 
-    // 找到所有词级时间戳，提取之间的文本作为词
+    // 使用 matchAll 获取所有词级时间戳（避免 exec + g flag 的 lastIndex 追踪问题）
+    const wordMatches = [...textPart.matchAll(wordTimeRegexGlobal)]
+
     const words: CoreLyricWord[] = []
-    let lastIndex = 0
-    let wordMatch: RegExpExecArray | null
-    wordTimeRegex.lastIndex = 0
 
-    while ((wordMatch = wordTimeRegex.exec(textPart)) !== null) {
-      const wordStart = parseInt(wordMatch[1], 10)
-      const wordDuration = parseInt(wordMatch[2], 10)
-      const wordEnd = wordStart + wordDuration
+    if (wordMatches.length > 0) {
+      // 检测格式：网易云格式以 '(' 开头（文本在时间戳之后），QQ 格式以文本开头
+      const isNeteaseFormat = textPart.startsWith('(')
 
-      // 词文本：从上一个时间戳结束位置到当前时间戳起始位置
-      const wordText = textPart.slice(lastIndex, wordMatch.index)
+      if (isNeteaseFormat) {
+        // 网易云: (wordStart,wordDuration,flag)word1(wordStart,wordDuration,flag)word2...
+        // 文本在每个时间戳 ')' 之后，直到下一个时间戳 '(' 之前
+        for (let i = 0; i < wordMatches.length; i++) {
+          const match = wordMatches[i]
+          const wordStart = parseInt(match[1], 10)
+          const wordDuration = parseInt(match[2], 10)
 
-      if (wordText) {
-        words.push({
-          word: wordText,
-          startTime: wordStart,
-          endTime: wordEnd,
-          romanWord: '',
-          obscene: false
-        })
+          const textStart = match.index! + match[0].length
+          const textEnd =
+            i + 1 < wordMatches.length ? wordMatches[i + 1].index! : textPart.length
+          const wordText = textPart.slice(textStart, textEnd)
+
+          if (wordText) {
+            words.push({
+              word: wordText,
+              startTime: wordStart,
+              endTime: wordStart + wordDuration,
+              romanWord: '',
+              obscene: false
+            })
+          }
+        }
+      } else {
+        // QQ: 词1(wordStart,wordDuration)词2(wordStart,wordDuration)...
+        // 文本在每个时间戳 '(' 之前
+        let lastEnd = 0
+        for (const match of wordMatches) {
+          const wordStart = parseInt(match[1], 10)
+          const wordDuration = parseInt(match[2], 10)
+
+          const wordText = textPart.slice(lastEnd, match.index)
+          lastEnd = match.index! + match[0].length
+
+          if (wordText) {
+            words.push({
+              word: wordText,
+              startTime: wordStart,
+              endTime: wordStart + wordDuration,
+              romanWord: '',
+              obscene: false
+            })
+          }
+        }
       }
-
-      lastIndex = wordMatch.index + wordMatch[0].length
     }
 
     // 处理无词级时间戳的兜底：整行作为一个词

@@ -5,6 +5,8 @@ import App from './App.vue'
 import router from './router'
 import { createPinia } from 'pinia'
 import { performanceMonitor } from './utils/performanceMonitor'
+import PageTransition from './components/common/PageTransition.vue'
+import { webAudioOutputEngine } from './audio/web-audio-engine'
 
 // 记录应用启动标记，用于后续测量首屏渲染时间
 performanceMonitor.mark('app-init-start')
@@ -22,6 +24,7 @@ if (window.electron) {
 const app = createApp(App)
 const pinia = createPinia()
 
+app.component('PageTransition', PageTransition)
 app.use(pinia).use(router).mount('#app')
 
 // 记录挂载完成时间
@@ -47,3 +50,37 @@ performanceMonitor.getWebVitals().then((vitals) => {
     console.groupEnd()
   }
 })
+
+// HMR 热重载时强制停止所有音频播放，防止旧音频残留
+if (import.meta.hot) {
+  import.meta.hot.on('vite:beforeUpdate', () => {
+    // 停止 Web Audio 引擎并关闭 AudioContext
+    webAudioOutputEngine.stop()
+    webAudioOutputEngine.dispose()
+    // 同时通过 IPC 紧急停止主进程中的原生音频引擎（WASAPI 等）
+    emergencyStopNativeAudio()
+  })
+}
+
+// 页面卸载前（刷新、关闭等）紧急停止所有原生音频输出
+// 使用 fire-and-forget 方式确保消息发送不阻塞页面卸载
+window.addEventListener('beforeunload', () => {
+  webAudioOutputEngine.stop()
+  webAudioOutputEngine.dispose()
+  emergencyStopNativeAudio()
+})
+
+/**
+ * 紧急停止主进程中的原生音频引擎（Fire-and-forget）
+ * 使用 ipcRenderer.send 确保不依赖异步响应，消息发出即成功
+ */
+function emergencyStopNativeAudio(): void {
+  try {
+    const { ipcRenderer } = window.electron || (window as any).electron || {}
+    if (ipcRenderer) {
+      ipcRenderer.send('audio-engine:emergency-stop-all')
+    }
+  } catch {
+    // 静默失败，页面即将卸载
+  }
+}

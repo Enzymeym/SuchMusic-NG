@@ -133,7 +133,7 @@
 import { ref, computed, watch } from 'vue'
 import { NModal, NInput, NSelect, NIcon, NButton, NSwitch, useMessage, useDialog } from 'naive-ui'
 import type { UserPlaylist } from '../../stores/playlistStore'
-import defaultCoverIcon from '@renderer/assets/icon.png'
+import defaultCoverIcon from '@renderer/assets/default-cover.png'
 
 const props = defineProps<{
   show: boolean

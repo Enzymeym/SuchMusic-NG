@@ -45,6 +45,12 @@
   align-items: flex-end;
   justify-content: center;
   overflow: hidden;
+  opacity: 1;
+  transition: opacity 0.5s ease;
+
+  &.fade-out {
+    opacity: 0.06;
+  }
 
   canvas {
     width: 100%;
@@ -252,11 +258,32 @@
       display: flex;
       flex-direction: column;
       gap: 16px;
+      z-index: 5;
 
       .side-btn {
-        color: rgba(255, 255, 255, 0.5);
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+        color: var(--player-accent-color, rgba(255, 255, 255, 0.7));
+        background: rgba(255, 255, 255, 0.08);
+        backdrop-filter: blur(8px);
+        transition: all 0.2s ease;
+
         &:hover {
-          color: #fff;
+          color: var(--player-accent-color, #fff);
+          background: rgba(255, 255, 255, 0.15);
+          transform: scale(1.08);
+        }
+
+        &:active {
+          transform: scale(0.96);
+        }
+
+        .n-icon {
+          transform: translate(0, 0);
         }
       }
     }
@@ -266,6 +293,27 @@
 /* 歌词模式：隐藏封面，歌信息居中于顶部，歌词全宽居中 */
 .main-area.lyrics-mode {
   justify-content: center;
+}
+
+/* 无歌词时：隐藏歌词区域，歌曲信息区域水平居中 */
+.main-area.no-lyrics {
+  justify-content: center;
+
+  .left-panel {
+    padding-left: 0;
+    align-items: center;
+
+    .info-wrapper {
+      text-align: center;
+
+      .song-title,
+      .artist-row,
+      .album-row {
+        text-align: center;
+        justify-content: center;
+      }
+    }
+  }
 }
 
 .right-panel.lyrics-mode {
@@ -411,6 +459,10 @@
     scroll-snap-align: start;
     padding: 0 24px;
     box-sizing: border-box;
+
+    .side-tools {
+      display: none;
+    }
   }
 
   /* 歌词模式移动端适配 */

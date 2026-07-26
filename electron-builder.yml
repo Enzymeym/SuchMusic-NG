@@ -4,6 +4,7 @@ directories:
   buildResources: build
 files:
   - out/**
+  - resources/icon.png
   - '!**/.vscode/*'
   - '!src/*'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
@@ -13,15 +14,19 @@ files:
 asarUnpack:
   - resources/**
 extraResources:
-  # 将 native 目录下编译好的 .node 二进制文件拷贝到 resources/native
-  - from: native
+  # 将 resources/native 目录下编译好的 .node/.dll 二进制文件拷贝到 resources/native
+  - from: resources/native
     to: native
     filter:
       - '*.node'
-      - '**/target/debug/*.node'
-      - '**/target/release/*.node'
+      - '*.dll'
 win:
   executableName: such-pc-ng
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: appx
+      arch: [x64]
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
@@ -33,6 +38,19 @@ nsis:
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico
   installerHeaderIcon: build/icon.ico
+appx:
+  applicationId: SuchMusic
+  identityName: 37539Enzymeym.SuchMusic
+  publisher: CN=Enzymeym
+  publisherDisplayName: Enzymeym
+  backgroundColor: '#1a1a2e'
+  showNameOnTiles: true
+  languages:
+    - zh-CN
+    - en-US
+  # 正式提交商店时，在此指定从合作伙伴中心下载的 .pfx 证书
+  # certificateFile: build/certificate.pfx
+  # certificatePassword: your-password
 mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:

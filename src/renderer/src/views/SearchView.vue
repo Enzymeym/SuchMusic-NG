@@ -54,7 +54,6 @@ const handleSongClick = async (song: any) => {
   }
 
   playerStore.setCurrentSong(songInfo)
-  playerStore.setPlaying(true)
   playerStore.recordPlay(songInfo)
 }
 

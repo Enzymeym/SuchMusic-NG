@@ -1,7 +1,13 @@
-import { BrowserWindow, screen } from 'electron'
+import { BrowserWindow, screen, nativeImage } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
-import icon from '../../../resources/icon.png?asset'
+
+function getIconPath(): string {
+  if (is.dev) {
+    return join(__dirname, '../../../resources/icon.png')
+  }
+  return join(process.resourcesPath, 'app.asar.unpacked', 'resources', 'icon.png')
+}
 
 let desktopLyricWindow: BrowserWindow | undefined
 
@@ -34,7 +40,7 @@ export function createDesktopLyricWindow(): void {
     alwaysOnTop: true,
     skipTaskbar: true,
     focusable: false, // Prevent stealing focus
-    icon,
+    icon: nativeImage.createFromPath(getIconPath()),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,

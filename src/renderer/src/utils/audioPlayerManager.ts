@@ -1,6 +1,7 @@
-import { rustAudioAdapter } from '../audio/rust-audio-adapter'
 import { usePlayerStore } from '../stores/playerStore'
-import { computeSmartTransition, getStrategyLabel } from '../audio/audio-analyzer'
+import { useSettingsStore } from '../stores/settingsStore'
+import { webAudioOutputEngine } from '../audio/web-audio-engine'
+import { audioEngine } from '../audio/audio-engine'
 
 interface PlayAudioOptions {
   url?: string
@@ -8,261 +9,195 @@ interface PlayAudioOptions {
   volume?: number
 }
 
+/** 检测当前是否为 Web Audio 输出模式 */
+function isWebAudioMode(): boolean {
+  try {
+    const settingsStore = useSettingsStore()
+    return settingsStore.playback.audioOutputMode === 'webaudio'
+  } catch {
+    return false
+  }
+}
+
 /**
  * 音频播放器管理器
- * 协调 Rust 音频引擎和 Web Audio API 进行音频播放
+ * 协调 Rust 音频引擎进行音频播放（WASAPI / Web Audio）
  */
 export class AudioPlayerManager {
-  // 播放锁，防止并发播放
-  private static isPlayingAudio = false
+  // 播放队列，防止并发播放
+  private static playQueue: Promise<void> = Promise.resolve()
+
+  private static getApi() {
+    return (window as any).api?.audioEngine
+  }
 
   /**
    * 统一播放入口
-   * 优先尝试播放本地文件/缓存文件，如果失败或无文件则尝试播放 URL
    * @param options 播放选项
-   * @param useTransition 是否使用智能过渡
    */
   static async play(options: PlayAudioOptions): Promise<void> {
-    // 防止并发播放
-    if (this.isPlayingAudio) {
-      console.log('[AudioPlayerManager] 正在播放音频，跳过重复请求')
-      return
-    }
-    this.isPlayingAudio = true
-
-    try {
-      await this.handleAudio(options, true)
-    } finally {
-      this.isPlayingAudio = false
-    }
+    return this.playQueue = this.playQueue.then(() => this.handleAudio(options, true))
   }
 
   /**
    * 加载音频但不播放
    */
   static async load(options: PlayAudioOptions): Promise<void> {
-    // 防止并发播放
-    if (this.isPlayingAudio) {
-      console.log('[AudioPlayerManager] 正在播放音频，跳过重复请求')
-      return
-    }
-    this.isPlayingAudio = true
-
-    try {
-      await this.handleAudio(options, false)
-    } finally {
-      this.isPlayingAudio = false
-    }
+    return this.playQueue = this.playQueue.then(() => this.handleAudio(options, false))
   }
 
   private static async handleAudio(options: PlayAudioOptions, autoPlay: boolean): Promise<void> {
     const { url, filePath, volume } = options
     const playerStore = usePlayerStore()
+    const api = this.getApi()
 
-    // 设置音量（如果未提供，使用 store 中的音量）
+    if (!api) {
+      throw new Error('[AudioPlayerManager] 音频引擎 API 不可用')
+    }
+
     const vol = volume ?? playerStore.volume
 
-    // 检查是否应该使用交叉渐入渐出过渡
-    const shouldCrossfade = autoPlay
-      && playerStore.transitionEnabled
-      && rustAudioAdapter.isCurrentlyPlaying()
+    // 停止当前播放
+    await audioEngine.stop()
+    await audioEngine.setVolume(vol)
 
-    if (shouldCrossfade) {
-      // 加载新音频数据为 AudioBuffer（不停止当前播放）
-      const audioBuffer = await this.loadAudioAsBuffer(filePath, url)
-      if (audioBuffer) {
-        rustAudioAdapter.setVolume(vol)
-
-        // 判断是否使用智能模式：分析音频内容确定最优过渡参数
-        const isSmartMode = playerStore.transitionType === 'smart'
-
-        if (isSmartMode) {
-          const currentBuffer = rustAudioAdapter.getCurrentAudioBuffer()
-          if (currentBuffer) {
-            const result = computeSmartTransition(currentBuffer, audioBuffer)
-            const currentPositionMs = playerStore.positionMs
-
-            console.log(
-              `[AudioPlayerManager] 智能过渡: 策略=${getStrategyLabel(result.strategy)}, ` +
-              `起始位置=${result.startPositionMs.toFixed(0)}ms, ` +
-              `过渡=${result.transitionDurationMs}ms, ` +
-              `质量=${(result.quality * 100).toFixed(0)}%`
-            )
-
-            if (currentPositionMs >= result.startPositionMs) {
-              // 起始位置已过，立即执行交叉过渡
-              await rustAudioAdapter.crossfadeToBuffer(audioBuffer, result.transitionDurationMs)
-            } else {
-              // 调度主动交叉过渡，适配器的位置定时器会在到达 startPositionMs 时触发
-              rustAudioAdapter.schedulePendingTransition(
-                audioBuffer,
-                result.transitionDurationMs,
-                result.startPositionMs
-              )
-            }
-            return
-          }
+    // 解析文件路径
+    let targetPath = filePath
+    if (url && !targetPath) {
+      if (window.electron && window.electron.ipcRenderer) {
+        try {
+          targetPath = await window.electron.ipcRenderer.invoke('audio:download-to-temp', url)
+        } catch (e) {
+          console.error('[AudioPlayerManager] Failed to download URL:', e)
         }
-
-        // 非智能模式 或 无当前缓冲区时：基于剩余时间计算等待
-        const currentSong = playerStore.currentSong
-        const remainingMs = Math.max(0, (currentSong?.durationMs ?? 0) - playerStore.positionMs)
-        const configuredTransition = playerStore.transitionDuration
-        const effectiveTransition = Math.min(configuredTransition, Math.max(remainingMs - 200, 100))
-        const waitMs = Math.max(0, remainingMs - effectiveTransition)
-
-        if (waitMs > 0) {
-          playerStore.setTransitioning(true)
-          await new Promise((resolve) => setTimeout(resolve, waitMs))
-        }
-
-        await rustAudioAdapter.crossfadeToBuffer(audioBuffer, effectiveTransition)
-        return
       }
-      // 如果预加载失败，回退到正常播放流程
-    }
-
-    // 正常播放流程：先停止旧音频，再加载新音频
-    rustAudioAdapter.clearPendingTransition()
-    rustAudioAdapter.stop()
-    rustAudioAdapter.setVolume(vol)
-
-    // 1. 尝试本地文件（filePath）
-    if (filePath && window.electron && window.electron.ipcRenderer) {
-      try {
-        // 先检查文件是否存在
-        const exists = await window.electron.ipcRenderer.invoke('system:fs-exists', filePath)
-        if (exists) {
-          console.log(`[AudioPlayerManager] ${autoPlay ? 'Playing' : 'Loading'} from local file:`, filePath)
-          const data = (await window.electron.ipcRenderer.invoke(
-            'audio:load-file',
-            filePath
-          )) as ArrayBuffer
-          
-          if (autoPlay) {
-            await rustAudioAdapter.playFromFileData(data)
-          } else {
-            // 仅加载但不播放，避免在恢复状态等场景下自动开始播放
-            await rustAudioAdapter.loadFromFileData(data, false)
-          }
-          return
-        } else {
-          console.warn('[AudioPlayerManager] Local file not found:', filePath)
-        }
-      } catch (e) {
-        console.error('[AudioPlayerManager] Failed to handle local file, fallback to URL:', e)
-        // 失败后继续尝试 URL
+      if (!targetPath) {
+        throw new Error('[AudioPlayerManager] Failed to download audio from URL')
       }
     }
 
-    // 2. 尝试在线 URL
-    if (url) {
-      console.log(`[AudioPlayerManager] ${autoPlay ? 'Playing' : 'Loading'} from URL:`, url)
-      
-      try {
-        if (autoPlay) {
-          await rustAudioAdapter.playFromUrl(url)
-        } else {
-          // 仅加载但不播放，避免在恢复状态等场景下自动开始播放
-          await rustAudioAdapter.loadFromUrl(url, false)
-        }
-      } catch (e) {
-        console.error('[AudioPlayerManager] Failed to handle URL:', e)
-        throw e
-      }
-    } else {
+    if (!targetPath) {
       throw new Error('[AudioPlayerManager] No valid source (filePath or url) provided')
+    }
+
+    // 验证本地文件存在
+    if (window.electron && window.electron.ipcRenderer) {
+      try {
+        const exists = await window.electron.ipcRenderer.invoke('system:fs-exists', targetPath)
+        if (!exists) {
+          console.warn('[AudioPlayerManager] Local file not found:', targetPath)
+          throw new Error(`文件不存在: ${targetPath}`)
+        }
+      } catch (e: any) {
+        if (e.message?.includes('文件不存在')) throw e
+      }
+    }
+
+    // ====== Web Audio 模式 ======
+    if (isWebAudioMode()) {
+      await this.handleWebAudio(targetPath, vol, autoPlay, playerStore)
+      return
+    }
+
+    // ====== WASAPI 模式（现有 Rust 引擎路径）======
+    console.log(`[AudioPlayerManager] ${autoPlay ? 'Playing' : 'Loading'} from:`, targetPath)
+    const loadResult = await api.load(targetPath)
+
+    // 使用解码器返回的真实时长更新 store，确保 seek 位置准确（元数据时长可能与实际不符）
+    if (loadResult?.trackInfo?.durationMs && playerStore.currentSong) {
+      playerStore.setDuration(loadResult.trackInfo.durationMs)
+    }
+
+    if (autoPlay) {
+      await api.play()
+      playerStore.setPlaying(true)
     }
   }
 
   /**
-   * 仅加载音频数据并解码为 AudioBuffer，不播放
-   * 用于交叉渐入渐出过渡时预加载新音频
-   * @param filePath 本地文件路径
-   * @param url 在线音频 URL
-   * @returns 解码后的 AudioBuffer，加载失败返回 null
+   * Web Audio 模式播放（直接发送原始文件，浏览器原生解码）
    */
-  private static async loadAudioAsBuffer(
-    filePath?: string,
-    url?: string
-  ): Promise<AudioBuffer | null> {
-    // 优先尝试本地文件
-    if (filePath && window.electron && window.electron.ipcRenderer) {
-      try {
-        const exists = await window.electron.ipcRenderer.invoke('system:fs-exists', filePath)
-        if (exists) {
-          console.log('[AudioPlayerManager] 预加载本地文件用于交叉过渡:', filePath)
-          const data = (await window.electron.ipcRenderer.invoke(
-            'audio:load-file',
-            filePath
-          )) as ArrayBuffer
-          return await rustAudioAdapter.decodeAudioData(data)
-        }
-      } catch (e) {
-        console.error('[AudioPlayerManager] 预加载本地文件失败:', e)
-      }
-    }
+  private static async handleWebAudio(
+    filePath: string,
+    volume: number,
+    autoPlay: boolean,
+    playerStore: ReturnType<typeof usePlayerStore>
+  ): Promise<void> {
+    const api = this.getApi()
+    if (!api) return
 
-    // 尝试在线 URL
-    if (url) {
-      try {
-        console.log('[AudioPlayerManager] 预加载在线音频用于交叉过渡:', url.substring(0, 100))
-        const response = await fetch(url)
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`)
-        }
-        const data = await response.arrayBuffer()
-        return await rustAudioAdapter.decodeAudioData(data)
-      } catch (e) {
-        console.error('[AudioPlayerManager] 预加载在线音频失败:', e)
-      }
+    // 1. 读取原始音频文件（主进程只做文件 I/O，不解码）
+    console.log(`[AudioPlayerManager] Web Audio: reading file`, filePath)
+    const readResult = await api.readAudioFile(filePath)
+    if (!readResult || !readResult.success) {
+      console.error('[AudioPlayerManager] Web Audio: read failed', readResult?.error)
+      return
     }
+    console.log(`[AudioPlayerManager] Web Audio: file read ${(readResult.data?.byteLength ?? 0) / 1024 / 1024} MB`)
 
-    return null
+    // 2. 浏览器原生解码（异步，硬件加速，极快）
+    console.log(`[AudioPlayerManager] Web Audio: decoding via browser...`)
+    const buf = readResult.data!.buffer.slice(
+      readResult.data!.byteOffset,
+      readResult.data!.byteOffset + readResult.data!.byteLength
+    )
+    const ok = await webAudioOutputEngine.loadFromArrayBuffer(buf)
+    if (!ok) {
+      console.error('[AudioPlayerManager] Web Audio: decode failed')
+      return
+    }
+    console.log(`[AudioPlayerManager] Web Audio: decoded ${webAudioOutputEngine.sampleRate}Hz ${webAudioOutputEngine.channels}ch ${webAudioOutputEngine.getDurationMs()}ms`)
+
+    // 3. 播放（通过 audioEngine 设置音量以应用音量增强）
+    await audioEngine.setVolume(volume)
+    if (autoPlay) {
+      webAudioOutputEngine.play()
+      playerStore.setPlaying(true)
+    }
   }
 
   /**
    * 暂停播放
    */
   static async pause(): Promise<void> {
-    await rustAudioAdapter.pause()
+    await audioEngine.pause()
   }
 
   /**
    * 恢复播放
    */
   static async resume(): Promise<void> {
-    await rustAudioAdapter.play()
+    await audioEngine.play()
   }
 
   /**
    * 停止播放
    */
-  static stop(): void {
-    rustAudioAdapter.stop()
+  static async stop(): Promise<void> {
+    await audioEngine.stop()
   }
 
   /**
    * 跳转到指定位置
    * @param positionMs 位置（毫秒）
    */
-  static seek(positionMs: number): void {
-    rustAudioAdapter.seek(positionMs)
+  static async seek(positionMs: number): Promise<void> {
+    await audioEngine.seek(positionMs)
   }
 
   /**
    * 设置音量
    * @param volume 音量（0.0 - 1.0）
    */
-  static setVolume(volume: number): void {
-    rustAudioAdapter.setVolume(volume)
+  static async setVolume(volume: number): Promise<void> {
+    await audioEngine.setVolume(volume)
   }
 
   /**
    * 获取当前音量
    */
-  static getVolume(): number {
-    return rustAudioAdapter.getVolume()
+  static async getVolume(): Promise<number> {
+    return await audioEngine.getVolume()
   }
 
   /**
@@ -270,14 +205,14 @@ export class AudioPlayerManager {
    * @param durationMs 淡出时长（毫秒）
    */
   static async fadeOutAndStop(durationMs: number): Promise<void> {
-    await rustAudioAdapter.fadeOutAndStop(durationMs)
+    await audioEngine.fadeOutAndStop(durationMs)
   }
 
   /**
    * 检查是否正在播放
    */
-  static isPlaying(): boolean {
-    return rustAudioAdapter.isPlaying()
+  static async isPlaying(): Promise<boolean> {
+    return await audioEngine.isCurrentlyPlaying()
   }
 
   /**
@@ -285,7 +220,7 @@ export class AudioPlayerManager {
    * @returns 当前播放位置（毫秒）
    */
   static async getCurrentPosition(): Promise<number> {
-    return await rustAudioAdapter.getCurrentPosition()
+    return await audioEngine.getCurrentPosition()
   }
 
   /**
@@ -293,13 +228,13 @@ export class AudioPlayerManager {
    * @param callback 回调函数
    */
   static setOnEndedCallback(callback: () => void): void {
-    rustAudioAdapter.setOnEndedCallback(callback)
+    audioEngine.setOnEndedCallback(callback)
   }
 
   /**
    * 移除播放结束回调
    */
   static removeOnEndedCallback(): void {
-    rustAudioAdapter.removeOnEndedCallback()
+    audioEngine.removeOnEndedCallback()
   }
 }

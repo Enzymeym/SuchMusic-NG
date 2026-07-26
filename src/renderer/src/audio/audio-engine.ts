@@ -1,44 +1,149 @@
-import type { DecodedAudio } from '../apis/audio-decoder.types'
-import { rustAudioAdapter } from './rust-audio-adapter'
-
 /**
- * Web Audio 引擎
- * 保持原有接口不变，内部使用 Rust 音频引擎适配器
- * 
- * 注意：音效处理（EQ、压缩器、限制器）现在通过 useAudioEngine composable 
- * 使用 Rust 音频引擎处理，此类主要负责音频播放功能
+ * 音频引擎
+ * 统一封装音频播放控制接口。根据当前输出模式自动选择后端：
+ * - Web Audio 模式 → 委托给 WebAudioOutputEngine（本地 AudioContext）
+ * - WASAPI 模式 → 委托给 Rust 引擎（IPC）
+ *
+ * 注意：音效处理（EQ、压缩器、限制器）已支持 Web Audio 模式。
  */
-class WebAudioEngine {
-  // 委托给 Rust 音频适配器
-  
-  // 确保 AudioContext 初始化
-  public ensureContext(): void {
-    rustAudioAdapter.ensureContext()
+
+import { webAudioOutputEngine } from './web-audio-engine'
+import { useSettingsStore } from '../stores/settingsStore'
+import type {
+  EqBandSettings,
+  CompressorParams,
+  LimiterParams,
+  LoudnessParams,
+  VirtualBassParams,
+  SoftClipperParams
+} from './web-audio-dsp'
+import { WebAudioDspChain } from './web-audio-dsp'
+
+/** 检测当前是否为 Web Audio 输出模式 */
+function isWebAudioMode(): boolean {
+  try {
+    return useSettingsStore().playback.audioOutputMode === 'webaudio'
+  } catch {
+    return false
+  }
+}
+
+class AudioEngine {
+  private onEndedRef: (() => void) | null = null
+  private currentVolume = 1.0
+  private volumeBoost = 1.0
+
+  private getApi() {
+    return (window as any).api?.audioEngine
+  }
+
+  /** 确保 Web Audio DSP 链已初始化（懒加载） */
+  private ensureDspChain(): WebAudioDspChain | null {
+    if (!webAudioOutputEngine.dspChain) {
+      webAudioOutputEngine.dspChain = new WebAudioDspChain()
+    }
+    return webAudioOutputEngine.dspChain
+  }
+
+  /** 检查 Web Audio API 是否可用 */
+  public isWebAudioAvailable(): boolean {
+    try {
+      return typeof AudioContext !== 'undefined' || typeof (window as any).webkitAudioContext !== 'undefined';
+    } catch {
+      return false;
+    }
+  }
+
+  // 确保引擎初始化
+  public async ensureContext(): Promise<void> {
+    if (isWebAudioMode()) return  // Web Audio 无需初始化 Rust 引擎
+    const api = this.getApi()
+    if (!api) return
+    try {
+      const state = await api.getState().catch(() => null)
+      if (!state) {
+        await api.create?.()
+      }
+    } catch (err) {
+      console.warn('[AudioEngine] ensureContext failed:', err)
+    }
   }
 
   // 停止当前播放
-  public stop(): void {
-    rustAudioAdapter.stop()
+  public async stop(): Promise<void> {
+    if (isWebAudioMode()) {
+      webAudioOutputEngine.stop()
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    await api.stop().catch((err) => { console.error('[AudioEngine] stop failed:', err) })
   }
 
   // 淡出并停止
   public async fadeOutAndStop(durationMs: number): Promise<void> {
-    await rustAudioAdapter.fadeOutAndStop(durationMs)
+    if (isWebAudioMode()) {
+      const steps = 10
+      const stepDelay = durationMs / steps
+      const effectiveVol = this.currentVolume * this.volumeBoost
+      for (let i = steps; i >= 0; i--) {
+        webAudioOutputEngine.setVolume(effectiveVol * (i / steps))
+        await new Promise((resolve) => setTimeout(resolve, stepDelay))
+      }
+      webAudioOutputEngine.stop()
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    try {
+      const currentVol = await api.getVolume().catch(() => 1)
+      const steps = 10
+      const stepDelay = durationMs / steps
+      const volStep = currentVol / steps
+      for (let i = steps; i >= 0; i--) {
+        await api.setVolume(volStep * i)
+        await new Promise((resolve) => setTimeout(resolve, stepDelay))
+      }
+      await api.stop()
+      await api.setVolume(currentVol)
+    } catch {
+      await api.stop().catch((err) => { console.error('[AudioEngine] fadeOutAndStop cleanup failed:', err) })
+    }
   }
 
   // 暂停播放
   public async pause(): Promise<void> {
-    await rustAudioAdapter.pause()
+    if (isWebAudioMode()) {
+      webAudioOutputEngine.pause()
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    await api.pause().catch((err) => { console.error('[AudioEngine] pause failed:', err) })
   }
 
   // 恢复播放
   public async play(): Promise<boolean> {
-    return await rustAudioAdapter.play()
+    if (isWebAudioMode()) {
+      // Web Audio: 如果是暂停状态则恢复，否则是全新播放（由 audioPlayerManager 触发）
+      if (webAudioOutputEngine.isPaused) {
+        webAudioOutputEngine.resume()
+      }
+      return true
+    }
+    const api = this.getApi()
+    if (!api) return false
+    try {
+      await api.play()
+      return true
+    } catch {
+      return false
+    }
   }
 
-  // 仅恢复 AudioContext
+  // 恢复引擎
   public async resume(): Promise<void> {
-    await rustAudioAdapter.resume()
+    await this.play()
   }
 
   /**
@@ -46,327 +151,430 @@ class WebAudioEngine {
    * @param positionMs 目标位置（毫秒）
    * @param startPlaying 是否启动播放，默认为 true
    */
-  public seek(positionMs: number, startPlaying: boolean = true): void {
-    rustAudioAdapter.seek(positionMs, startPlaying)
+  public async seek(positionMs: number, startPlaying: boolean = true): Promise<void> {
+    if (isWebAudioMode()) {
+      webAudioOutputEngine.seek(positionMs)
+      if (startPlaying) {
+        webAudioOutputEngine.play()
+      }
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    try {
+      if (startPlaying) {
+        await api.seekAndPlay(positionMs)
+      } else {
+        await api.seek(positionMs)
+      }
+    } catch (err) {
+      console.error('[AudioEngine] seek failed:', err)
+    }
   }
 
   // 设置播放结束回调
   public setOnEndedCallback(callback: () => void): void {
-    rustAudioAdapter.setOnEndedCallback(callback)
+    if (isWebAudioMode()) {
+      webAudioOutputEngine.setOnEnded(callback)
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    this.onEndedRef = callback
+    api.on('audio-engine:ended', callback)
   }
 
   // 移除播放结束回调
   public removeOnEndedCallback(): void {
-    rustAudioAdapter.removeOnEndedCallback()
+    if (isWebAudioMode()) {
+      webAudioOutputEngine.setOnEnded(null)
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    if (this.onEndedRef) {
+      api.off('audio-engine:ended', this.onEndedRef)
+      this.onEndedRef = null
+    }
   }
 
   // 设置全局音量（0.0 - 1.0）
-  public setVolume(volume: number): void {
-    rustAudioAdapter.setVolume(volume)
+  public async setVolume(volume: number): Promise<void> {
+    this.currentVolume = Math.max(0, Math.min(1, volume))
+    await this.applyEffectiveVolume()
+  }
+
+  // 设置音量增强倍数（1.0 - 3.0）
+  public async setVolumeBoost(boost: number): Promise<void> {
+    this.volumeBoost = Math.max(1, Math.min(3, boost))
+    await this.applyEffectiveVolume()
+  }
+
+  // 应用 effective gain = volume * boost 到底层引擎
+  private async applyEffectiveVolume(): Promise<void> {
+    const effectiveGain = this.currentVolume * this.volumeBoost
+    if (isWebAudioMode()) {
+      webAudioOutputEngine.setVolume(effectiveGain)
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    await api.setVolume(effectiveGain).catch((err) => { console.error('[AudioEngine] setVolume failed:', err) })
   }
 
   /**
    * 设置播放速度倍率
    * @param rate 播放速度倍率（0.25 - 4.0）
    */
-  public setPlaybackRate(rate: number): void {
-    rustAudioAdapter.setPlaybackRate(rate)
-  }
-
-  /**
-   * 交叉渐入渐出过渡到新的音频缓冲区
-   * @param audioBuffer 新的音频缓冲区
-   * @param durationMs 过渡时长（毫秒）
-   */
-  public async crossfadeToBuffer(audioBuffer: AudioBuffer, durationMs: number): Promise<void> {
-    await rustAudioAdapter.crossfadeToBuffer(audioBuffer, durationMs)
-  }
-
-  /**
-   * 仅解码音频数据，不播放
-   * @param data 音频文件 ArrayBuffer
-   * @returns 解码后的 AudioBuffer
-   */
-  public async decodeAudioData(data: ArrayBuffer): Promise<AudioBuffer> {
-    return await rustAudioAdapter.decodeAudioData(data)
+  public async setPlaybackRate(rate: number): Promise<void> {
+    if (isWebAudioMode()) {
+      // Web Audio 暂不支持变速
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    await api.setPlaybackRate?.(rate).catch((err) => { console.error('[AudioEngine] setPlaybackRate failed:', err) })
   }
 
   /**
    * 检查当前是否正在播放
    * @returns 是否正在播放
    */
-  public isCurrentlyPlaying(): boolean {
-    return rustAudioAdapter.isCurrentlyPlaying()
+  public async isCurrentlyPlaying(): Promise<boolean> {
+    if (isWebAudioMode()) {
+      return webAudioOutputEngine.isPlaying
+    }
+    const api = this.getApi()
+    if (!api) return false
+    try {
+      return await api.isPlaying()
+    } catch {
+      return false
+    }
   }
 
   /**
-   * 获取当前正在播放的 AudioBuffer，用于音频分析
-   * @returns 当前音频缓冲区，无缓冲区时返回 null
+   * 获取当前播放位置
+   * @returns 当前播放位置（毫秒）
    */
-  public getCurrentAudioBuffer(): AudioBuffer | null {
-    return rustAudioAdapter.getCurrentAudioBuffer()
+  public async getCurrentPosition(): Promise<number> {
+    if (isWebAudioMode()) {
+      return webAudioOutputEngine.getPositionMs()
+    }
+    const api = this.getApi()
+    if (!api) return 0
+    try {
+      return await api.getPosition()
+    } catch {
+      return 0
+    }
   }
 
   /**
-   * 调度主动交叉过渡
-   * @param nextBuffer 下一首 AudioBuffer
-   * @param transitionDurationMs 过渡时长（毫秒）
-   * @param startPositionMs 起始位置（毫秒）
+   * 获取当前音量
+   * @returns 当前音量（0.0 - 1.0）
    */
-  public schedulePendingTransition(
-    nextBuffer: AudioBuffer,
-    transitionDurationMs: number,
-    startPositionMs: number
-  ): void {
-    rustAudioAdapter.schedulePendingTransition(nextBuffer, transitionDurationMs, startPositionMs)
-  }
-
-  /**
-   * 清除待定交叉过渡
-   */
-  public clearPendingTransition(): void {
-    rustAudioAdapter.clearPendingTransition()
+  public async getVolume(): Promise<number> {
+    // Web Audio 模式不追踪单独音量值，由 GainNode 管理
+    if (isWebAudioMode()) return 1
+    const api = this.getApi()
+    if (!api) return 1
+    try {
+      return await api.getVolume()
+    } catch {
+      return 1
+    }
   }
 
   // 配置压限器强度
   public async setLimiterStrength(strength: number): Promise<void> {
-    const api = (window as any).api?.audioEngine
-    if (!api) return
-
-    // 检查引擎是否已初始化
-    const state = await api.getState().catch(() => null)
-    if (!state) return
-
-    // 根据强度设置限制器参数
-    if (strength > 0) {
-      await api.setLimiterEnabled(true)
-      const ceiling = -0.3 - (strength * 2.7)
-      await api.setLimiter({
-        ceilingDb: Math.max(ceiling, -3),
-        releaseMs: 50
-      })
-    } else {
-      await api.setLimiterEnabled(false)
-    }
-  }
-
-  // 设置均衡器启用状态
-  public async setEqEnabled(enabled: boolean): Promise<void> {
-    const api = (window as any).api?.audioEngine
-    if (!api) return
-
-    // 检查引擎是否已初始化
-    const state = await api.getState().catch(() => null)
-    if (!state) return
-
-    await api.setEqEnabled(enabled)
-  }
-
-  // 设置均衡器各频段增益
-  public async setEqGains(gains: number[]): Promise<void> {
-    const api = (window as any).api?.audioEngine
-    if (!api) return
-
-    // 检查引擎是否已初始化
-    const state = await api.getState().catch(() => null)
-    if (!state) return
-
-    // 将数组转换为普通数组以避免克隆错误
-    await api.setEqGains([...gains])
-  }
-
-  // 使用解码好的 PCM 数据播放（已废弃，请使用 AudioPlayerManager）
-  public async playDecodedAudio(decoded: DecodedAudio): Promise<void> {
-    console.warn('[WebAudioEngine] playDecodedAudio is deprecated, use AudioPlayerManager instead')
-    // 降级处理：使用原始数据播放
-    this.ensureContext()
-    const audioContext = (rustAudioAdapter as any).audioContext
-    const gainNode = (rustAudioAdapter as any).gainNode
-    
-    if (!audioContext || !gainNode) return
-
-    await this.fadeOutAndStop(200)
-
-    const sampleRate = (decoded as any).sample_rate ?? (decoded as any).sampleRate
-    const channels = decoded.channels
-    const totalSamples = decoded.data.length
-    const totalFrames = totalSamples / channels
-    const maxFrames = Math.min(totalFrames, Math.floor((sampleRate || audioContext.sampleRate) * 1))
-
-    const buffer = audioContext.createBuffer(channels, maxFrames, sampleRate || audioContext.sampleRate)
-
-    for (let channelIndex = 0; channelIndex < channels; channelIndex++) {
-      const channelData = buffer.getChannelData(channelIndex)
-      for (let frameIndex = 0; frameIndex < maxFrames; frameIndex++) {
-        const sourceIndex = frameIndex * channels + channelIndex
-        channelData[frameIndex] = decoded.data[sourceIndex] ?? 0
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (!dsp) return
+      if (strength > 0) {
+        dsp.setLimiterEnabled(true)
+        const ceiling = -0.3 - (strength * 2.7)
+        dsp.setLimiterParams({
+          ceiling: Math.max(ceiling, -3),
+          release: 50
+        })
+      } else {
+        dsp.setLimiterEnabled(false)
       }
+      return
     }
-
-    const source = audioContext.createBufferSource()
-    source.buffer = buffer
-    source.connect(gainNode)
-    source.start()
-
-    gainNode.gain.value = 0
-    // 淡入
-    const now = audioContext.currentTime
-    gainNode.gain.setValueAtTime(0, now)
-    gainNode.gain.linearRampToValueAtTime((rustAudioAdapter as any).volume || 1, now + 0.2)
-  }
-
-  // 使用原始文件二进制数据播放（已废弃，请使用 AudioPlayerManager）
-  public async playFromFileData(data: ArrayBuffer): Promise<void> {
-    console.warn('[WebAudioEngine] playFromFileData is deprecated, use AudioPlayerManager instead')
-    await rustAudioAdapter.playFromFileData(data)
-  }
-
-  // 加载文件数据但不播放（已废弃，请使用 AudioPlayerManager）
-  public async loadFromFileData(data: ArrayBuffer, startPlaying: boolean = true): Promise<void> {
-    console.warn('[WebAudioEngine] loadFromFileData is deprecated, use AudioPlayerManager instead')
-    await rustAudioAdapter.loadFromFileData(data, startPlaying)
-  }
-
-  // 通过 URL 播放音频（已废弃，请使用 AudioPlayerManager）
-  public async playFromUrl(url: string): Promise<void> {
-    console.warn('[WebAudioEngine] playFromUrl is deprecated, use AudioPlayerManager instead')
-    await rustAudioAdapter.playFromUrl(url)
-  }
-
-  // 加载 URL 但不播放（已废弃，请使用 AudioPlayerManager）
-  public async loadFromUrl(url: string, startPlaying: boolean = true): Promise<void> {
-    console.warn('[WebAudioEngine] loadFromUrl is deprecated, use AudioPlayerManager instead')
-    await rustAudioAdapter.loadFromUrl(url, startPlaying)
-  }
-
-  // 开始流式播放会话（已废弃）
-  public startStream(_sampleRate: number, _channels: number): void {
-    console.warn('[WebAudioEngine] startStream is deprecated')
-  }
-
-  // 追加一块流式解码得到的 PCM 数据（已废弃）
-  public appendStreamChunk(_chunk: {
-    sampleRate: number
-    channels: number
-    data: number[]
-    finished?: boolean
-  }): void {
-    console.warn('[WebAudioEngine] appendStreamChunk is deprecated')
-  }
-
-  // 预加载下一首歌曲（已废弃，请使用 AudioPlayerManager）
-  public async preloadNextSong(_song: any): Promise<void> {
-    console.warn('[WebAudioEngine] preloadNextSong is deprecated, use AudioPlayerManager instead')
-    // 简单实现：只记录预加载状态
-  }
-
-  // 清除预加载资源（已废弃）
-  public clearPreload(): void {
-    console.warn('[WebAudioEngine] clearPreload is deprecated')
-  }
-
-  // 检查是否有预加载的歌曲（已废弃）
-  public hasPreloadedSong(): boolean {
-    console.warn('[WebAudioEngine] hasPreloadedSong is deprecated')
-    return false
-  }
-
-  // 获取预加载的歌曲（已废弃）
-  public getPreloadedSong(): any {
-    console.warn('[WebAudioEngine] getPreloadedSong is deprecated')
-    return null
-  }
-
-  // 播放预加载的歌曲（已废弃）
-  public async playPreloadedSong(): Promise<void> {
-    console.warn('[WebAudioEngine] playPreloadedSong is deprecated')
-  }
-
-  // 添加预加载状态回调（已废弃）
-  public addPreloadCallback(_callback: (status: 'loading' | 'loaded' | 'error', error?: string) => void): void {
-    console.warn('[WebAudioEngine] addPreloadCallback is deprecated')
-  }
-
-  // 移除预加载状态回调（已废弃）
-  public removePreloadCallback(_callback: (status: 'loading' | 'loaded' | 'error', error?: string) => void): void {
-    console.warn('[WebAudioEngine] removePreloadCallback is deprecated')
-  }
-
-  // 设置过渡功能启用状态（已废弃）
-  public setTransitionEnabled(_enabled: boolean): void {
-    console.warn('[WebAudioEngine] setTransitionEnabled is deprecated')
-  }
-
-  // 设置过渡时长（已废弃）
-  public setTransitionDuration(_duration: number): void {
-    console.warn('[WebAudioEngine] setTransitionDuration is deprecated')
-  }
-
-  // 设置过渡效果类型（已废弃）
-  public setTransitionType(_type: 'crossfade' | 'fade' | 'smart'): void {
-    console.warn('[WebAudioEngine] setTransitionType is deprecated')
-  }
-
-  // 获取当前过渡状态（已废弃）
-  public getTransitionStatus(): {
-    enabled: boolean
-    isTransitioning: boolean
-    duration: number
-    type: 'crossfade' | 'fade' | 'smart'
-  } {
-    console.warn('[WebAudioEngine] getTransitionStatus is deprecated')
-    return {
-      enabled: false,
-      isTransitioning: false,
-      duration: 0,
-      type: 'fade'
+    const api = this.getApi()
+    if (!api) return
+    try {
+      const state = await api.getState().catch(() => null)
+      if (!state) return
+      if (strength > 0) {
+        await api.setLimiterEnabled(true)
+        const ceiling = -0.3 - (strength * 2.7)
+        await api.setLimiter({
+          ceilingDb: Math.max(ceiling, -3),
+          releaseMs: 50
+        })
+      } else {
+        await api.setLimiterEnabled(false)
+      }
+    } catch (err) {
+      console.error('[AudioEngine] setLimiterStrength failed:', err)
     }
   }
 
-  // 执行智能过渡（已废弃）
-  public async performTransition(nextSong: () => Promise<void>, callback?: () => void): Promise<void> {
-    console.warn('[WebAudioEngine] performTransition is deprecated')
-    await nextSong()
-    callback?.()
-  }
+  // ====== EQ 控制 ======
 
-  // 分析音频特征（已废弃）
-  public analyzeAudioFeatures(_buffer: AudioBuffer): {
-    energy: number
-    tempo: number
-    key: number
-    loudness: number
-  } {
-    console.warn('[WebAudioEngine] analyzeAudioFeatures is deprecated')
-    return {
-      energy: 0,
-      tempo: 120,
-      key: 0,
-      loudness: -20
+  public async setEqEnabled(enabled: boolean): Promise<void> {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setEqEnabled(enabled)
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    try {
+      const state = await api.getState().catch(() => null)
+      if (!state) return
+      await api.setEqEnabled(enabled)
+    } catch {
+      // 忽略错误
     }
   }
 
-  // 基于音频特征计算最佳过渡点（已废弃）
-  public calculateTransitionPoint(
-    _currentFeatures: { energy: number; tempo: number; key: number; loudness: number },
-    _nextFeatures: { energy: number; tempo: number; key: number; loudness: number }
-  ): {
-    fadeInDuration: number
-    fadeOutDuration: number
-    crossfadeDuration: number
-  } {
-    console.warn('[WebAudioEngine] calculateTransitionPoint is deprecated')
-    return {
-      fadeInDuration: 1,
-      fadeOutDuration: 1,
-      crossfadeDuration: 2
+  public async setEqBand(index: number, settings: Partial<EqBandSettings>): Promise<void> {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setEqBand(index, settings)
+      return
     }
+    const api = this.getApi()
+    if (!api) return
+    try {
+      const state = await api.getState().catch(() => null)
+      if (!state) return
+      const bandTypeMap: Record<string, string> = {
+        lowShelf: 'lowShelf', highShelf: 'highShelf', peaking: 'peaking', notch: 'notch'
+      }
+      await api.setEqBand(index, {
+        frequency: settings.frequency ?? 1000,
+        preGain: settings.preGain ?? 0,
+        postGain: settings.postGain ?? 0,
+        preQ: settings.preQ ?? 1,
+        postQ: settings.postQ ?? 1,
+        bandType: bandTypeMap[settings.bandType || 'peaking'] || 'peaking'
+      })
+    } catch {
+      // 忽略错误
+    }
+  }
+
+  public async setEqGains(gains: number[]): Promise<void> {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setEqGains(gains)
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    try {
+      const state = await api.getState().catch(() => null)
+      if (!state) return
+      await api.setEqGains([...gains])
+    } catch {
+      // 忽略错误
+    }
+  }
+
+  // ====== 压缩器控制 ======
+
+  public async setCompressorEnabled(enabled: boolean): Promise<void> {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setCompressorEnabled(enabled)
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    try {
+      const state = await api.getState().catch(() => null)
+      if (!state) return
+      await api.setCompressorEnabled(enabled)
+    } catch { /* ignore */ }
+  }
+
+  public async setCompressorParams(params: CompressorParams): Promise<void> {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setCompressorParams(params)
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    try {
+      const state = await api.getState().catch(() => null)
+      if (!state) return
+      await api.setCompressor({
+        thresholdDb: params.threshold,
+        ratio: params.ratio,
+        attackMs: params.attack,
+        releaseMs: params.release,
+        kneeDb: params.knee
+      })
+    } catch { /* ignore */ }
+  }
+
+  public getCompressorGainReduction(): number {
+    if (isWebAudioMode()) {
+      return webAudioOutputEngine.dspChain?.getCompressorGainReduction() ?? 0
+    }
+    return 0
+  }
+
+  // ====== 限制器控制 ======
+
+  public async setLimiterEnabled(enabled: boolean): Promise<void> {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setLimiterEnabled(enabled)
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    try {
+      const state = await api.getState().catch(() => null)
+      if (!state) return
+      await api.setLimiterEnabled(enabled)
+    } catch { /* ignore */ }
+  }
+
+  public async setLimiterParams(params: LimiterParams): Promise<void> {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setLimiterParams(params)
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    try {
+      const state = await api.getState().catch(() => null)
+      if (!state) return
+      await api.setLimiter({
+        ceilingDb: params.ceiling,
+        releaseMs: params.release
+      })
+    } catch { /* ignore */ }
+  }
+
+  public getLimiterGainReduction(): number {
+    if (isWebAudioMode()) {
+      return webAudioOutputEngine.dspChain?.getLimiterGainReduction() ?? 0
+    }
+    return 0
+  }
+
+  // ====== 等响度控制 ======
+
+  public setLoudnessEnabled(enabled: boolean): void {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setLoudnessEnabled(enabled)
+      return
+    }
+    // Rust 引擎通过 IPC 设置，若不可用则忽略
+    const api = this.getApi()
+    if (api && typeof api.setLoudnessEnabled === 'function') {
+      api.setLoudnessEnabled(enabled).catch(() => { /* ignore */ })
+    }
+  }
+
+  public async setLoudnessParams(params: LoudnessParams): Promise<void> {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setLoudnessParams(params)
+      return
+    }
+    const api = this.getApi()
+    if (!api) return
+    try {
+      const state = await api.getState().catch(() => null)
+      if (!state) return
+      if (typeof api.setLoudness === 'function') {
+        await api.setLoudness({
+          enabled: params.enabled,
+          compensation: params.compensation,
+          referenceLoudness: params.referenceLoudness,
+          direction: params.direction
+        })
+      }
+    } catch { /* ignore */ }
+  }
+
+  // ====== 虚拟低频控制 ======
+
+  public setVirtualBassEnabled(enabled: boolean): void {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setVirtualBassEnabled(enabled)
+      return
+    }
+  }
+
+  public setVirtualBassParams(params: VirtualBassParams): void {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setVirtualBassParams(params)
+      return
+    }
+  }
+
+  // ====== 软限幅器控制 ======
+
+  public setSoftClipperEnabled(enabled: boolean): void {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setSoftClipperEnabled(enabled)
+      return
+    }
+  }
+
+  public setSoftClipperParams(params: SoftClipperParams): void {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setSoftClipperParams(params)
+      return
+    }
+  }
+
+  // ====== 音频可视化 ======
+
+  /**
+   * 注册 FFT 频谱数据回调
+   * - WASAPI 模式：从 Rust 引擎推送，通过 IPC 接收
+   * - Web Audio 模式：从 AnalyserNode 读取
+   *
+   * @param callback 接收归一化频谱数据 [0, 1]，128 bins
+   * @returns 取消注册函数
+   */
+  public onFftData(callback: (spectrum: number[]) => void): () => void {
+    if (isWebAudioMode()) {
+      return webAudioOutputEngine.onFftData(callback)
+    }
+    // WASAPI 模式：通过 IPC 回调
+    const api = this.getApi()
+    if (api?.setFftCallback) {
+      return api.setFftCallback(callback)
+    }
+    return () => {}
   }
 }
 
 // 导出全局单例
-export const webAudioEngine = new WebAudioEngine()
-export { rustAudioAdapter }
+export const audioEngine = new AudioEngine()
+
+// 便于外部使用的独立函数
+export const onFftData = (callback: (spectrum: number[]) => void): (() => void) =>
+  audioEngine.onFftData(callback)
 
 // 默认导出
-export default webAudioEngine
+export default audioEngine

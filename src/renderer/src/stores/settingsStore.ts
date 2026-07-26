@@ -1,15 +1,17 @@
 import { defineStore } from 'pinia'
 import { ref, watch, computed } from 'vue'
 import { useOsTheme } from 'naive-ui'
-import { webAudioEngine } from '../audio/audio-engine'
+import { audioEngine } from '../audio/audio-engine'
 import { setPrimaryColor, setGlobalFontFamily } from '../themes'
 import { usePlayerStore } from './playerStore'
 import { extractImageColors } from '../utils/imageColors'
+import { getDefaultOutputMode, type AudioOutputMode } from '../utils/audioOutputModeManager'
 
 export interface GeneralSettings {
   closeAction: 'minimize' | 'quit'
   remindOnClose: boolean
   taskbarProgress: boolean
+  taskbarSongInfo: boolean
   orpheusProtocol: boolean
   autoCheckUpdate: boolean
   updateChannel: 'stable' | 'beta'
@@ -31,12 +33,8 @@ export interface AppearanceSettings {
 export interface PlaybackSettings {
   autoHideCursorWhenControlsHidden: boolean
   autoHidePlayerPageFooter: boolean
-  limiterStrength: number
-  eqEnabled: boolean
-  eqGains: number[]
-  eqPreset: string
   /** 音频输出模式: 'webaudio' | 'wasapi-shared' | 'wasapi-exclusive' */
-  audioOutputMode: 'webaudio' | 'wasapi-shared' | 'wasapi-exclusive'
+  audioOutputMode: AudioOutputMode
   /** WASAPI 输出设备 ID（空字符串表示默认设备） */
   audioOutputDeviceId: string
   /** WASAPI 输出设备名称（用于 UI 显示） */
@@ -84,6 +82,7 @@ export interface PlaybackSettings {
   visualizerSize: number // 显示大小（0.5-2.0）
   visualizerColorTheme: string // 颜色主题（default/warm/cool/neon/grayscale/follow-cover）
   visualizerIntensity: number // 显示强度（0.3-1.5）
+  volumeBoost: number // 音量增强倍数（1.0-3.0，默认 1.0）
 }
 
 export interface LocalSettings {
@@ -98,6 +97,7 @@ export const useSettingsStore = defineStore('settings', () => {
     closeAction: 'minimize',
     remindOnClose: true,
     taskbarProgress: true,
+    taskbarSongInfo: true,
     orpheusProtocol: true,
     autoCheckUpdate: true,
     updateChannel: 'stable'
@@ -119,11 +119,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const playback = ref<PlaybackSettings>({
     autoHideCursorWhenControlsHidden: true,
     autoHidePlayerPageFooter: true,
-    limiterStrength: 0.6,
-    eqEnabled: false,
-    eqGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    eqPreset: 'flat',
-    audioOutputMode: 'webaudio',
+    audioOutputMode: getDefaultOutputMode(),
     audioOutputDeviceId: '',
     audioOutputDeviceName: '',
     // 歌词自适应大小开关
@@ -175,7 +171,8 @@ export const useSettingsStore = defineStore('settings', () => {
     visualizerStyle: 'bars',
     visualizerSize: 1.0,
     visualizerColorTheme: 'follow-cover',
-    visualizerIntensity: 0.8
+    visualizerIntensity: 0.8,
+    volumeBoost: 1.0
   })
 
   const local = ref<LocalSettings>({
@@ -216,33 +213,6 @@ export const useSettingsStore = defineStore('settings', () => {
     { immediate: true }
   )
 
-  // 同步压限器设置到音频引擎
-  watch(
-    () => playback.value.limiterStrength,
-    async (val) => {
-      await webAudioEngine.setLimiterStrength(val)
-    },
-    { immediate: true }
-  )
-
-  // 同步均衡器启用状态
-  watch(
-    () => playback.value.eqEnabled,
-    async (val) => {
-      await webAudioEngine.setEqEnabled(val)
-    },
-    { immediate: true }
-  )
-
-  // 同步均衡器各频段增益
-  watch(
-    () => playback.value.eqGains,
-    async (val) => {
-      await webAudioEngine.setEqGains(val)
-    },
-    { immediate: true, deep: true }
-  )
-
   // 同步关闭行为设置到主进程
   watch(
     () => general.value.closeAction,
@@ -250,6 +220,26 @@ export const useSettingsStore = defineStore('settings', () => {
       if (window.electron && window.electron.ipcRenderer) {
         window.electron.ipcRenderer.send('settings:closeAction', val)
       }
+    },
+    { immediate: true }
+  )
+
+  // 同步音频输出模式和设备到主进程（影响实际播放引擎的选择）
+  watch(
+    [() => playback.value.audioOutputMode, () => playback.value.audioOutputDeviceId],
+    ([mode, deviceId]) => {
+      if (window.electron && window.electron.ipcRenderer) {
+        window.electron.ipcRenderer.invoke('audio-engine:set-output-config', { mode, deviceId })
+      }
+    },
+    { immediate: true }
+  )
+
+  // 同步音量增强设置到音频引擎
+  watch(
+    () => playback.value.volumeBoost,
+    async (val) => {
+      await audioEngine.setVolumeBoost(val)
     },
     { immediate: true }
   )
@@ -385,12 +375,15 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   const saveSettings = () => {
-    localStorage.setItem('app-settings', JSON.stringify({
-      general: general.value,
-      appearance: appearance.value,
-      playback: playback.value,
-      local: local.value
-    }))
+    localStorage.setItem(
+      'app-settings',
+      JSON.stringify({
+        general: general.value,
+        appearance: appearance.value,
+        playback: playback.value,
+        local: local.value
+      })
+    )
   }
 
   /**
@@ -405,13 +398,17 @@ export const useSettingsStore = defineStore('settings', () => {
     }, 500)
   }
 
-  // 监听每个设置分组的属性变化，使用深度监听确保嵌套属性变更也能触发保存
-  watch([general, appearance, playback, local], () => {
-    debouncedSave()
-  }, { deep: true })
-
-  // Initialize
+  // Initialize - 必须在 watch 之前加载，避免加载过程触发不必要的保存
   loadSettings()
+
+  // 监听每个设置分组的属性变化，使用深度监听确保嵌套属性变更也能触发保存
+  watch(
+    [general, appearance, playback, local],
+    () => {
+      debouncedSave()
+    },
+    { deep: true }
+  )
 
   // 窗口关闭前立即刷新待保存的设置，避免防抖窗口期内修改丢失
   if (typeof window !== 'undefined') {

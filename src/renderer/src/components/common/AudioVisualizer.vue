@@ -2,10 +2,14 @@
 /**
  * 音频可视化组件
  * 使用 Canvas 2D 渲染实时频谱柱状图
+ *
+ * 延迟初始化策略：组件挂载后延迟一帧再设置 Canvas 和注册 FFT 回调，
+ * 避免与播放页面的初次渲染竞争资源导致前端卡死。
+ * 渲染循环按需启动：仅在收到 FFT 数据或播放状态变化时启动/停止。
  */
 import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { usePlayerStore } from '../../stores/playerStore'
-import { audioVisualizer } from '../../audio/audio-visualizer'
+import { onFftData } from '../../audio/audio-engine'
 
 const props = defineProps<{
   size: number
@@ -14,22 +18,32 @@ const props = defineProps<{
 
 const playerStore = usePlayerStore()
 const canvasRef = ref<HTMLCanvasElement | null>(null)
+
 let animationId: number | null = null
 let ctx: CanvasRenderingContext2D | null = null
-let smoothedData: Float32Array = new Float32Array(128)
+let smoothedData = new Float32Array(128)
+let rawSpectrum = new Float32Array(128)
+let fftCleanup: (() => void) | null = null
+let isUnmounted = false
 
-// 缓存的播放页主题色 RGB
+// 缓存的主题色 RGB
 let cachedAccentR = 255
 let cachedAccentG = 255
 let cachedAccentB = 255
 let accentColorFrameCounter = 0
 
-// 预计算的柱状图 x 坐标
+// 预计算柱状图坐标
 let barPositions: number[] = []
 let barWidth = 0
 const BAR_COUNT = 128
+let canvasW = 0
+let canvasH = 0
+let maxBarHeight = 0
+let decayLevel = 0
 
-/** 读取并缓存播放页主题色 */
+// 渲染是否活跃：仅在有数据需要绘制时运行 loop
+let renderActive = false
+
 function updateAccentColor(): void {
   const hex = getComputedStyle(document.documentElement).getPropertyValue('--player-accent-color').trim()
   if (hex.startsWith('#')) {
@@ -39,30 +53,27 @@ function updateAccentColor(): void {
   }
 }
 
-function shouldRender(isPlaying: boolean, decayLevel: number): boolean {
-  return isPlaying || decayLevel > 0.01
-}
-
 function setupCanvas(canvas: HTMLCanvasElement, size: number): void {
   const dpr = Math.min(window.devicePixelRatio || 1, 1.5)
   const parent = canvas.parentElement
   if (!parent) return
 
-  const displayWidth = parent.clientWidth * Math.min(size, 1.5)
-  const displayHeight = parent.clientHeight * Math.min(size, 1.5)
+  canvasW = parent.clientWidth * Math.min(size, 1.5)
+  canvasH = parent.clientHeight * Math.min(size, 1.5)
 
-  canvas.style.width = `${displayWidth}px`
-  canvas.style.height = `${displayHeight}px`
-  canvas.width = displayWidth * dpr
-  canvas.height = displayHeight * dpr
+  canvas.style.width = `${canvasW}px`
+  canvas.style.height = `${canvasH}px`
+  canvas.width = canvasW * dpr
+  canvas.height = canvasH * dpr
 
   ctx = canvas.getContext('2d')
   if (ctx) {
     ctx.scale(dpr, dpr)
   }
 
-  // 预计算柱状图 x 坐标（尺寸变化时重新计算）
-  const gap = displayWidth / BAR_COUNT
+  maxBarHeight = canvasH * 0.85
+
+  const gap = canvasW / BAR_COUNT
   barWidth = gap * 0.4
   barPositions = new Array(BAR_COUNT)
   for (let i = 0; i < BAR_COUNT; i++) {
@@ -70,27 +81,20 @@ function setupCanvas(canvas: HTMLCanvasElement, size: number): void {
   }
 }
 
-function drawBars(
-  data: Float32Array,
-  w: number,
-  h: number,
-  intensity: number
-): void {
+function drawBars(): void {
   if (!ctx) return
-  const maxHeight = h * 0.85
-  const gap = w / BAR_COUNT
 
-  ctx.clearRect(0, 0, w, h)
-  ctx.fillStyle = `rgba(${cachedAccentR}, ${cachedAccentG}, ${cachedAccentB}, 0)`
-  ctx.beginPath()
+  ctx.clearRect(0, 0, canvasW, canvasH)
 
   for (let i = 0; i < BAR_COUNT; i++) {
-    const value = Math.min(data[i] / 255, 1) * intensity
-    const barHeight = Math.max(value * maxHeight, 2)
+    const value = Math.min(displayData[i], 1) * props.intensity
+    if (value < 0.01) continue
+
+    const barHeight = Math.max(value * maxBarHeight, 2)
     const alpha = 0.4 + value * 0.08
 
     const x = barPositions[i]
-    const y = h - barHeight - (h - maxHeight) / 2
+    const y = canvasH - barHeight - (canvasH - maxBarHeight) / 2
     const radius = Math.min(barWidth / 2, 2)
 
     ctx.fillStyle = `rgba(${cachedAccentR}, ${cachedAccentG}, ${cachedAccentB}, ${alpha})`
@@ -98,8 +102,8 @@ function drawBars(
     ctx.moveTo(x + radius, y)
     ctx.lineTo(x + barWidth - radius, y)
     ctx.arcTo(x + barWidth, y, x + barWidth, y + radius, radius)
-    ctx.lineTo(x + barWidth, h)
-    ctx.lineTo(x, h)
+    ctx.lineTo(x + barWidth, canvasH)
+    ctx.lineTo(x, canvasH)
     ctx.lineTo(x, y + radius)
     ctx.arcTo(x, y, x + radius, y, radius)
     ctx.closePath()
@@ -107,25 +111,23 @@ function drawBars(
   }
 }
 
-let decayLevel = 0
+// 预分配 displayData 避免每帧创建
+const displayData = new Float32Array(BAR_COUNT)
 
-function renderLoop(): void {
-  if (!canvasRef.value || !ctx) {
-    animationId = requestAnimationFrame(renderLoop)
+function renderFrame(): void {
+  if (isUnmounted || !ctx) {
+    renderActive = false
+    animationId = null
     return
   }
 
-  // 每 60 帧刷新一次主题色（约 1 秒）
   accentColorFrameCounter++
   if (accentColorFrameCounter >= 60) {
     accentColorFrameCounter = 0
     updateAccentColor()
   }
 
-  const canvas = canvasRef.value
   const isPlaying = playerStore.isPlaying
-  const w = canvas.clientWidth
-  const h = canvas.clientHeight
 
   if (!isPlaying) {
     decayLevel = Math.max(0, decayLevel - 0.02)
@@ -133,21 +135,36 @@ function renderLoop(): void {
     decayLevel = Math.min(1, decayLevel + 0.05)
   }
 
-  if (shouldRender(isPlaying, decayLevel)) {
-    const rawData = audioVisualizer.getFrequencyData()
-    for (let i = 0; i < rawData.length; i++) {
-      smoothedData[i] = smoothedData[i] * 0.7 + rawData[i] * 0.3
+  // 检查是否有需要渲染的内容
+  if (isPlaying || decayLevel > 0.01) {
+    // 平滑 + 衰减
+    for (let i = 0; i < BAR_COUNT; i++) {
+      const val = rawSpectrum[i] * 255
+      smoothedData[i] = smoothedData[i] * 0.7 + val * 0.3
     }
 
-    const displayData = new Float32Array(smoothedData.length)
-    for (let i = 0; i < smoothedData.length; i++) {
+    for (let i = 0; i < BAR_COUNT; i++) {
       displayData[i] = smoothedData[i] * decayLevel
     }
 
-    drawBars(displayData, w, h, props.intensity)
+    drawBars()
   }
 
-  animationId = requestAnimationFrame(renderLoop)
+  // 若已无渲染内容且不在播放，停止 loop
+  if (!isPlaying && decayLevel <= 0.01) {
+    renderActive = false
+    animationId = null
+    return
+  }
+
+  animationId = requestAnimationFrame(renderFrame)
+}
+
+/** 按需启动渲染循环（幂等） */
+function ensureRenderLoop(): void {
+  if (renderActive || isUnmounted || !ctx) return
+  renderActive = true
+  animationId = requestAnimationFrame(renderFrame)
 }
 
 function handleResize(): void {
@@ -157,20 +174,47 @@ function handleResize(): void {
 }
 
 onMounted(() => {
-  updateAccentColor()
-  if (canvasRef.value) {
-    setupCanvas(canvasRef.value, props.size)
-    animationId = requestAnimationFrame(renderLoop)
-  }
-  window.addEventListener('resize', handleResize)
+  // 延迟一帧初始化：让 PlayerPage 先完成首帧渲染，再设置可视化
+  requestAnimationFrame(() => {
+    if (isUnmounted) return
+
+    updateAccentColor()
+
+    // 注册 FFT 数据回调，首次收到数据时启动渲染循环
+    fftCleanup = onFftData((spectrum) => {
+      let hasData = false
+      for (let i = 0; i < Math.min(spectrum.length, BAR_COUNT); i++) {
+        rawSpectrum[i] = spectrum[i]
+        if (spectrum[i] > 0) hasData = true
+      }
+      if (hasData) ensureRenderLoop()
+    })
+
+    if (canvasRef.value) {
+      setupCanvas(canvasRef.value, props.size)
+      // 仅当正在播放时启动渲染循环
+      if (playerStore.isPlaying) {
+        ensureRenderLoop()
+      }
+    }
+
+    window.addEventListener('resize', handleResize)
+  })
 })
 
 onUnmounted(() => {
+  isUnmounted = true
+  renderActive = false
   window.removeEventListener('resize', handleResize)
+  if (fftCleanup) {
+    fftCleanup()
+    fftCleanup = null
+  }
   if (animationId !== null) {
     cancelAnimationFrame(animationId)
     animationId = null
   }
+  ctx = null
 })
 
 watch(() => props.size, () => {

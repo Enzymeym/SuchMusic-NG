@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 import { usePlayerStore } from '../../../stores/playerStore'
-import { webAudioEngine } from '../../../audio/audio-engine'
+import { audioEngine } from '../../../audio/audio-engine'
 
 /**
  * 音量控制相关的组合式函数
@@ -39,7 +39,7 @@ export function usePlayerVolume() {
     player.setVolume(v)
     // 使用requestAnimationFrame优化Web Audio API调用
     requestAnimationFrame(() => {
-      webAudioEngine.setVolume(v)
+      audioEngine.setVolume(v)
     })
   }, 30) // 减少节流间隔到30ms，提高响应速度
 
@@ -67,10 +67,10 @@ export function usePlayerVolume() {
   const toggleMute = () => {
     if (player.volume > 0) {
       player.setVolume(0)
-      webAudioEngine.setVolume(0)
+      audioEngine.setVolume(0)
     } else {
       player.setVolume(0.8) // 默认恢复到 80%
-      webAudioEngine.setVolume(0.8)
+      audioEngine.setVolume(0.8)
     }
   }
 

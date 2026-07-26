@@ -1,7 +1,15 @@
 import { ref, reactive, watch } from 'vue'
-import { rustAudioAdapter } from '../audio/rust-audio-adapter'
-import type { VirtualBassParams } from '../audio/virtual-bass'
-import type { SoftClipperParams } from '../audio/soft-clipper'
+import { audioEngine } from '../audio/audio-engine'
+import { useSettingsStore } from '../stores/settingsStore'
+
+/** 检测当前是否为 Web Audio 输出模式 */
+function isWebAudioMode(): boolean {
+  try {
+    return useSettingsStore().playback.audioOutputMode === 'webaudio'
+  } catch {
+    return false
+  }
+}
 
 /**
  * EQ 频段设置
@@ -42,6 +50,24 @@ export interface LoudnessParams {
   compensation: number;
   referenceLoudness: number;
   direction: 'low' | 'high' | 'both';
+}
+
+/**
+ * 虚拟低频参数
+ */
+export interface VirtualBassParams {
+  enabled: boolean;
+  intensity: number;
+  crossoverFreq: number;
+}
+
+/**
+ * 软限幅器参数
+ */
+export interface SoftClipperParams {
+  enabled: boolean;
+  threshold: number;
+  makeupGain: number;
 }
 
 /**
@@ -320,62 +346,6 @@ const BUILTIN_PRESETS: Preset[] = [
 ]
 
 /**
- * 转换压缩器参数为 Rust 引擎格式
- * @param params - 压缩器参数
- * @returns 转换后的 Rust 格式参数
- */
-function convertCompressorParams(params: CompressorParams) {
-  return {
-    thresholdDb: params.threshold ?? -24,
-    ratio: params.ratio ?? 4,
-    attackMs: params.attack ?? 10,
-    releaseMs: params.release ?? 100,
-    kneeDb: params.knee ?? 6
-  };
-}
-
-/**
- * 转换限制器参数为 Rust 引擎格式
- * @param params - 限制器参数
- * @returns 转换后的 Rust 格式参数
- */
-function convertLimiterParams(params: LimiterParams) {
-  return {
-    ceilingDb: params.ceiling ?? -0.3,
-    releaseMs: params.release ?? 50
-  };
-}
-
-/**
- * 转换 EQ 频段类型
- */
-function convertEqBandType(type?: string): string {
-  const typeMap: Record<string, string> = {
-    'lowShelf': 'lowShelf',
-    'highShelf': 'highShelf',
-    'peaking': 'peaking',
-    'notch': 'notch'
-  };
-  return typeMap[type || 'peaking'] || 'peaking';
-}
-
-/**
- * 转换 EQ 频段设置为 Rust 引擎格式
- * @param settings - EQ 频段设置
- * @returns 转换后的 Rust 格式参数
- */
-function convertEqBandSettings(settings: Partial<EqBandSettings>) {
-  return {
-    frequency: settings.frequency ?? 1000,
-    preGain: settings.preGain ?? 0,
-    postGain: settings.postGain ?? 0,
-    preQ: settings.preQ ?? 1,
-    postQ: settings.postQ ?? 1,
-    bandType: convertEqBandType(settings.bandType)
-  };
-}
-
-/**
  * useAudioEngine Composable
  * 提供音频引擎的响应式接口
  */
@@ -649,6 +619,12 @@ export function useAudioEngine() {
    * 初始化音频引擎
    */
   async function initialize() {
+    // Web Audio 模式不需要初始化 Rust 引擎
+    if (isWebAudioMode()) {
+      console.log('[useAudioEngine] Web Audio 模式，跳过 Rust 引擎初始化');
+      return true;
+    }
+
     if (!api) {
       console.warn('[useAudioEngine] audioEngine API 不可用');
       return false;
@@ -755,14 +731,6 @@ export function useAudioEngine() {
         : false;
       loudness.value = await api.getLoudness();
       loudness.value.enabled = isLoudnessEnabled;
-      // 同步到 Web Audio API 音效链
-      rustAudioAdapter.setLoudnessParams({
-        enabled: isLoudnessEnabled,
-        compensation: loudness.value.compensation,
-        referenceLoudness: loudness.value.referenceLoudness,
-        direction: loudness.value.direction
-      });
-
       // 刷新音量
       state.volume = await api.getVolume();
 
@@ -781,6 +749,11 @@ export function useAudioEngine() {
    * 刷新增益减少量
    */
   async function refreshGainReductions() {
+    if (isWebAudioMode()) {
+      compressorGR.value = audioEngine.getCompressorGainReduction()
+      limiterGR.value = audioEngine.getLimiterGainReduction()
+      return
+    }
     if (!api || !state.isInitialized) return;
 
     try {
@@ -874,7 +847,7 @@ export function useAudioEngine() {
         await setEqEnabled(savedState.eqEnabled);
       }
       if (savedState.eqBands && Array.isArray(savedState.eqBands)) {
-        // 通过 setEqBand 逐个恢复，确保同时同步到 Rust API 和 Web Audio 适配器
+        // 通过 setEqBand 逐个恢复到 Rust API
         for (let i = 0; i < savedState.eqBands.length; i++) {
           const band = savedState.eqBands[i];
           try {
@@ -890,7 +863,7 @@ export function useAudioEngine() {
         await setCompressorEnabled(savedState.compressorEnabled);
       }
       if (savedState.compressor) {
-        // 通过 setCompressorParams 恢复，确保同时同步到 Rust API 和 Web Audio 适配器
+        // 通过 setCompressorParams 恢复到 Rust API
         try {
           await setCompressorParams(savedState.compressor);
         } catch (e) {
@@ -913,35 +886,21 @@ export function useAudioEngine() {
       // 应用等响度状态
       if (savedState.loudness) {
         loudness.value = { ...savedState.loudness };
-        if (state.isInitialized && api) {
-          try {
-            if (typeof api.setLoudnessEnabled === 'function') {
-              await api.setLoudnessEnabled(savedState.loudness.enabled ?? false);
-            }
-            await api.setLoudness({ ...savedState.loudness });
-          } catch (e) {
-            console.error('[useAudioEngine] 恢复等响度参数失败:', e);
-          }
+        try {
+          await audioEngine.setLoudnessParams({ ...savedState.loudness });
+        } catch (e) {
+          console.error('[useAudioEngine] 恢复等响度参数失败:', e);
         }
-        // 应用到 Web Audio API 音效链
-        rustAudioAdapter.setLoudnessParams({
-          enabled: loudness.value.enabled,
-          compensation: loudness.value.compensation,
-          referenceLoudness: loudness.value.referenceLoudness,
-          direction: loudness.value.direction
-        });
       }
 
       // 应用虚拟低频状态
       if (savedState.virtualBass) {
         virtualBass.value = { ...savedState.virtualBass };
-        rustAudioAdapter.setVirtualBassParams(virtualBass.value);
       }
 
       // 应用软限幅器状态
       if (savedState.softClipper) {
         softClipper.value = { ...savedState.softClipper };
-        rustAudioAdapter.setSoftClipperParams(softClipper.value);
       }
 
       console.log('[useAudioEngine] 已恢复保存的音效状态');
@@ -958,16 +917,12 @@ export function useAudioEngine() {
    */
   async function setEqEnabled(enabled: boolean) {
     eqEnabled.value = enabled;
-    // 应用到 Rust 引擎
-    if (state.isInitialized && api) {
-      try {
-        await api.setEqEnabled(enabled);
-      } catch (error) {
-        console.error('[useAudioEngine] 设置 EQ 启用状态失败:', error);
-      }
+    // 通过 audioEngine 分发（自动选择 Web Audio 或 Rust）
+    try {
+      await audioEngine.setEqEnabled(enabled);
+    } catch (error) {
+      console.error('[useAudioEngine] 设置 EQ 启用状态失败:', error);
     }
-    // 应用到 Web Audio API
-    rustAudioAdapter.setEqEnabled(enabled);
   }
 
   /**
@@ -982,29 +937,24 @@ export function useAudioEngine() {
     const updated = { ...current, ...settings };
     eqBands.value[bandIndex] = updated;
 
-    // 应用到 Rust 引擎
-    if (state.isInitialized && api) {
-      try {
-        await api.setEqBand(bandIndex, convertEqBandSettings(updated));
-      } catch (error) {
-        console.error('[useAudioEngine] 设置 EQ 频段失败:', error);
-      }
+    // 通过 audioEngine 分发
+    try {
+      await audioEngine.setEqBand(bandIndex, updated);
+    } catch (error) {
+      console.error('[useAudioEngine] 设置 EQ 频段失败:', error);
     }
-    // 应用到 Web Audio API
-    rustAudioAdapter.setEqBand(bandIndex, convertEqBandSettings(updated));
   }
 
   /**
    * 设置所有 EQ 频段增益
    */
   function setEqGains(gains: number[]) {
-    if (!state.isInitialized || !api) return;
     const newBands = eqBands.value.map((band, i) => ({
       ...band,
       preGain: gains[i] ?? 0
     }));
     eqBands.value = newBands;
-    api?.setEqGains(gains);
+    audioEngine.setEqGains(gains).catch(() => { /* ignore */ });
   }
 
   /**
@@ -1025,16 +975,11 @@ export function useAudioEngine() {
    */
   async function setCompressorEnabled(enabled: boolean) {
     compressorEnabled.value = enabled;
-    // 应用到 Rust 引擎
-    if (state.isInitialized && api) {
-      try {
-        await api.setCompressorEnabled(enabled);
-      } catch (error) {
-        console.error('[useAudioEngine] 设置压缩器启用状态失败:', error);
-      }
+    try {
+      await audioEngine.setCompressorEnabled(enabled);
+    } catch (error) {
+      console.error('[useAudioEngine] 设置压缩器启用状态失败:', error);
     }
-    // 应用到 Web Audio API
-    rustAudioAdapter.setCompressorEnabled(enabled);
   }
 
   /**
@@ -1044,17 +989,11 @@ export function useAudioEngine() {
   async function setCompressorParams(params: Partial<CompressorParams>) {
     const current = JSON.parse(JSON.stringify(compressor.value));
     compressor.value = { ...current, ...params };
-    const rustParams = convertCompressorParams(compressor.value);
-    // 应用到 Rust 引擎
-    if (state.isInitialized && api) {
-      try {
-        await api.setCompressor(rustParams);
-      } catch (error) {
-        console.error('[useAudioEngine] 设置压缩器参数失败:', error);
-      }
+    try {
+      await audioEngine.setCompressorParams(compressor.value);
+    } catch (error) {
+      console.error('[useAudioEngine] 设置压缩器参数失败:', error);
     }
-    // 应用到 Web Audio API
-    rustAudioAdapter.setCompressor(rustParams);
   }
 
   // === 限制器控制 ===
@@ -1065,15 +1004,11 @@ export function useAudioEngine() {
    */
   async function setLimiterEnabled(enabled: boolean) {
     limiterEnabled.value = enabled;
-    // 应用到 Rust 引擎
-    if (state.isInitialized && api) {
-      try {
-        await api.setLimiterEnabled(enabled);
-      } catch (error) {
-        console.error('[useAudioEngine] 设置限制器启用状态失败:', error);
-      }
+    try {
+      await audioEngine.setLimiterEnabled(enabled);
+    } catch (error) {
+      console.error('[useAudioEngine] 设置限制器启用状态失败:', error);
     }
-    // Web Audio API 没有原生限制器节点，使用压缩器模拟
   }
 
   /**
@@ -1083,16 +1018,11 @@ export function useAudioEngine() {
   async function setLimiterParams(params: Partial<LimiterParams>) {
     const current = JSON.parse(JSON.stringify(limiter.value));
     limiter.value = { ...current, ...params };
-    const rustParams = convertLimiterParams(limiter.value);
-    // 应用到 Rust 引擎
-    if (state.isInitialized && api) {
-      try {
-        await api.setLimiter(rustParams);
-      } catch (error) {
-        console.error('[useAudioEngine] 设置限制器参数失败:', error);
-      }
+    try {
+      await audioEngine.setLimiterParams(limiter.value);
+    } catch (error) {
+      console.error('[useAudioEngine] 设置限制器参数失败:', error);
     }
-    // Web Audio API 没有原生限制器节点
   }
 
   // === 等响度控制 ===
@@ -1104,24 +1034,11 @@ export function useAudioEngine() {
   async function setLoudnessParams(params: Partial<LoudnessParams>) {
     const current = JSON.parse(JSON.stringify(loudness.value));
     loudness.value = { ...current, ...params };
-    // 应用启用状态到 Rust 引擎
-    if (state.isInitialized && api) {
-      try {
-        if (params.enabled !== undefined && typeof api.setLoudnessEnabled === 'function') {
-          await api.setLoudnessEnabled(params.enabled);
-        }
-        await api.setLoudness({ ...loudness.value });
-      } catch (error) {
-        console.error('[useAudioEngine] 设置等响度参数失败:', error);
-      }
+    try {
+      await audioEngine.setLoudnessParams(loudness.value);
+    } catch (error) {
+      console.error('[useAudioEngine] 设置等响度参数失败:', error);
     }
-    // 应用到 Web Audio API 音效链
-    rustAudioAdapter.setLoudnessParams({
-      enabled: loudness.value.enabled,
-      compensation: loudness.value.compensation,
-      referenceLoudness: loudness.value.referenceLoudness,
-      direction: loudness.value.direction
-    });
   }
 
   /**
@@ -1130,18 +1047,7 @@ export function useAudioEngine() {
    */
   async function setLoudnessEnabled(enabled: boolean) {
     loudness.value.enabled = enabled;
-    if (state.isInitialized && api) {
-      try {
-        if (typeof api.setLoudnessEnabled === 'function') {
-          await api.setLoudnessEnabled(enabled);
-        }
-        await api.setLoudness({ ...loudness.value });
-      } catch (error) {
-        console.error('[useAudioEngine] 设置等响度启用状态失败:', error);
-      }
-    }
-    // 应用到 Web Audio API 音效链
-    rustAudioAdapter.setLoudnessEnabled(enabled);
+    audioEngine.setLoudnessEnabled(enabled);
   }
 
   // === 虚拟低频控制 ===
@@ -1153,9 +1059,7 @@ export function useAudioEngine() {
   async function setVirtualBassParams(params: Partial<VirtualBassParams>) {
     const current = JSON.parse(JSON.stringify(virtualBass.value));
     virtualBass.value = { ...current, ...params };
-
-    // 应用到 Web Audio API（Rust 引擎暂不支持虚拟低频）
-    rustAudioAdapter.setVirtualBassParams(virtualBass.value);
+    audioEngine.setVirtualBassParams(virtualBass.value);
   }
 
   // === 软限幅器控制 ===
@@ -1167,9 +1071,7 @@ export function useAudioEngine() {
   async function setSoftClipperParams(params: Partial<SoftClipperParams>) {
     const current = JSON.parse(JSON.stringify(softClipper.value));
     softClipper.value = { ...current, ...params };
-
-    // 应用到 Web Audio API
-    rustAudioAdapter.setSoftClipperParams(softClipper.value);
+    audioEngine.setSoftClipperParams(softClipper.value);
   }
 
   // === 监听音效参数变化，自动保存到 localStorage ===

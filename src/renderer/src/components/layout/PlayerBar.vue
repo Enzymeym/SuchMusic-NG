@@ -16,8 +16,8 @@ import {
 } from 'naive-ui'
 import { usePlayerStore, type PlayerSong } from '../../stores/playerStore'
 import { usePlaylistStore } from '../../stores/playlistStore'
-import defaultCover from '@renderer/assets/icon.png'
-import { webAudioEngine } from '../../audio/audio-engine'
+import defaultCover from '@renderer/assets/default-cover.png'
+import { audioEngine } from '../../audio/audio-engine'
 import PlayerPage from './PlayerPage.vue'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useDesktopLyric } from '../../composables/useDesktopLyric'
@@ -71,25 +71,59 @@ const {
 // 音效调节弹窗
 const showSoundEffectsModal = ref(false)
 
-// 初始化任务栏歌词和AudioContext
+// 初始化任务栏歌词、音频引擎和 SMTC 控制
 onMounted(() => {
   initTaskbarLyric()
-  // 提前初始化AudioContext，避免拖动滑块时的初始化开销
-  webAudioEngine.ensureContext()
+  // 提前初始化音频引擎，避免拖动滑块时的初始化开销
+  audioEngine.ensureContext()
 
   // 设置音频播放结束回调
-  webAudioEngine.setOnEndedCallback(() => {
+  audioEngine.setOnEndedCallback(() => {
     player.handleSongEnd()
   })
+
+  // 注册 SMTC 多媒体控制（Windows 任务栏媒体按钮 / 系统媒体键）
+  registerMediaSessionHandlers()
+
+  // 启动进度轮询：每 250ms 从音频引擎读取播放位置
+  startProgressPolling()
 })
 
-// 清理音频播放结束回调
+// 清理音频播放结束回调和 SMTC 控制
 onBeforeUnmount(() => {
-  webAudioEngine.removeOnEndedCallback()
+  audioEngine.removeOnEndedCallback()
+  unregisterMediaSessionHandlers()
+  stopProgressPolling()
 })
 
 // 播放锁，防止并发播放
 let isLoadingSong = false
+
+// ===== 进度轮询 =====
+let progressPollTimer: ReturnType<typeof setInterval> | null = null
+
+const startProgressPolling = () => {
+  stopProgressPolling()
+  progressPollTimer = setInterval(async () => {
+    if (!player.isPlaying) return
+    if (isDraggingProgress.value) return // 拖拽时不更新
+    try {
+      const pos = await audioEngine.getCurrentPosition()
+      if (pos > 0) {
+        player.setPosition(pos)
+      }
+    } catch {
+      // 忽略轮询错误
+    }
+  }, 250)
+}
+
+const stopProgressPolling = () => {
+  if (progressPollTimer) {
+    clearInterval(progressPollTimer)
+    progressPollTimer = null
+  }
+}
 
 // 加载并播放歌曲的核心逻辑
 const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => {
@@ -125,12 +159,41 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
   }
 
   const currentProcessId = song.id
+  const filePath = (song as any).filePath as string | undefined
+  const isUrl = filePath && /^https?:\/\//.test(filePath)
 
-  if ((song as any).filePath && window.electron && window.electron.ipcRenderer) {
+  if (filePath && window.electron && window.electron.ipcRenderer) {
+    // 远程 URL：直接流式播放，无需检查本地文件
+    if (isUrl) {
+      try {
+        if (shouldPlay) {
+          await AudioPlayerManager.play({ url: filePath, volume: player.volume })
+        } else {
+          await AudioPlayerManager.load({ url: filePath, volume: player.volume })
+          if (player.positionMs > 0) {
+            audioEngine.seek(player.positionMs, false)
+          }
+        }
+
+        if (player.currentSong?.id !== currentProcessId) {
+          audioEngine.stop()
+          return
+        }
+        if (shouldPlay) {
+          player.setPlaying(true)
+        }
+        return
+      } catch (e) {
+        console.error('[PlayerBar] Failed to play remote audio:', e)
+        message.error('在线音频加载失败')
+        return
+      }
+    }
+
     // 先检查文件是否存在
     const exists = await window.electron.ipcRenderer.invoke(
       'system:fs-exists',
-      (song as any).filePath
+      filePath
     )
 
     if (player.currentSong?.id !== currentProcessId) return
@@ -139,7 +202,7 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
       // 尝试加载本地歌词（如果缺失）
       if (!song.lyrics) {
         window.electron.ipcRenderer
-          .invoke('local-music:get-meta', (song as any).filePath)
+          .invoke('local-music:get-meta', filePath)
           .then((meta: any) => {
             if (meta && meta.lyrics && player.currentSong?.id === song.id) {
               player.setLyrics(meta.lyrics)
@@ -153,43 +216,47 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
       try {
         if (shouldPlay) {
           await AudioPlayerManager.play({
-            filePath: (song as any).filePath,
+            filePath,
             volume: player.volume
           })
         } else {
           await AudioPlayerManager.load({
-            filePath: (song as any).filePath,
+            filePath,
             volume: player.volume
           })
           // 恢复进度（仅定位不播放）
           if (player.positionMs > 0) {
-            webAudioEngine.seek(player.positionMs, false)
+            audioEngine.seek(player.positionMs, false)
           }
         }
 
         if (player.currentSong?.id !== currentProcessId) {
-          webAudioEngine.stop() // 如果播放后发现切歌了，立即停止
+          audioEngine.stop() // 如果播放后发现切歌了，立即停止
           return
         }
         if (shouldPlay) {
           player.setPlaying(true)
         }
         return
-      } catch (e) {
-        console.error('Failed to play song from bar (file)', e)
+      } catch (e: any) {
+        console.error('[PlayerBar] Failed to play local file:', e)
+        player.setPlaying(false)
+        const errMsg = e?.message || String(e)
+        message.error(errMsg.includes('文件不存在')
+          ? `本地文件已不存在，无法播放 (${filePath})`
+          : `播放失败: ${errMsg}`)
+        return
       }
     } else {
-      console.warn(
-        '[PlayerBar] Local file not found:',
-        (song as any).filePath
-      )
-      message.error('本地文件不存在，无法播放')
+      console.warn('[PlayerBar] Local file not found:', filePath)
+      player.setPlaying(false)
+      message.error(`本地文件不存在，无法播放 (${filePath})`)
       return
     }
   }
 
-  // 没有本地文件路径，无法播放
-  message.warning('没有可用的本地文件路径，无法播放')
+  // 既不是远程 URL 也没有本地文件路径，无法播放
+  message.warning('没有可用的文件路径，无法播放')
 }
 
 // 监听 currentSong 变化，触发播放
@@ -207,14 +274,14 @@ watch(
 // 播放 / 暂停切换
 const togglePlay = async () => {
   if (player.isPlaying) {
-    await webAudioEngine.pause()
+    await audioEngine.pause()
     player.setPlaying(false)
     // 主动更新 SMTC 播放状态
     updateMediaPlaybackState()
     updateMediaPositionState()
   } else {
     if (player.currentSong) {
-      const success = await webAudioEngine.play()
+      const success = await audioEngine.play()
       if (success) {
         player.setPlaying(true)
         // 主动更新 SMTC 播放状态
@@ -333,7 +400,7 @@ const handleMoreMenuSelect = (key: string) => {
   if (key.startsWith('playback-rate-')) {
     const rate = parseFloat(key.replace('playback-rate-', ''))
     settingsStore.playback.playbackRate = rate
-    webAudioEngine.setPlaybackRate(rate)
+    audioEngine.setPlaybackRate(rate)
     updateMediaPositionState()
     return
   }
@@ -377,17 +444,32 @@ const progressPercent = computed(() => {
   return (player.positionMs / player.currentSong.durationMs) * 100
 })
 
+/**
+ * 执行 seek 跳转
+ */
+const doSeek = (percent: number) => {
+  if (!player.currentSong || player.currentSong.durationMs <= 0) return
+
+  const ratio = Math.min(Math.max(percent, 0), 100) / 100
+  const targetMs = player.currentSong.durationMs * ratio
+  player.setPosition(targetMs)
+  audioEngine.seek(targetMs)
+}
+
 const handleProgressUpdate = (val: number) => {
-  // 如果没有在拖拽状态（例如键盘操作），也需要更新 dragValue
   dragValue.value = val
 
-  // 支持键盘操作或未被捕获的交互
-  if (!isDraggingProgress.value) {
-    if (!player.currentSong || player.currentSong.durationMs <= 0) return
-    const ratio = Math.min(Math.max(val, 0), 100) / 100
-    const targetMs = player.currentSong.durationMs * ratio
-    webAudioEngine.seek(targetMs)
-  }
+  // 拖拽中：仅更新 dragValue，seek 由 endDrag 统一处理
+  if (isDraggingProgress.value) return
+
+  // 点击进度条 → 立即跳转
+  if (!player.currentSong || player.currentSong.durationMs <= 0) return
+
+  // 防止轮询更新 player.positionMs 触发滑块 @update:value 造成反馈循环
+  const currentPercent = (player.positionMs / player.currentSong.durationMs) * 100
+  if (Math.abs(val - currentPercent) < 0.5) return
+
+  doSeek(val)
 }
 
 const startDrag = () => {
@@ -399,23 +481,14 @@ const startDrag = () => {
   }
 
   isDraggingProgress.value = true
-  window.addEventListener('mouseup', endDrag)
-  window.addEventListener('touchend', endDrag)
 }
 
 const endDrag = () => {
-  if (!isDraggingProgress.value) return
-
   isDraggingProgress.value = false
-  window.removeEventListener('mouseup', endDrag)
-  window.removeEventListener('touchend', endDrag)
 
   if (!player.currentSong || player.currentSong.durationMs <= 0) return
 
-  const ratio = Math.min(Math.max(dragValue.value, 0), 100) / 100
-  const targetMs = player.currentSong.durationMs * ratio
-
-  webAudioEngine.seek(targetMs)
+  doSeek(dragValue.value)
 }
 
 // 节流函数
@@ -435,8 +508,8 @@ const updateVolume = throttle((volume: number) => {
   const v = volume / 100
   // 先更新本地状态，避免UI卡顿
   player.setVolume(v)
-  // 直接调用webAudioEngine.setVolume，避免双重requestAnimationFrame
-  webAudioEngine.setVolume(v)
+  // 直接调用audioEngine.setVolume，避免双重requestAnimationFrame
+  audioEngine.setVolume(v)
 }, 30) // 减少节流间隔到30ms，提高响应速度
 
 // 音量使用 0-100 的滑块值
@@ -480,7 +553,7 @@ const updateMediaMetadata = () => {
 
   const song = player.currentSong
   if (!song) {
-    // 没有当前歌曲时不主动清空 metadata，避免被系统视为重建 SMTC
+    mediaSession.metadata = null
     return
   }
 
@@ -543,68 +616,89 @@ const updateMediaPlaybackState = () => {
   mediaSession.playbackState = player.isPlaying ? 'playing' : 'paused'
 }
 
-// 确保 Media Session 的操作处理只注册一次
-let mediaActionsRegistered = false
+// 刷新完整的 SMTC 状态（metadata + playbackState + position）
+const refreshMediaSession = () => {
+  updateMediaMetadata()
+  updateMediaPlaybackState()
+  updateMediaPositionState()
+}
 
-const ensureMediaSessionHandlers = () => {
-  if (!supportsMediaSession || mediaActionsRegistered) return
+// 注册 Media Session 操作处理器（在 onMounted 中调用一次）
+const registerMediaSessionHandlers = () => {
+  if (!supportsMediaSession) return
 
   const mediaSession = (navigator as any).mediaSession
-  mediaActionsRegistered = true
 
-  // 播放
-  mediaSession.setActionHandler('play', async () => {
+  // 播放 —— 复用 togglePlay，包含 currentSong 检查和 play 失败兜底
+  mediaSession.setActionHandler('play', () => {
     if (!player.isPlaying) {
-      await webAudioEngine.play()
-      player.setPlaying(true)
-      updateMediaPlaybackState()
-      updateMediaPositionState()
+      togglePlay()
     }
   })
 
-  // 暂停
-  mediaSession.setActionHandler('pause', async () => {
+  // 暂停 —— 复用 togglePlay
+  mediaSession.setActionHandler('pause', () => {
     if (player.isPlaying) {
-      await webAudioEngine.pause()
-      player.setPlaying(false)
-      updateMediaPlaybackState()
-      updateMediaPositionState()
+      togglePlay()
+    }
+  })
+
+  // 停止
+  mediaSession.setActionHandler('stop', () => {
+    if (player.isPlaying) {
+      togglePlay()
     }
   })
 
   // 上一首
   mediaSession.setActionHandler('previoustrack', () => {
-    player.playPrev()
+    handlePrev()
+    refreshMediaSession()
   })
 
   // 下一首
   mediaSession.setActionHandler('nexttrack', () => {
-    player.playNext()
+    handleNext()
+    refreshMediaSession()
   })
 
   // 快退
   mediaSession.setActionHandler('seekbackward', (details: any) => {
     const offsetSec = details?.seekOffset ?? 10
     const targetMs = Math.max(0, player.positionMs - offsetSec * 1000)
-    webAudioEngine.seek(targetMs)
+    audioEngine.seek(targetMs)
+    updateMediaPositionState()
   })
 
   // 快进
   mediaSession.setActionHandler('seekforward', (details: any) => {
     const offsetSec = details?.seekOffset ?? 10
     const targetMs = player.positionMs + offsetSec * 1000
-    webAudioEngine.seek(targetMs)
+    audioEngine.seek(targetMs)
+    updateMediaPositionState()
   })
 
   // 跳转到指定时间
   mediaSession.setActionHandler('seekto', (details: any) => {
     if (typeof details?.seekTime !== 'number') return
     const targetMs = Math.max(0, details.seekTime * 1000)
-    webAudioEngine.seek(targetMs)
+    audioEngine.seek(targetMs)
+    updateMediaPositionState()
   })
 }
 
-// 监听当前歌曲及其元数据变化，刷新 Media Session
+// 清除 Media Session 操作处理器
+const unregisterMediaSessionHandlers = () => {
+  if (!supportsMediaSession) return
+
+  const mediaSession = (navigator as any).mediaSession
+  const actions = ['play', 'pause', 'stop', 'previoustrack', 'nexttrack', 'seekbackward', 'seekforward', 'seekto']
+  for (const action of actions) {
+    mediaSession.setActionHandler(action, null)
+  }
+}
+
+// 监听当前歌曲及其元数据变化，刷新 SMTC
 watch(
   () => ({
     id: player.currentSong?.id,
@@ -614,19 +708,16 @@ watch(
     cover: player.currentSong?.cover
   }),
   () => {
-    ensureMediaSessionHandlers()
     updateMediaMetadata()
     updateMediaPositionState()
   },
   { immediate: true }
 )
 
-// 监听播放状态，更新 Media Session 播放状态
+// 监听播放状态，更新 SMTC 播放状态
 watch(
   () => player.isPlaying,
   () => {
-    if (!supportsMediaSession) return
-    // 根据当前播放状态更新 Media Session
     updateMediaPlaybackState()
     updateMediaPositionState()
   },
@@ -637,7 +728,6 @@ watch(
 watch(
   () => player.positionMs,
   () => {
-    // 这里直接调用，Web Audio 更新频率可接受
     updateMediaPositionState()
   }
 )
@@ -672,6 +762,98 @@ watch(
     lastTaskbarProgress = normalized
 
     window.electron.ipcRenderer.send('player:taskbarProgress', { progress: normalized })
+  },
+  { immediate: true }
+)
+
+// 任务栏缩略图工具栏 —— 同步播放状态到主进程
+const lastThumbnailState = ref<string>('')
+
+const updateThumbnailToolbar = () => {
+  if (!(window as any).electron?.ipcRenderer) return
+
+  const hasSongs = player.playlist.length > 0
+  const canPrev = hasSongs
+  const canNext = hasSongs
+  const visible = !!player.currentSong
+
+  const stateKey = `${visible}|${player.isPlaying}|${canPrev}|${canNext}`
+  if (stateKey === lastThumbnailState.value) return
+  lastThumbnailState.value = stateKey
+
+  window.electron.ipcRenderer.send('player:thumbnailToolbar', {
+    isPlaying: player.isPlaying,
+    canPrev,
+    canNext,
+    visible
+  })
+}
+
+watch(
+  () => ({
+    song: player.currentSong?.id,
+    isPlaying: player.isPlaying,
+    playlistLength: player.playlist.length
+  }),
+  () => {
+    updateThumbnailToolbar()
+  },
+  { immediate: true }
+)
+
+// 监听主进程缩略图按钮点击事件
+const onThumbnailAction = (_event: any, data: { action: 'prev' | 'next' | 'togglePlay' }) => {
+  switch (data.action) {
+    case 'prev':
+      handlePrev()
+      break
+    case 'next':
+      handleNext()
+      break
+    case 'togglePlay':
+      togglePlay()
+      break
+  }
+}
+
+const ipcRenderer = (window as any).electron?.ipcRenderer
+if (ipcRenderer) {
+  ipcRenderer.on('player:thumbnailAction', onThumbnailAction)
+}
+
+onBeforeUnmount(() => {
+  if (ipcRenderer) {
+    ipcRenderer.removeListener('player:thumbnailAction', onThumbnailAction)
+  }
+  // 清除缩略图工具栏按钮
+  if (ipcRenderer) {
+    ipcRenderer.send('player:thumbnailToolbar', { visible: false })
+  }
+  // 恢复默认标题
+  if (ipcRenderer) {
+    ipcRenderer.send('player:taskbarTitle', { title: 'Such Music' })
+  }
+})
+
+// 任务栏标题 —— 根据设置决定是否在窗口标题上显示歌曲信息
+const taskbarTitle = computed(() => {
+  if (!settingsStore.general.taskbarSongInfo || !player.currentSong) return 'Such Music'
+  const song = player.currentSong
+  if (song.artist) {
+    return `${song.title} - ${song.artist}`
+  }
+  return song.title
+})
+
+let lastTaskbarTitle = ''
+
+watch(
+  taskbarTitle,
+  (val) => {
+    if (!(window as any).electron?.ipcRenderer) return
+    if (val === lastTaskbarTitle) return
+    lastTaskbarTitle = val
+    window.electron.ipcRenderer.send('player:taskbarTitle', { title: val })
   },
   { immediate: true }
 )
@@ -757,14 +939,15 @@ watch(
   <div class="player-bar">
     <PlayerPage @open-playlist="openPlaylist" />
     <!-- Progress Bar (Top) -->
-    <div class="progress-wrapper" @mousedown="startDrag" @touchstart="startDrag">
+    <div class="progress-wrapper">
       <n-slider
         :value="progressPercent"
         :tooltip="false"
         class="main-progress"
         style="width: 100%"
         @update:value="handleProgressUpdate"
-        @update:value-end="endDrag"
+        @dragstart="startDrag"
+        @dragend="endDrag"
       />
     </div>
 
@@ -898,6 +1081,7 @@ watch(
         </n-popover>
       </div>
       <n-badge
+        class="playlist-badge"
         :value="player.playlist.length"
         :max="999"
         :bordered="false"
@@ -953,6 +1137,14 @@ watch(
               ></n-icon>
               <span v-else>{{ index + 1 }}</span>
             </div>
+            <img
+              class="item-cover"
+              :src="song.cover || defaultCover"
+              alt=""
+              referrerpolicy="no-referrer"
+              loading="lazy"
+              decoding="async"
+            />
             <div class="item-info">
               <div
                 class="item-title"
@@ -963,9 +1155,6 @@ watch(
               <div class="item-artist">{{ song.artist }}</div>
             </div>
             <div class="item-actions">
-              <n-button text class="download-btn" style="display: none">
-                <n-icon size="18"><i class="mgc_download_line"></i></n-icon>
-              </n-button>
               <n-button text class="delete-btn" @click.stop="handleRemove(song)">
                 <n-icon size="18"><i class="mgc_delete_line"></i></n-icon>
               </n-button>
@@ -1285,21 +1474,37 @@ html[data-theme='dark'] .playlist-item.active {
 }
 
 .item-index {
-  width: 32px;
+  width: 28px;
   text-align: center;
   font-size: 14px;
+  margin-right: 8px;
   color: #999;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
+}
+
+.item-cover {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+  margin-right: 10px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12);
+}
+
+html[data-theme='dark'] .item-cover {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 .item-info {
   flex: 1;
-  margin-left: 12px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-width: 0;
 }
 
 .item-title {
@@ -1339,15 +1544,6 @@ html[data-theme='dark'] .playlist-item.active {
 
 .delete-btn:hover {
   color: #ff4d4f;
-}
-
-.download-btn {
-  color: #999;
-  margin-right: 4px;
-}
-
-.download-btn:hover {
-  color: v-bind('themeVars.primaryColor');
 }
 </style>
 

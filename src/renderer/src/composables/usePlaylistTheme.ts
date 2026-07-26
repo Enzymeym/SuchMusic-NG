@@ -1,7 +1,7 @@
 import { ref, watch } from 'vue'
-import { extractImageColors } from '../utils/imageColors'
+import { extractImageColors, getAdaptiveTextColor } from '../utils/imageColors'
 import { useAutoNaiveTheme } from '../themes/autoNaiveTheme'
-import defaultCover from '@renderer/assets/icon.png'
+import defaultCover from '@renderer/assets/default-cover.png'
 
 /**
  * 歌单主题色组合式函数
@@ -15,6 +15,9 @@ export function usePlaylistTheme(coverUrl: () => string) {
 
   /** 封面提取的主色，用于主要按钮颜色 */
   const accentColor = ref('#2080f0')
+
+  /** 封面文字颜色，用于全尺寸模式下标题/描述等覆盖在封面上的文字 */
+  const textColor = ref<'black' | 'white'>(isDark.value ? 'white' : 'black')
 
   /** 上一次提取的封面 URL，避免重复提取 */
   let lastCoverUrl = ''
@@ -45,11 +48,36 @@ export function usePlaylistTheme(coverUrl: () => string) {
     }
   }
 
+  /**
+   * 根据封面图片亮度提取自适应文字颜色
+   * @param url - 封面图片 URL
+   */
+  const extractTextColor = async (url: string) => {
+    // 跳过默认封面和空 URL
+    if (!url || url === defaultCover) {
+      textColor.value = isDark.value ? 'white' : 'black'
+      return
+    }
+
+    try {
+      const adaptive = await getAdaptiveTextColor(url, {
+        // 采样封面上半部分，对应标题/描述所在区域
+        region: { x: 0, y: 0, w: 1, h: 0.45 },
+        threshold: 0.5
+      })
+      textColor.value = adaptive
+    } catch (e) {
+      console.error('提取封面文字颜色失败:', e)
+      textColor.value = isDark.value ? 'white' : 'black'
+    }
+  }
+
   // 监听封面 URL 变化
   watch(
     () => coverUrl(),
     (url) => {
       extractThemeColor(url)
+      extractTextColor(url)
     },
     { immediate: true }
   )
@@ -61,10 +89,12 @@ export function usePlaylistTheme(coverUrl: () => string) {
       // 主题切换时重置缓存，重新提取
       lastCoverUrl = ''
       extractThemeColor(coverUrl())
+      extractTextColor(coverUrl())
     }
   )
 
   return {
-    accentColor
+    accentColor,
+    textColor
   }
 }

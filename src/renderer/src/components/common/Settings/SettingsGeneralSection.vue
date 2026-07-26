@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NCard, NSwitch, NSelect } from 'naive-ui'
+import { NCard, NSwitch, NSelect, NButton } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 
 // 使用设置仓库，驱动常规设置选项
@@ -16,6 +16,11 @@ const updateChannelOptions = [
   { label: '正式版', value: 'stable' },
   { label: '测试版', value: 'beta' }
 ]
+
+const handleRestartSetupWizard = () => {
+  window.dispatchEvent(new CustomEvent('close-settings'))
+  window.dispatchEvent(new CustomEvent('setup-wizard:restart'))
+}
 
 defineProps<{
   settingItemBgColor: string
@@ -85,6 +90,23 @@ defineProps<{
 
     <n-card
       class="setting-item"
+      :class="{ 'setting-item--highlight': highlightKey === 'general.taskbarSongInfo' }"
+      data-setting-key="general.taskbarSongInfo"
+      :bordered="true"
+      size="small"
+      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">任务栏显示歌曲信息</div>
+          <div class="sub-label">播放时在任务栏应用名显示 歌曲名 - 歌手</div>
+        </div>
+        <n-switch v-model:value="settingsStore.general.taskbarSongInfo" />
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
       :class="{ 'setting-item--highlight': highlightKey === 'general.autoCheckUpdate' }"
       data-setting-key="general.autoCheckUpdate"
       :bordered="true"
@@ -118,6 +140,25 @@ defineProps<{
           :options="updateChannelOptions"
           style="width: 120px"
         />
+      </div>
+    </n-card>
+
+    <div class="section-group-title">引导</div>
+
+    <n-card
+      class="setting-item"
+      :bordered="true"
+      size="small"
+      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">重新进行开屏设置向导</div>
+          <div class="sub-label">重新体验首次使用时的基础设置向导</div>
+        </div>
+        <n-button secondary size="small" @click="handleRestartSetupWizard">
+          开始向导
+        </n-button>
       </div>
     </n-card>
   </div>

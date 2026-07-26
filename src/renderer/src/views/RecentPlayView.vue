@@ -66,7 +66,6 @@ import { ref, computed, onMounted, h } from 'vue'
 import { NButton, NIcon, useMessage, NInput } from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import { usePlayerStore } from '../stores/playerStore'
-import { AudioPlayerManager } from '../utils/audioPlayerManager'
 
 interface RecentSong {
   id: string | number
@@ -193,24 +192,12 @@ const handleSongClick = async (song: RecentSong) => {
       filePath: exists ? (song.id as string) : undefined // 如果文件不存在，清除 filePath
     }
     
+    // 统一交由 PlayerBar 的 watch 监听 currentSong 变化来处理实际播放
+    // isPlaying 状态由 doLoadAndPlaySong 在音频引擎成功启动后设置
     player.setCurrentSong(playerSong)
-    player.setPlaying(true)
     
-    // 调用播放引擎
-    if (exists && playerSong.filePath) {
-      try {
-        await AudioPlayerManager.play({
-          filePath: playerSong.filePath,
-          volume: player.volume
-        })
-      } catch (e) {
-        console.error('Failed to play local file from recent view:', e)
-      }
-    } else {
-       console.warn('[RecentPlayView] Local file missing, delegating to PlayerBar fallback:', song.id)
-       // 文件不存在，不显式调用 AudioPlayerManager.play
-       // 由于 setPlaying(true) 且 currentSong 改变，PlayerBar 的 watch 会触发
-       // PlayerBar 发现 filePath 为 undefined，会自动进入 Search Fallback 流程
+    if (!exists) {
+      message.error(`本地文件不存在，无法播放 (${song.id})`)
     }
     return
   }
@@ -240,7 +227,7 @@ const refreshHistory = (): void => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 16px 24px 0px;
+  padding: 64px 24px 0px;
   box-sizing: border-box;
 }
 

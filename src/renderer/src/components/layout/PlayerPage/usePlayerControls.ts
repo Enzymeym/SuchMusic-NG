@@ -3,7 +3,7 @@ import { usePlayerStore } from '../../../stores/playerStore'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePlaylistStore } from '../../../stores/playlistStore'
 import { useAutoNaiveTheme } from '../../../themes/autoNaiveTheme'
-import { webAudioEngine } from '../../../audio/audio-engine'
+import { audioEngine } from '../../../audio/audio-engine'
 import { useDownloadMusic } from '../../../composables/useDownloadMusic'
 import { useMessage } from 'naive-ui'
 
@@ -148,11 +148,11 @@ export function usePlayerControls() {
    */
   const togglePlay = async (): Promise<void> => {
     if (player.isPlaying) {
-      await webAudioEngine.pause()
+      await audioEngine.pause()
       player.setPlaying(false)
     } else {
       if (player.currentSong) {
-        await webAudioEngine.resume()
+        await audioEngine.resume()
         player.setPlaying(true)
       }
     }
@@ -318,62 +318,6 @@ export function usePlayerControls() {
     player.setPlayerPageShown(false)
   }
 
-  // 预加载触发逻辑
-  const preloadTriggerThreshold = computed(() => {
-    // 默认预加载触发点为总时长的85%
-    return settingsStore.playback.preloadTriggerThreshold || 0.85
-  })
-  
-  // 监听播放进度，触发预加载
-  const checkPreloadTrigger = () => {
-    if (!player.currentSong || player.playlist.length <= 1) return
-    
-    const durationMs = player.currentSong.durationMs
-    const currentPositionMs = player.positionMs
-    
-    // 计算当前播放进度百分比
-    const progressPercent = durationMs > 0 ? currentPositionMs / durationMs : 0
-    
-    // 检查是否达到预加载触发点
-    if (progressPercent >= preloadTriggerThreshold.value && player.preloadStatus === 'idle') {
-      // 获取下一首歌曲
-      const nextSong = player.getNextSong()
-      if (nextSong) {
-        player.setNextSongToPreload(nextSong)
-        // 触发预加载
-        void preloadNextSong(nextSong)
-      }
-    }
-  }
-  
-  // 预加载下一首歌曲
-  const preloadNextSong = async (song: any) => {
-    try {
-      player.setPreloadStatus('loading')
-      await webAudioEngine.preloadNextSong(song)
-    } catch (error) {
-      console.error('Preload failed:', error)
-      player.setPreloadStatus('error')
-      player.setPreloadError(error instanceof Error ? error.message : 'Preload failed')
-    }
-  }
-  
-  // 处理预加载状态回调
-  const handlePreloadStatus = (status: 'loading' | 'loaded' | 'error', error?: string) => {
-    switch (status) {
-      case 'loading':
-        player.setPreloadStatus('loading')
-        break
-      case 'loaded':
-        player.setPreloadStatus('loaded')
-        break
-      case 'error':
-        player.setPreloadStatus('error')
-        player.setPreloadError(error || 'Preload failed')
-        break
-    }
-  }
-  
   // 生命周期钩子
   onMounted(() => {
     // 初始化控制条状态
@@ -387,24 +331,7 @@ export function usePlayerControls() {
     window.addEventListener('keydown', handleActivity)
     document.addEventListener('fullscreenchange', handleFullscreenChange)
     
-    // 添加预加载状态回调
-    webAudioEngine.addPreloadCallback(handlePreloadStatus)
-    
-    // 监听播放进度，用于触发预加载
-    watch(
-      () => player.positionMs,
-      () => {
-        checkPreloadTrigger()
-      }
-    )
-    
-    // 监听当前歌曲变化，重置预加载状态
-    watch(
-      () => player.currentSong,
-      () => {
-        player.resetPreloadState()
-      }
-    )
+    // 预加载状态由 Rust 引擎内部管理
   })
 
   onUnmounted(() => {
@@ -415,12 +342,6 @@ export function usePlayerControls() {
     window.removeEventListener('click', handleActivity)
     window.removeEventListener('keydown', handleActivity)
     document.removeEventListener('fullscreenchange', handleFullscreenChange)
-    
-    // 移除预加载状态回调
-    webAudioEngine.removePreloadCallback(handlePreloadStatus)
-    
-    // 清除预加载资源
-    webAudioEngine.clearPreload()
 
     // 播放页卸载时恢复鼠标指针与全屏
     if (isCursorHidden.value) {

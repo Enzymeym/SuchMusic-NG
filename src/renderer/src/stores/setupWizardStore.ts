@@ -4,15 +4,15 @@ import {
   type SetupWizardStep,
   SETUP_WIZARD_STEPS,
   SETUP_WIZARD_STORAGE_KEY,
-  THEME_COLOR_PRESETS,
-  EQ_PRESETS
+  THEME_COLOR_PRESETS
 } from '../types/onboarding'
 import { useSettingsStore } from './settingsStore'
+import { getDefaultOutputMode, type AudioOutputMode } from '../utils/audioOutputModeManager'
 
 /**
  * 首次设置向导状态管理 Store
  * 负责管理首次启动时的初始设置流程：
- * 主题色选择、音效配置、本地音乐导入
+ * 欢迎页 → 主题色选择 → 音频引擎 → 功能更新展示
  */
 export const useSetupWizardStore = defineStore('setupWizard', () => {
   // --- State ---
@@ -35,14 +35,11 @@ export const useSetupWizardStore = defineStore('setupWizard', () => {
   /** 用户自定义的主题色（颜色选择器） */
   const customThemeColor = ref(THEME_COLOR_PRESETS[0].color)
 
-  /** 用户选择的 EQ 预设值 */
-  const selectedEqPreset = ref(EQ_PRESETS[0].value)
+  /** 用户选择的音频输出模式 */
+  const audioOutputMode = ref<AudioOutputMode>(getDefaultOutputMode())
 
-  /** 是否启用均衡器 */
-  const eqEnabled = ref(false)
-
-  /** 是否启用音频可视化 */
-  const visualizerEnabled = ref(true)
+  /** 用户选择的音频输出设备 ID */
+  const audioOutputDeviceId = ref('')
 
   /** 是否已从 localStorage 加载过状态 */
   let isLoaded = false
@@ -80,9 +77,14 @@ export const useSetupWizardStore = defineStore('setupWizard', () => {
     return currentPreset.value.color
   })
 
-  /** 当前 EQ 预设对象 */
-  const currentEqPreset = computed(() => {
-    return EQ_PRESETS.find((p) => p.value === selectedEqPreset.value) || EQ_PRESETS[0]
+  /** 音频输出模式的标签文本 */
+  const audioOutputModeLabel = computed(() => {
+    const labels: Record<AudioOutputMode, string> = {
+      webaudio: 'Web Audio（浏览器内置）',
+      'wasapi-shared': 'WASAPI 共享模式',
+      'wasapi-exclusive': 'WASAPI 独占模式'
+    }
+    return labels[audioOutputMode.value] || audioOutputMode.value
   })
 
   // --- Actions ---
@@ -140,6 +142,13 @@ export const useSetupWizardStore = defineStore('setupWizard', () => {
     }
   }
 
+  /** 跳转到指定步骤 */
+  const goTo = (index: number): void => {
+    if (index >= 0 && index < steps.value.length) {
+      currentStepIndex.value = index
+    }
+  }
+
   /** 设置主题色预设 */
   const setThemePreset = (value: string): void => {
     selectedThemePreset.value = value
@@ -155,12 +164,14 @@ export const useSetupWizardStore = defineStore('setupWizard', () => {
     selectedThemePreset.value = 'custom'
   }
 
-  /** 设置 EQ 预设 */
-  const setEqPreset = (value: string): void => {
-    selectedEqPreset.value = value
-    if (value !== 'flat') {
-      eqEnabled.value = true
-    }
+  /** 设置音频输出模式 */
+  const setAudioOutputMode = (mode: AudioOutputMode): void => {
+    audioOutputMode.value = mode
+  }
+
+  /** 设置音频输出设备 ID */
+  const setAudioOutputDeviceId = (deviceId: string): void => {
+    audioOutputDeviceId.value = deviceId
   }
 
   /**
@@ -174,15 +185,9 @@ export const useSetupWizardStore = defineStore('setupWizard', () => {
     settingsStore.appearance.themeColorPreset = selectedThemePreset.value
     settingsStore.appearance.customThemeColor = activeColor.value
 
-    // 应用均衡器
-    if (eqEnabled.value) {
-      settingsStore.playback.eqEnabled = true
-      settingsStore.playback.eqPreset = selectedEqPreset.value
-      settingsStore.playback.eqGains = [...currentEqPreset.value.gains]
-    }
-
-    // 应用可视化
-    settingsStore.playback.visualizerEnabled = visualizerEnabled.value
+    // 应用音频输出模式
+    settingsStore.playback.audioOutputMode = audioOutputMode.value
+    settingsStore.playback.audioOutputDeviceId = audioOutputDeviceId.value
   }
 
   /**
@@ -211,6 +216,14 @@ export const useSetupWizardStore = defineStore('setupWizard', () => {
     next()
   }
 
+  /** 重置向导完成状态，允许重新触发 */
+  const reset = (): void => {
+    isCompleted.value = false
+    isActive.value = false
+    currentStepIndex.value = 0
+    saveState()
+  }
+
   // 初始化加载
   loadState()
 
@@ -222,27 +235,29 @@ export const useSetupWizardStore = defineStore('setupWizard', () => {
     steps,
     selectedThemePreset,
     customThemeColor,
-    selectedEqPreset,
-    eqEnabled,
-    visualizerEnabled,
+    audioOutputMode,
+    audioOutputDeviceId,
     // getters
     totalSteps,
     currentStep,
     isLastStep,
     currentPreset,
     activeColor,
-    currentEqPreset,
+    audioOutputModeLabel,
     // actions
     start,
     next,
     prev,
+    goTo,
     setThemePreset,
     setCustomThemeColor,
-    setEqPreset,
+    setAudioOutputMode,
+    setAudioOutputDeviceId,
     applySettings,
     complete,
     skip,
     skipCurrentStep,
-    saveState
+    saveState,
+    reset
   }
 })

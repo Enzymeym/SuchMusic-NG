@@ -5,6 +5,7 @@ import { existsSync, mkdirSync } from 'fs'
 import { execSync } from 'child_process'
 import { monitorEvent } from './monitorEvent'
 import { createWindow } from './windows/mainWindow'
+import { getMainWindow } from './windows/mainWindow'
 import { registerAudioHandlers } from './ipc/audio'
 import { registerLocalMusicHandlers } from './ipc/localMusic'
 import { registerSystemHandlers } from './ipc/system'
@@ -12,12 +13,13 @@ import { registerDesktopLyricHandlers } from './ipc/desktopLyric'
 import { registerTaskbarLyricHandlers } from './ipc/taskbarLyric'
 import { createTray } from './tray'
 import { registerAudioEngineHandlers } from './services/audioEngineService'
-import { registerFfmpegEngineHandlers } from './services/audioEngineFfmpegService'
 import { registerWasapiHandlers } from './services/wasapiService'
-import { registerFfmpegInstallerHandlers, initFfmpeg } from './services/ffmpegDownloader'
 import { registerUpdateHandlers } from './ipc/update'
 import { checkForUpdate } from './services/updateService'
 import { sendAutoUpdateResult } from './ipc/update'
+import { registerPluginHandlers } from './ipc/pluginManager'
+import { loadAllSavedPlugins } from './ipc/pluginManager'
+import { registerLyricHandlers } from './services/lyricService'
 
 // 修复 PowerShell 中中文显示错误的问题
 if (process.platform === 'win32') {
@@ -143,17 +145,19 @@ app.whenReady().then(() => {
   registerDesktopLyricHandlers()
   registerTaskbarLyricHandlers()
   registerAudioEngineHandlers()
-  registerFfmpegEngineHandlers()
   registerWasapiHandlers()
-  registerFfmpegInstallerHandlers()
   registerUpdateHandlers()
-
-  // 初始化 FFmpeg DLL 检测
-  initFfmpeg()
+  registerLyricHandlers()
 
   createWindow()
   createTray()
   monitorEvent()
+
+  // 注册插件系统处理器（需在窗口创建后）
+  registerPluginHandlers(getMainWindow() || null)
+
+  // 自动加载已保存的插件
+  loadAllSavedPlugins()
 
   // 应用启动后自动检查应用更新（延迟 3 秒执行）
   setTimeout(async () => {

@@ -1,5 +1,9 @@
 <template>
-  <div v-if="playlist" ref="detailRef" class="playlist-detail" :class="[layoutStyle, playlist.coverStyle || 'square', { collapsed: isCollapsed }]" @scroll="handleScroll">
+  <div
+    v-if="playlist"
+    class="playlist-detail"
+    :class="[layoutStyle, playlist.coverStyle || 'square']"
+  >
     <!-- 背景层（仅现代模式）：统一模糊背景 -->
     <div
       v-if="layoutStyle === 'modern'"
@@ -21,12 +25,20 @@
       <div class="header-content">
         <!-- 封面 -->
         <div class="cover-wrapper" :class="playlist.coverStyle || 'square'">
-          <img :src="playlistCover" class="cover-img" :style="playlistCoverStyle" loading="lazy" decoding="async" />
+          <img
+            :src="playlistCover"
+            class="cover-img"
+            :style="playlistCoverStyle"
+            loading="lazy"
+            decoding="async"
+          />
         </div>
 
         <!-- 信息区域 -->
         <div class="info-wrapper">
-          <div class="playlist-title" :style="playlistTitleStyle">{{ playlist.name }}</div>
+          <div class="playlist-title" :style="[playlistTitleStyle, headerTextStyle]">
+            {{ playlist.name }}
+          </div>
 
           <!-- 标签（模拟数据，实际UserPlaylist暂无标签字段） -->
           <div class="tags-row" v-if="layoutStyle === 'classic'">
@@ -35,14 +47,17 @@
           </div>
 
           <!-- 描述 -->
-          <div class="desc-row">
+          <div class="desc-row" :style="headerTextStyle">
             <div class="desc-text line-clamp-2">
-              {{ playlist.description || `这是一个本地创建的歌单，包含了 ${playlist.tracks.length} 首歌曲。` }}
+              {{
+                playlist.description ||
+                `这是一个本地创建的歌单，包含了 ${playlist.tracks.length} 首歌曲。`
+              }}
             </div>
           </div>
 
           <!-- 按钮组 -->
-          <div class="actions-row" style="justify-content: space-between;">
+          <div class="actions-row" style="justify-content: space-between">
             <div class="actions-row">
               <n-button :color="accentColor" round size="large" @click="playAll">
                 <template #icon>
@@ -50,15 +65,22 @@
                 </template>
                 播放
               </n-button>
-
-              <n-button secondary round size="large">
+              <n-button
+                size="large"
+                secondary
+                round
+                :type="isBatchMode ? 'primary' : 'default'"
+                @click="toggleBatchMode"
+              >
                 <template #icon>
-                  <n-icon><i class="mgc_folder_download_line"></i></n-icon>
+                  <n-icon
+                    ><i :class="isBatchMode ? 'mgc_close_line' : 'mgc_list_check_2_line'"></i
+                  ></n-icon>
                 </template>
-                下载全部
+                {{ isBatchMode ? '退出管理' : '批量管理' }}
               </n-button>
             </div>
-            <div class="action-row">
+            <div class="actions-row">
               <n-button size="large" secondary circle @click="showSettings = true">
                 <template #icon>
                   <n-icon><i class="mgc_settings_3_line"></i></n-icon>
@@ -73,16 +95,47 @@
     <!-- 歌曲列表 -->
     <div class="list-section">
       <SongList
+        v-model:selected-ids="selectedIds"
         :songs="songsForList"
         :loading="false"
         :current-playing-song-id="player.currentSong?.id ?? null"
         :transparent-header="layoutStyle === 'modern'"
-        :item-variant="layoutStyle === 'modern' ? 'plain' : 'card'"
-        :draggable="true"
+        :item-variant="(layoutStyle === 'modern' || playlist?.coverStyle === 'square') ? 'plain' : 'card'"
+        :draggable="!isBatchMode"
+        :selectable="isBatchMode"
         @song-click="handleSongClick"
         @reorder="handleReorder"
       />
     </div>
+
+    <!-- 批量操作栏 -->
+    <transition name="batch-bar-fade">
+      <div v-if="isBatchMode" class="batch-action-bar">
+        <div class="batch-action-left">
+          <n-checkbox
+            :checked="allSelected"
+            :indeterminate="someSelected"
+            @update:checked="toggleSelectAll"
+          >
+            全选
+          </n-checkbox>
+          <span v-if="selectedIds.length > 0" class="batch-selected-count">
+            已选 {{ selectedIds.length }} 首
+          </span>
+        </div>
+        <div class="batch-action-right">
+          <n-button size="large" @click="exitBatchMode"> 取消 </n-button>
+          <n-button
+            size="large"
+            type="error"
+            :disabled="selectedIds.length === 0"
+            @click="handleBatchDelete"
+          >
+            删除选中 ({{ selectedIds.length }})
+          </n-button>
+        </div>
+      </div>
+    </transition>
 
     <PlaylistSettingsModal
       v-model:show="showSettings"
@@ -99,17 +152,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted, watch, type CSSProperties } from 'vue'
+import { computed, ref, onMounted, watch, type CSSProperties } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NIcon, NEmpty, useMessage } from 'naive-ui'
+import { NButton, NIcon, NEmpty, useMessage, useDialog, NCheckbox } from 'naive-ui'
 import { usePlaylistStore, type UserPlaylist } from '../stores/playlistStore'
 import { usePlayerStore } from '../stores/playerStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { usePlaylistTheme } from '../composables/usePlaylistTheme'
 import SongList from '../components/common/SongList.vue'
 import PlaylistSettingsModal from '../components/common/PlaylistSettingsModal.vue'
-import defaultCover from '@renderer/assets/icon.png'
-import { AudioPlayerManager } from '../utils/audioPlayerManager'
+import defaultCover from '@renderer/assets/default-cover.png'
+
 
 const route = useRoute()
 const router = useRouter()
@@ -117,8 +170,11 @@ const playlistStore = usePlaylistStore()
 const player = usePlayerStore()
 const settingsStore = useSettingsStore()
 const message = useMessage()
+const dialog = useDialog()
 
 const playlistId = route.params.id as string
+const isBatchMode = ref(false)
+const selectedIds = ref<Array<string | number>>([])
 // 从 store 获取用户偏好的布局风格
 const storedLayoutStyle = ref<'classic' | 'modern'>(
   settingsStore.appearance.playlistLayoutStyle || 'classic'
@@ -131,17 +187,6 @@ const layoutStyle = computed<'classic' | 'modern'>(() => {
 })
 
 const showSettings = ref(false)
-
-// 滚动驱动页头收缩
-const detailRef = ref<HTMLElement | null>(null)
-const scrollY = ref(0)
-const HEADER_COLLAPSE_THRESHOLD = 200
-const isCollapsed = computed(() => scrollY.value >= HEADER_COLLAPSE_THRESHOLD)
-
-const handleScroll = () => {
-  if (!detailRef.value) return
-  scrollY.value = detailRef.value.scrollTop
-}
 
 const playlist = computed(() => {
   return playlistStore.playlists.find((p) => p.id === playlistId)
@@ -178,17 +223,25 @@ const playlistCoverStyle = computed<CSSProperties>(() => {
   const style = playlist.value.coverStyle || 'square'
 
   switch (style) {
-    case 'full': return { objectFit: 'cover' }
+    case 'full':
+      return { objectFit: 'cover' }
     case 'square':
-    default: return { aspectRatio: '1/1', objectFit: 'cover' }
+    default:
+      return { aspectRatio: '1/1', objectFit: 'cover' }
   }
 })
 
-// 根据封面提取主题色
-const { accentColor } = usePlaylistTheme(() => playlistCover.value)
+// 根据封面提取主题色与自适应文字颜色
+const { accentColor, textColor } = usePlaylistTheme(() => playlistCover.value)
+
+// 全尺寸模式下标题/描述等覆盖在封面上的文字颜色
+const headerTextStyle = computed<CSSProperties>(() => {
+  if (playlist.value?.coverStyle !== 'full') return {}
+  return { color: textColor.value }
+})
 
 // 计算标题样式
-const playlistTitleStyle = computed(() => {
+const playlistTitleStyle = computed<CSSProperties>(() => {
   if (!playlist.value) return {}
   const weight = playlist.value.titleFontWeight || 'bold'
   const family = playlist.value.titleFontFamily || 'default'
@@ -211,6 +264,87 @@ watch(storedLayoutStyle, (newStyle) => {
   // 直接写入 store 的 appearance，利用 Pinia 的深度 watch 持久化到 localStorage
   settingsStore.appearance.playlistLayoutStyle = newStyle
 })
+
+const allSelected = computed(() => {
+  if (!playlist.value || playlist.value.tracks.length === 0) return false
+  const set = new Set(selectedIds.value.map(String))
+  return playlist.value.tracks.every((t) => t.id && set.has(String(t.id)))
+})
+
+const someSelected = computed(() => {
+  if (!playlist.value || playlist.value.tracks.length === 0) return false
+  const set = new Set(selectedIds.value.map(String))
+  const hasSelected = playlist.value.tracks.some((t) => t.id && set.has(String(t.id)))
+  return hasSelected && !allSelected.value
+})
+
+const isPlayerPlayingThisPlaylist = computed(() => {
+  if (!playlist.value || player.playlist.length === 0) return false
+  if (player.playlist.length !== playlist.value.tracks.length) return false
+  const ids = new Set(playlist.value.tracks.map((t) => t.id))
+  return player.playlist.every((s) => ids.has(s.id))
+})
+
+function toggleBatchMode(): void {
+  if (isBatchMode.value) {
+    exitBatchMode()
+  } else {
+    enterBatchMode()
+  }
+}
+
+function enterBatchMode(): void {
+  selectedIds.value = []
+  isBatchMode.value = true
+}
+
+function exitBatchMode(): void {
+  isBatchMode.value = false
+  selectedIds.value = []
+}
+
+function toggleSelectAll(): void {
+  if (!playlist.value) return
+  selectedIds.value = allSelected.value
+    ? []
+    : playlist.value.tracks.map((t) => t.id).filter((id): id is string | number => id !== null)
+}
+
+function handleBatchDelete(): void {
+  if (!playlist.value || selectedIds.value.length === 0) return
+
+  const shouldSyncPlayer = isPlayerPlayingThisPlaylist.value
+
+  dialog.warning({
+    title: '确认删除',
+    content: `确定从歌单中移除 ${selectedIds.value.length} 首歌曲吗？`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      const removed = playlistStore.removeTracksFromPlaylist(playlistId, selectedIds.value)
+      if (removed > 0) {
+        if (shouldSyncPlayer && playlist.value) {
+          player.setPlaylist(
+            playlist.value.tracks.map((t) => ({
+              id: t.id,
+              title: t.title,
+              artist: t.artist,
+              album: t.album,
+              cover: t.cover || '',
+              durationMs: t.durationMs || 0,
+              filePath: t.filePath,
+              source: t.source,
+              sourceSongId: t.sourceSongId,
+              lyrics: ''
+            }))
+          )
+        }
+        message.success(`已移除 ${removed} 首歌曲`)
+      }
+      exitBatchMode()
+    }
+  })
+}
 
 // 转换成 SongList 组件需要的格式
 const songsForList = computed(() => {
@@ -236,7 +370,7 @@ const playAll = () => {
     title: t.title,
     artist: t.artist,
     album: t.album,
-    cover: t.cover || defaultCover,
+    cover: t.cover || '',
     filePath: t.filePath,
     durationMs: t.durationMs || 0,
     source: t.source,
@@ -246,11 +380,10 @@ const playAll = () => {
   player.setPlaylist(list)
   if (list.length > 0) {
     player.setCurrentSong(list[0])
-    player.setPlaying(true)
   }
 }
 
-const handleSongClick = async (song: any) => {
+const handleSongClick = (song: any) => {
   if (!playlist.value) return
 
   const list = playlist.value.tracks.map((t) => ({
@@ -258,7 +391,7 @@ const handleSongClick = async (song: any) => {
     title: t.title,
     artist: t.artist,
     album: t.album,
-    cover: t.cover || defaultCover,
+    cover: t.cover || '',
     filePath: t.filePath,
     durationMs: t.durationMs || 0,
     source: t.source,
@@ -269,40 +402,20 @@ const handleSongClick = async (song: any) => {
   const target = list.find((s) => s.id === song.id)
   if (!target) return
 
-  // 本地文件播放
-  if (target.filePath && !target.filePath.startsWith('http')) {
-    try {
-      const lyrics = target.lyrics || ''
-
-      await AudioPlayerManager.play({
-        filePath: target.filePath,
-        volume: player.volume
-      })
-
-      player.setCurrentSong({
-        id: target.id,
-        title: target.title,
-        artist: target.artist,
-        album: target.album,
-        cover: target.cover || '',
-        durationMs: target.durationMs || 0,
-        filePath: target.filePath,
-        source: target.source,
-        sourceSongId: target.sourceSongId,
-        lyrics: lyrics
-      })
-      player.setPlaying(true)
-      message.success('从本地缓存播放')
-      return
-    } catch (e) {
-      console.error('本地文件播放失败:', e)
-      message.error('找不到本地文件')
-      return
-    }
+  if (!target.filePath) {
+    message.error('找不到本地文件')
+    return
   }
 
-  // 没有本地文件
-  message.error('找不到本地文件')
+  // 统一交由 PlayerBar 的 watch 监听 currentSong 变化来处理实际播放
+  player.setPlaylist(list)
+  player.setCurrentSong(target)
+
+  if (/^https?:\/\//.test(target.filePath)) {
+    message.success('正在播放在线音频')
+  } else {
+    message.success('从本地缓存播放')
+  }
 }
 
 const handleReorder = (fromIndex: number, toIndex: number) => {
@@ -318,14 +431,7 @@ const handleReorder = (fromIndex: number, toIndex: number) => {
 }
 
 onMounted(() => {
-  // 确保数据已加载
-  if (playlistStore.playlists.length === 0) {
-    playlistStore.loadFromStorage()
-  }
-})
-
-onUnmounted(() => {
-  // 清理：无需手动移除，Vue 自动处理
+  // 歌单数据已在 App.vue 初始化时加载，无需重复调用
 })
 </script>
 
@@ -370,14 +476,19 @@ onUnmounted(() => {
 
 .classic .header-section {
   display: flex;
-  padding: 30px 30px 0 30px;
+  padding: 44px 30px 0 30px;
   margin-bottom: 20px;
+}
+
+/* 经典模式下去除 header-content 的包装层，让封面和信息区域直接成为 flex 子项 */
+.classic .header-content {
+  display: flex;
+  margin-top: 32px;
 }
 
 .classic .cover-wrapper {
   width: 180px;
-  height: auto;
-  aspect-ratio: 1 / 1;
+  height: 180px;
   flex-shrink: 0;
   border-radius: 8px;
   overflow: hidden;
@@ -395,8 +506,7 @@ onUnmounted(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
-  transform: translate(0, -50%);
-  justify-content: flex-start;
+  justify-content: center;
 }
 
 .classic .playlist-title {
@@ -438,19 +548,23 @@ onUnmounted(() => {
   font-size: 13px;
   color: #666666c4;
   line-height: 1.5;
-  margin-bottom: auto; /* Push buttons to bottom if needed, or just let them flow */
 }
 
 .classic .actions-row {
   margin-top: 16px;
   display: flex;
+  gap: 8px;
   align-items: center;
+}
+
+.classic .list-section {
+  padding: 0 30px;
 }
 
 /* ================= Modern Style (Apple-like) ================= */
 .playlist-detail.modern {
-  /* 现代模式下整体可滚动 */
-  overflow-y: auto;
+  /* 现代模式下外层不滚动，仅歌曲列表内部滚动，避免 header 高度变化与滚动容器相互影响导致抽搐 */
+  overflow: hidden;
   position: relative;
 }
 
@@ -478,6 +592,42 @@ onUnmounted(() => {
   mask-image: linear-gradient(to bottom, black 0%, transparent 60%);
   opacity: 0.6; /* 整体透明度降低 */
   filter: blur(20px) brightness(0.8); /* 增加模糊 */
+  height: 350px; /* 略微增高以覆盖相对定位的 header 区域 */
+}
+
+/* Square 模式下禁用 ::after 的 backdrop-filter，避免与父级 filter 冲突造成双重重叠模糊 */
+.modern .bg-layer.square::after {
+  display: none;
+}
+
+/* ================= Modern + Square 布局覆写 ================= */
+/* Square 模式下 header 使用正常流 flex 布局，而非 absolute 定位 */
+.modern.square .header-section {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  height: auto;
+  min-height: auto;
+  padding: 60px 40px 24px 40px;
+  justify-content: flex-start;
+}
+
+/* Square 模式下列表区域去除为 absolute header 预留的顶部 padding */
+.modern.square .list-section {
+  padding: 16px 40px 0 40px;
+  flex: 1;
+  height: auto;
+}
+
+/* Square 模式下封面与信息顶部对齐 */
+.modern.square .header-content {
+  align-items: flex-start;
+}
+
+/* Square 模式下倒影层同步增高 */
+.modern .bg-reflection.square {
+  height: 350px;
 }
 
 /* Full 模式下的背景层：全尺寸封面大图作为背景，顶部清晰不模糊 */
@@ -508,14 +658,24 @@ onUnmounted(() => {
   position: absolute;
   inset: 0;
   /* 增强底部遮罩，过渡到深色而不是透明，防止发白 */
-  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.137), rgba(0, 0, 0, 0) 80%, rgba(0, 0, 0, 0.8) 100%);
+  background: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.137),
+    rgba(0, 0, 0, 0) 80%,
+    rgba(0, 0, 0, 0.8) 100%
+  );
   z-index: 2;
 }
 
 /* 适配浅色模式：使用 Naive UI 的主题变量或 data-theme 属性 */
 [data-theme='light'] .modern .bg-layer::before {
   /* 浅色模式下，底部过渡到白色，而不是黑色 */
-  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0) 80%, rgba(255, 255, 255, 0.9) 100%);
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.1),
+    rgba(255, 255, 255, 0) 80%,
+    rgba(255, 255, 255, 0.9) 100%
+  );
 }
 
 .modern .bg-reflection {
@@ -562,14 +722,18 @@ onUnmounted(() => {
 }
 
 .modern .header-section {
-  position: relative;
-  z-index: 1;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
   display: flex;
   flex-direction: column; /* 改为垂直布局，模拟大封面在顶部的效果，或者保持水平 */
   align-items: flex-start;
   justify-content: flex-end;
   padding: 60px 40px 12px 40px; /* 增加顶部 padding 避开标题栏 */
-  min-height: 300px; /* 增加头部高度 */
+  height: 300px;
+  min-height: 300px;
   box-sizing: border-box;
   color: white;
 }
@@ -596,7 +760,7 @@ onUnmounted(() => {
   border-radius: 8px;
   overflow: hidden;
   margin-right: 24px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
 }
 
 .modern .cover-wrapper.full {
@@ -682,111 +846,14 @@ onUnmounted(() => {
   z-index: 1;
   /* 列表区域背景色 */
   background: transparent;
-  padding: 0 40px;
+  padding: 300px 40px 0 40px; /* 为 absolute 定位的 header 留出 300px 空间 */
+  box-sizing: border-box;
+  height: 100%;
 }
 
 /* 现代模式下的列表样式微调 */
 .modern :deep(.song-list-container) {
   /* 可以增加一些半透明背景让文字更清晰，或者直接依靠底色 */
-}
-
-/* ================= Collapsed Header（滚动收缩页头模式） ================= */
-/* 页头区域过渡动画 */
-.modern .header-section {
-  transition: min-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              padding 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.modern .cover-wrapper {
-  transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              margin-right 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              border-radius 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.modern .playlist-title {
-  transition: font-size 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              margin-bottom 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.modern .desc-row,
-.modern .actions-row {
-  transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-              max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              margin 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.modern .bg-layer,
-.modern .bg-reflection {
-  transition: opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              mask-image 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              -webkit-mask-image 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              height 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-/* 收缩态：页头缩小为 compact bar */
-.playlist-detail.modern.collapsed .header-section {
-  min-height: 60px;
-  padding: 8px 40px;
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  /* 半透明毛玻璃背景，让模糊层透出 */
-  background: rgba(0, 0, 0, 0.08);
-  backdrop-filter: blur(30px);
-  -webkit-backdrop-filter: blur(30px);
-}
-
-[data-theme='light'] .playlist-detail.modern.collapsed .header-section {
-  background: rgba(255, 255, 255, 0.5);
-}
-
-.playlist-detail.modern.collapsed .header-content {
-  align-items: center;
-}
-
-/* 收缩态：封面缩小（square 模式有封面，full 模式封面已隐藏） */
-.playlist-detail.modern.collapsed .cover-wrapper:not(.full) {
-  width: 44px;
-  height: 44px;
-  aspect-ratio: 1/1;
-  border-radius: 6px;
-  margin-right: 12px;
-}
-
-/* 收缩态：标题缩小 */
-.playlist-detail.modern.collapsed .playlist-title {
-  font-size: 20px;
-  margin-bottom: 0;
-  text-shadow: none;
-}
-
-/* 收缩态：隐藏描述和操作按钮 */
-.playlist-detail.modern.collapsed .desc-row,
-.playlist-detail.modern.collapsed .actions-row {
-  opacity: 0;
-  max-height: 0;
-  margin: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-/* 收缩态：背景层仅保留底部模糊区域 */
-.playlist-detail.modern.collapsed .bg-layer.full {
-  /* 顶部完全透明，仅底部保留模糊过渡 */
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, transparent 55%, black 100%);
-  mask-image: linear-gradient(to bottom, transparent 0%, transparent 55%, black 100%);
-  opacity: 0.5;
-  height: 280px;
-}
-
-/* 收缩态：倒影层覆盖更广，承接模糊背景 */
-.playlist-detail.modern.collapsed .bg-reflection.full {
-  opacity: 0.75;
-  height: 280px;
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 100%);
-  mask-image: linear-gradient(to bottom, transparent 0%, black 100%);
 }
 
 /* 适配深色模式 */
@@ -809,5 +876,63 @@ onUnmounted(() => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.batch-action-bar {
+  position: sticky;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 12px 20px;
+  border-radius: 12px;
+  background: var(--n-card-color, rgba(255, 255, 255, 0.95));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(12px);
+  min-width: 420px;
+  max-width: 90vw;
+  align-self: flex-start;
+}
+
+:root[data-theme='dark'] .batch-action-bar {
+  background: rgba(40, 40, 40, 0.95);
+}
+
+.batch-action-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.batch-selected-count {
+  font-size: 14px;
+  color: #666;
+}
+
+:root[data-theme='dark'] .batch-selected-count {
+  color: #aaa;
+}
+
+.batch-action-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.batch-bar-fade-enter-active,
+.batch-bar-fade-leave-active {
+  transition:
+    opacity 0.25s ease,
+    transform 0.25s ease;
+}
+
+.batch-bar-fade-enter-from,
+.batch-bar-fade-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(12px);
 }
 </style>

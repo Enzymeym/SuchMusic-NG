@@ -3,6 +3,10 @@ import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { NInput, NIcon, NButton, NDivider, useDialog, NPopover, NScrollbar, useThemeVars } from 'naive-ui'
 
+const props = defineProps<{
+  collapsed?: boolean
+}>()
+
 const themeVars = useThemeVars()
 import SettingsModal from '../common/SettingsModal.vue'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -106,7 +110,6 @@ const handleSuggestionClick = (type: string, item: any) => {
       sourceSongId: item.id
     }
     playerStore.setCurrentSong(song)
-    playerStore.setPlaying(true)
     playerStore.recordPlay(song)
   } else if (type === 'local-playlist') {
     // Navigate to playlist detail? Or play?
@@ -130,7 +133,6 @@ const handleSuggestionClick = (type: string, item: any) => {
     }
     // Just play it
     playerStore.setCurrentSong(song)
-    playerStore.setPlaying(true)
   }
 }
 
@@ -163,8 +165,15 @@ onMounted(() => {
 
   window.addEventListener('open-settings', handleOpenSettings as EventListener)
 
+  const handleCloseSettings = () => {
+    showSettings.value = false
+  }
+
+  window.addEventListener('close-settings', handleCloseSettings)
+
   onBeforeUnmount(() => {
     window.removeEventListener('open-settings', handleOpenSettings as EventListener)
+    window.removeEventListener('close-settings', handleCloseSettings)
   })
 })
 
@@ -213,8 +222,28 @@ const goForward = () => {
 
 // 检查是否需要透明背景
 const isTransparent = computed(() => {
-  // 歌单详情页使用透明背景
-  return route.name === 'playlist-detail'
+  // 全尺寸歌单页和首页使用透明背景
+  return route.name === 'playlist-detail' || route.name === 'home'
+})
+
+// 背景磨砂效果：单层模糊从上到下渐进消失
+const headerGradientStyle = computed(() => {
+  if (route.name === 'playlist-detail' || route.name === 'home') return { display: 'none' }
+  return {
+    background: 'transparent',
+    backdropFilter: 'blur(40px) saturate(160%)',
+    WebkitBackdropFilter: 'blur(40px) saturate(160%)',
+    WebkitMask: 'linear-gradient(to bottom, black 0%, black 40%, transparent 100%)',
+    mask: 'linear-gradient(to bottom, black 0%, black 40%, transparent 100%)'
+  }
+})
+
+// 侧栏折叠时增加左侧内边距，避免 header 内容被折叠图标遮挡
+const headerPaddingStyle = computed(() => {
+  if (props.collapsed) {
+    return { paddingLeft: '72px' } // 52px 侧栏图标 + 20px 原有间距
+  }
+  return {}
 })
 
 </script>
@@ -224,7 +253,12 @@ const isTransparent = computed(() => {
     ref="headerRef"
     class="app-header"
     :class="{ 'is-transparent': isTransparent }"
+    :style="headerPaddingStyle"
   >
+    <div
+      class="header-gradient-bg"
+      :style="headerGradientStyle"
+    ></div>
     <div class="left-controls">
       <div style="display: flex; align-items: center; gap: 6px">
         <n-button circle strong secondary size="large" @click="goBack" class="nav-btn">
@@ -399,7 +433,20 @@ const isTransparent = computed(() => {
   z-index: 100;
 }
 
+.header-gradient-bg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: -1;
+}
+
 /* 沉浸式模式下，子元素应用毛玻璃样式 */
+.app-header.is-transparent {
+  background: transparent !important;
+}
 .app-header.is-transparent .left-controls .nav-btn,
 .app-header.is-transparent .search-bar,
 .app-header.is-transparent .right-controls .action-btn,

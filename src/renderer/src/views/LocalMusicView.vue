@@ -2,7 +2,7 @@
   <div class="local-music-view">
     <div class="header">
       <div class="title">
-        本地音乐
+        歌曲
         <span class="subtitle">
           <i class="mgc_music_2_fill"></i> {{ songs.length }} 首</span>
       </div>
@@ -117,7 +117,6 @@ import { NButton, NIcon, useMessage, NInput, NModal, NDataTable, NSpace, useDial
 import SongList from '../components/common/SongList.vue'
 import TagEditDialog from '../components/common/TagEditDialog.vue'
 import { usePlayerStore } from '../stores/playerStore'
-import defaultCover from '@renderer/assets/icon.png'
 import { usePlaylistStore } from '../stores/playlistStore'
 import { useLocalMusicStore, type LocalSong } from '../stores/localMusicStore'
 
@@ -263,9 +262,9 @@ const getSongArtist = (song: Song): string => {
   return '未知歌手'
 }
 
-// 从歌曲对象提取封面
+// 从歌曲对象提取封面（不兜底 defaultCover，避免把 UI 占位图持久化到歌单/播放状态）
 const getSongCover = (song: Song): string => {
-  return song.picUrl || song.al?.picUrl || defaultCover
+  return song.picUrl || song.al?.picUrl || ''
 }
 
 // 根据比特率和采样率映射为 LQ/HQ/SQ/Hi-Res 标签
@@ -295,13 +294,10 @@ const playSong = async (song: Song): Promise<void> => {
     sourceSongId: song.id
   }
 
-  // 移除本地播放逻辑，统一交由 PlayerBar 的 watch 监听 currentSong 变化来处理播放
-  // 这样可以避免重复触发播放
-  // 只需要设置 playlist, currentSong 和 isPlaying 状态
-  
-  // 简化处理，只将当前歌曲加入播放列表
+  // 统一交由 PlayerBar 的 watch 监听 currentSong 变化来处理实际播放
+  // isPlaying 状态由 doLoadAndPlaySong 在音频引擎成功启动后设置，
+  // 避免在播放失败（如文件不存在）时出现 UI 状态不一致
   player.setCurrentSong(songInfo)
-  player.setPlaying(true)
   player.recordPlay(songInfo)
   
   message.info(`正在播放: ${song.name}`)
@@ -400,7 +396,7 @@ const scanMusic = async (): Promise<void> => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 16px 24px 0px;
+  padding: 64px 24px 0px;
   box-sizing: border-box;
 }
 

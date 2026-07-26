@@ -1,6 +1,6 @@
 /**
  * 音频内容分析工具
- * 通过分析音频的能量特征自动确定最优交叉过渡参数
+ * 通过分析 PCM 音频数据的能量特征自动确定最优交叉过渡参数
  */
 
 /**
@@ -71,6 +71,8 @@ const MIN_TRANSITION_MS = 400
 const MAX_TRANSITION_MS = 8000
 /** 静音判定阈值 */
 const SILENCE_THRESHOLD = 0.01
+/** 智能模式兜底过渡时长（毫秒） */
+const DEFAULT_TRANSITION_MS = 3000
 
 /**
  * 计算一段音频数据的 RMS 能量（均方根）
@@ -92,27 +94,49 @@ function computeRMS(data: Float32Array, start: number, length: number): number {
 }
 
 /**
+ * 从交错 PCM 数据中提取指定声道的采样数据
+ * @param pcmData 交错格式的 PCM 数据
+ * @param channels 声道数
+ * @param channelIndex 要提取的声道索引（0-based）
+ * @returns 该声道的 Float32Array
+ */
+function extractChannel(pcmData: Float32Array, channels: number, channelIndex: number): Float32Array {
+  const frameCount = Math.floor(pcmData.length / channels)
+  const result = new Float32Array(frameCount)
+  for (let i = 0; i < frameCount; i++) {
+    result[i] = pcmData[i * channels + channelIndex]
+  }
+  return result
+}
+
+/**
  * 分析音频尾部能量特征
- * @param buffer 音频缓冲区
+ * @param pcmData 交错格式的 PCM 音频数据
+ * @param sampleRate 采样率
+ * @param channels 声道数
  * @param tailSec 分析尾部多少秒
  * @returns 尾部能量分析结果
  */
-function analyzeTail(buffer: AudioBuffer, tailSec: number): TailAnalysis {
-  const sampleRate = buffer.sampleRate
-  const totalSamples = buffer.length
-  const tailStartSample = Math.max(0, totalSamples - Math.floor(tailSec * sampleRate))
-  const tailLengthSamples = totalSamples - tailStartSample
+function analyzeTail(
+  pcmData: Float32Array,
+  sampleRate: number,
+  channels: number,
+  tailSec: number
+): TailAnalysis {
+  const totalFrames = Math.floor(pcmData.length / channels)
+  const tailStartFrame = Math.max(0, totalFrames - Math.floor(tailSec * sampleRate))
+  const tailLengthFrames = totalFrames - tailStartFrame
   const windowSamples = Math.floor(WINDOW_SIZE_SEC * sampleRate)
 
-  const channel = buffer.getChannelData(0)
+  const channel0 = extractChannel(pcmData, channels, 0)
   const segments: EnergySegment[] = []
 
   let peakRms = 0
   let sumRms = 0
   let segmentCount = 0
 
-  for (let offset = 0; offset < tailLengthSamples; offset += windowSamples) {
-    const rms = computeRMS(channel, tailStartSample + offset, windowSamples)
+  for (let offset = 0; offset < tailLengthFrames; offset += windowSamples) {
+    const rms = computeRMS(channel0, tailStartFrame + offset, windowSamples)
     const timeSec = (offset / sampleRate)
     segments.push({ timeSec, rms })
     if (rms > peakRms) peakRms = rms
@@ -126,7 +150,6 @@ function analyzeTail(buffer: AudioBuffer, tailSec: number): TailAnalysis {
   let decayStartSec = -1
   const decayThreshold = Math.max(peakRms * 0.3, SILENCE_THRESHOLD * 2)
 
-  // 从尾部末尾往回扫描，找到能量开始持续低于阈值的起点
   let inDecay = false
   for (let i = segments.length - 1; i >= 0; i--) {
     if (segments[i].rms < decayThreshold) {
@@ -135,14 +158,12 @@ function analyzeTail(buffer: AudioBuffer, tailSec: number): TailAnalysis {
       }
     } else {
       if (inDecay && i < segments.length - 2) {
-        // 找到了衰减起始位置
         decayStartSec = segments[i + 1].timeSec
         break
       }
     }
   }
 
-  // 如果一直处于低能量状态，从头就在衰减
   if (decayStartSec < 0 && inDecay && peakRms > SILENCE_THRESHOLD) {
     decayStartSec = 0
   }
@@ -166,16 +187,23 @@ function analyzeTail(buffer: AudioBuffer, tailSec: number): TailAnalysis {
 
 /**
  * 分析音频头部能量特征
- * @param buffer 音频缓冲区
+ * @param pcmData 交错格式的 PCM 音频数据
+ * @param sampleRate 采样率
+ * @param channels 声道数
  * @param headSec 分析头部多少秒
  * @returns 头部能量分析结果
  */
-function analyzeHead(buffer: AudioBuffer, headSec: number): HeadAnalysis {
-  const sampleRate = buffer.sampleRate
-  const headLengthSamples = Math.min(buffer.length, Math.floor(headSec * sampleRate))
+function analyzeHead(
+  pcmData: Float32Array,
+  sampleRate: number,
+  channels: number,
+  headSec: number
+): HeadAnalysis {
+  const totalFrames = Math.floor(pcmData.length / channels)
+  const headLengthFrames = Math.min(totalFrames, Math.floor(headSec * sampleRate))
   const windowSamples = Math.floor(WINDOW_SIZE_SEC * sampleRate)
 
-  const channel = buffer.getChannelData(0)
+  const channel0 = extractChannel(pcmData, channels, 0)
   const segments: EnergySegment[] = []
 
   let peakRms = 0
@@ -184,15 +212,14 @@ function analyzeHead(buffer: AudioBuffer, headSec: number): HeadAnalysis {
   let attackTimeSec = -1
   let foundAttack = false
 
-  for (let offset = 0; offset < headLengthSamples; offset += windowSamples) {
-    const rms = computeRMS(channel, offset, windowSamples)
+  for (let offset = 0; offset < headLengthFrames; offset += windowSamples) {
+    const rms = computeRMS(channel0, offset, windowSamples)
     const timeSec = (offset / sampleRate)
     segments.push({ timeSec, rms })
     if (rms > peakRms) peakRms = rms
     sumRms += rms
     segmentCount++
 
-    // 检测攻击时间：能量首次超过峰值 50% 的位置
     if (!foundAttack && rms >= peakRms * 0.5 && rms > SILENCE_THRESHOLD) {
       attackTimeSec = timeSec
       foundAttack = true
@@ -209,24 +236,26 @@ function analyzeHead(buffer: AudioBuffer, headSec: number): HeadAnalysis {
   return { segments, peakRms, avgRms, attackTimeSec, startsQuiet }
 }
 
-/** 智能模式兜底过渡时长（毫秒） */
-const DEFAULT_TRANSITION_MS = 3000
-
 /**
  * 根据两首歌曲的能量特征计算智能过渡参数
  * 过渡时长完全由音频内容分析决定，不依赖用户配置
- * @param currentBuffer 当前播放歌曲的音频缓冲区
- * @param nextBuffer 下一首歌曲的音频缓冲区
+ * @param currentPcm 当前播放歌曲的交错 PCM 数据
+ * @param nextPcm 下一首歌曲的交错 PCM 数据
+ * @param sampleRate 采样率（两首歌曲采样率一致）
+ * @param channels 声道数
  * @returns 智能过渡参数
  */
 export function computeSmartTransition(
-  currentBuffer: AudioBuffer,
-  nextBuffer: AudioBuffer
+  currentPcm: Float32Array,
+  nextPcm: Float32Array,
+  sampleRate: number,
+  channels: number
 ): SmartTransitionResult {
-  const tail = analyzeTail(currentBuffer, TAIL_ANALYSIS_SEC)
-  const head = analyzeHead(nextBuffer, HEAD_ANALYSIS_SEC)
+  const tail = analyzeTail(currentPcm, sampleRate, channels, TAIL_ANALYSIS_SEC)
+  const head = analyzeHead(nextPcm, sampleRate, channels, HEAD_ANALYSIS_SEC)
 
-  const totalDurationMs = currentBuffer.duration * 1000
+  const totalFrames = Math.floor(currentPcm.length / channels)
+  const totalDurationMs = (totalFrames / sampleRate) * 1000
 
   // 策略：根据尾部衰减情况和头部攻击情况综合判断
   if (tail.peakRms < SILENCE_THRESHOLD) {
@@ -249,13 +278,10 @@ export function computeSmartTransition(
     // 过渡时长基于自然衰减的剩余时间和头部攻击速度
     let transitionMs: number
     if (head.startsQuiet) {
-      // 下一首从静音开始，自然衰减本身就是好的过渡
       transitionMs = naturalFadeRemaining
     } else if (head.attackTimeSec < 0.5) {
-      // 下一首攻击很快，过渡到衰减点开始
       transitionMs = Math.min(naturalFadeRemaining * 0.7, naturalFadeRemaining)
     } else {
-      // 下一首慢慢进入，需要较长的重叠
       transitionMs = Math.min(naturalFadeRemaining, head.attackTimeSec * 1000 * 3)
     }
 
@@ -271,7 +297,6 @@ export function computeSmartTransition(
 
   // 无自然衰减，需要根据头部能量特征决定
   if (head.startsQuiet && head.attackTimeSec > 1) {
-    // 下一首缓慢进入，使用长过渡
     const transitionMs = head.attackTimeSec * 1000 * 2.5
     const startPositionMs = Math.max(0, totalDurationMs - transitionMs)
     return {
@@ -283,7 +308,6 @@ export function computeSmartTransition(
   }
 
   if (head.attackTimeSec < 0.3 && head.peakRms > 0.1) {
-    // 下一首攻击很快且能量高，用中等过渡
     const transitionMs = Math.min(DEFAULT_TRANSITION_MS * 0.6, 2000)
     const startPositionMs = Math.max(0, totalDurationMs - transitionMs)
     return {

@@ -1,159 +1,79 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch, nextTick } from 'vue'
-import { NIcon, NScrollbar, NSelect } from 'naive-ui'
-import defaultCover from '@renderer/assets/icon.png'
+import { computed, onMounted, ref, watch } from 'vue'
+import { NEmpty, NIcon, NScrollbar, NSelect, NTag, NTooltip } from 'naive-ui'
+import defaultCover from '@renderer/assets/default-cover.png'
 import { usePlayerStore } from '../stores/playerStore'
+import type { PlayerSong } from '../stores/playerStore'
 
 const playerStore = usePlayerStore()
-
-/**
- * 动画数字：用于概览卡片中的数字滚动效果
- * @param target 目标数值
- * @returns 动画中的当前显示值
- */
-const useAnimatedNumber = (initialValue: number = 0) => {
-  const displayValue = ref(initialValue)
-  let animationFrame: number | null = null
-  let startTime: number | null = null
-  let startValue = initialValue
-  let targetValue = initialValue
-
-  /**
-   * 启动数字动画
-   * @param to 目标值
-   * @param duration 动画持续时间（毫秒）
-   */
-  const animateTo = (to: number, duration: number = 800) => {
-    if (animationFrame) cancelAnimationFrame(animationFrame)
-    startValue = displayValue.value
-    targetValue = to
-    startTime = null
-
-    const step = (timestamp: number) => {
-      if (!startTime) startTime = timestamp
-      const elapsed = timestamp - startTime
-      const progress = Math.min(elapsed / duration, 1)
-      // 缓出函数
-      const eased = 1 - Math.pow(1 - progress, 3)
-      displayValue.value = Math.round(startValue + (targetValue - startValue) * eased)
-      if (progress < 1) {
-        animationFrame = requestAnimationFrame(step)
-      }
-    }
-    animationFrame = requestAnimationFrame(step)
-  }
-
-  return { displayValue, animateTo }
-}
-
-const animatedTotalMinutes = useAnimatedNumber(0)
-const animatedMonthlyMinutes = useAnimatedNumber(0)
-const animatedYearlyMinutes = useAnimatedNumber(0)
-const animatedDailyMinutes = useAnimatedNumber(0)
 
 // 初始化加载
 onMounted(() => {
   playerStore.loadHistory()
+  // 默认选中当前年份下最新有数据的月份，提升首次进入体验
+  const latest = latestAvailableMonth(now.getFullYear())
+  if (latest !== -1) {
+    selectedMonth.value = latest
+  }
 })
 
 // 月份和年份选择
 const now = new Date()
 const monthNames = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '十一', '十二']
 const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1]
+const allMonths = Array.from({ length: 12 }, (_, i) => i)
 
 const selectedMonth = ref(now.getMonth())
 const selectedYear = ref(now.getFullYear())
 
-// 计算有数据的月份
-const availableMonths = computed(() => {
+// 计算某一年有数据的月份
+const getAvailableMonths = (year: number) => {
   const months = new Set<number>()
   playerStore.playHistory.forEach((record) => {
     const d = new Date(record.timestamp)
-    if (d.getFullYear() === selectedYear.value) {
+    if (d.getFullYear() === year) {
       months.add(d.getMonth())
     }
   })
   return Array.from(months).sort((a, b) => a - b)
+}
+
+const availableMonths = computed(() => getAvailableMonths(selectedYear.value))
+
+const latestAvailableMonth = (year: number) => {
+  const months = getAvailableMonths(year)
+  return months.length > 0 ? months[months.length - 1] : -1
+}
+
+// 切换年份时，若当前月份无数据则自动跳转到最新有数据的月份
+watch(selectedYear, (year) => {
+  const months = getAvailableMonths(year)
+  if (months.length > 0 && !months.includes(selectedMonth.value)) {
+    selectedMonth.value = months[months.length - 1]
+  }
 })
 
 const currentMonth = computed(() => monthNames[selectedMonth.value] + '月')
 const currentYear = computed(() => selectedYear.value + '年')
 
-// 计算总播放时长（分钟）
-const totalMinutes = computed(() => {
-  const filteredHistory = playerStore.playHistory.filter((record) => {
+// 共享的按月+年筛选结果，避免多个 computed 重复 filter
+const filteredHistory = computed(() => {
+  return playerStore.playHistory.filter((record) => {
     const d = new Date(record.timestamp)
     return d.getMonth() === selectedMonth.value && d.getFullYear() === selectedYear.value
   })
-  
-  // 假设每首歌平均播放时长为3.5分钟
-  const averageSongDuration = 3.5
-  return Math.round(filteredHistory.length * averageSongDuration)
 })
 
-// 计算月度播放时长
-const monthlyMinutes = computed(() => {
-  return totalMinutes.value
-})
-
-// 计算年度播放时长
-const yearlyMinutes = computed(() => {
-  const filteredHistory = playerStore.playHistory.filter((record) => {
-    const d = new Date(record.timestamp)
-    return d.getFullYear() === selectedYear.value
-  })
-  const averageSongDuration = 3.5
-  return Math.round(filteredHistory.length * averageSongDuration)
-})
-
-// 计算平均每日播放时长
-const averageDailyMinutes = computed(() => {
-  const daysInMonth = new Date(selectedYear.value, selectedMonth.value + 1, 0).getDate()
-  const currentDay = now.getDate()
-  const maxDay = Math.min(currentDay, daysInMonth)
-  return Math.round(monthlyMinutes.value / maxDay)
-})
-
-// 计算最活跃的时间段
-const mostActiveHour = computed(() => {
-  const filteredHistory = playerStore.playHistory.filter((record) => {
-    const d = new Date(record.timestamp)
-    return d.getFullYear() === selectedYear.value && d.getMonth() === selectedMonth.value
-  })
-  
-  if (filteredHistory.length === 0) return '无'
-  
-  const hourCounts: Record<string, number> = {}
-  filteredHistory.forEach((record) => {
-    const hour = new Date(record.timestamp).getHours()
-    const hourStr = hour.toString().padStart(2, '0') + ':00'
-    hourCounts[hourStr] = (hourCounts[hourStr] || 0) + 1
-  })
-  
-  let maxHour = ''
-  let maxCount = -1
-  
-  for (const [hour, count] of Object.entries(hourCounts)) {
-    if (count > maxCount) {
-      maxCount = count
-      maxHour = hour
-    }
-  }
-  
-  return maxHour
-})
+// 本月播放次数
+const totalPlays = computed(() => filteredHistory.value.length)
 
 // 获取排名前几的项目
 const getTopItems = (key: 'songId' | 'artist' | 'album', limit: number = 3) => {
-  const filteredHistory = playerStore.playHistory.filter((record) => {
-    const d = new Date(record.timestamp)
-    return d.getFullYear() === selectedYear.value && d.getMonth() === selectedMonth.value
-  })
-  
-  if (filteredHistory.length === 0) return []
+  const history = filteredHistory.value
+  if (history.length === 0) return []
 
   const counts: Record<string, number> = {}
-  filteredHistory.forEach((record) => {
+  history.forEach((record) => {
     const val = key === 'songId' ? String(record.songId) : record[key] || '未知'
     if (!val) return
     counts[val] = (counts[val] || 0) + 1
@@ -166,7 +86,7 @@ const getTopItems = (key: 'songId' | 'artist' | 'album', limit: number = 3) => {
 
   // 转换为完整对象
   return sorted.map(([keyVal, count]) => {
-    const record = filteredHistory.find((r) =>
+    const record = history.find((r) =>
       key === 'songId' ? String(r.songId) == keyVal : (r[key] || '未知') == keyVal
     )
     return {
@@ -181,11 +101,37 @@ const topSongs = computed(() => getTopItems('songId', 4))
 const topArtists = computed(() => getTopItems('artist', 2))
 const topAlbums = computed(() => getTopItems('album', 3))
 
-const statsBgImage = computed(() => {
-  return `url("${topSongs.value[0]?.cover || defaultCover}")`
-})
+const monthlyPlays = computed(() => totalPlays.value)
 
-const weeklyActivity = computed(() => {
+const getTopItem = (key: 'songId' | 'artist' | 'album') => {
+  const history = filteredHistory.value
+  if (history.length === 0) return null
+  const counts: Record<string, number> = {}
+  history.forEach((record) => {
+    const val = key === 'songId' ? String(record.songId) : record[key] || '未知'
+    if (!val) return
+    counts[val] = (counts[val] || 0) + 1
+  })
+  let maxVal: string | null = null
+  let maxCount = -1
+  for (const [k, v] of Object.entries(counts)) {
+    if (v > maxCount) { maxCount = v; maxVal = k }
+  }
+  if (!maxVal) return null
+  const record = history.find((r) =>
+    key === 'songId' ? String(r.songId) == maxVal : (r[key] || '未知') == maxVal
+  )
+  return { ...record, count: maxCount, displayTitle: key === 'songId' ? record?.title : maxVal }
+}
+
+const topSong = computed(() => getTopItem('songId'))
+const topArtist = computed(() => getTopItem('artist'))
+const topAlbum = computed(() => getTopItem('album'))
+
+const statsBgImage = computed(() => `url("${topSong.value?.cover || defaultCover}")`)
+
+// 本周每天的原始播放次数与归一化高度
+const weeklyPlayCounts = computed(() => {
   const days = Array(7).fill(0)
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -203,50 +149,34 @@ const weeklyActivity = computed(() => {
     }
   })
 
-  const max = Math.max(...days, 5) // At least 5 to avoid huge bars for 1 play
-  return days.map((count) => Math.round((count / max) * 100))
+  return days
 })
 
-/**
- * 监听计算值变化，触发数字动画
- */
-watch(totalMinutes, (val) => {
-  nextTick(() => animatedTotalMinutes.animateTo(val))
-}, { immediate: true })
+const weeklyActivity = computed(() => {
+  const counts = weeklyPlayCounts.value
+  const max = Math.max(...counts, 5) // At least 5 to avoid huge bars for 1 play
+  return counts.map((count) => Math.round((count / max) * 100))
+})
 
-watch(monthlyMinutes, (val) => {
-  nextTick(() => animatedMonthlyMinutes.animateTo(val))
-}, { immediate: true })
-
-watch(yearlyMinutes, (val) => {
-  nextTick(() => animatedYearlyMinutes.animateTo(val))
-}, { immediate: true })
-
-watch(averageDailyMinutes, (val) => {
-  nextTick(() => animatedDailyMinutes.animateTo(val))
-}, { immediate: true })
+const weeklyLabels = ['一', '二', '三', '四', '五', '六', '日']
 
 /**
- * 指标卡片配置：图标与颜色映射
+ * 播放选中的 TOP 歌曲
  */
-interface MetricConfig {
-  icon: string
-  color: string
-}
-const metricConfigs: Record<string, MetricConfig> = {
-  'monthly': { icon: 'mgc_time_line', color: '#ff9a9e' },
-  'yearly': { icon: 'mgc_calendar_2_line', color: '#a18cd1' },
-  'daily': { icon: 'mgc_chart_bar_line', color: '#fbc2eb' },
-  'active': { icon: 'mgc_flash_line', color: '#fda085' }
-}
-
-const metrics = computed(() => [
-  { key: 'monthly', value: animatedMonthlyMinutes.displayValue, label: '本月时长', unit: '分钟' },
-  { key: 'yearly', value: animatedYearlyMinutes.displayValue, label: '本年时长', unit: '分钟' },
-  { key: 'daily', value: animatedDailyMinutes.displayValue, label: '日均时长', unit: '分钟' },
-  { key: 'active', value: mostActiveHour.value, label: '最活跃时段', unit: '' }
-])
-</script>
+const handlePlaySong = (item: ReturnType<typeof getTopItems>[number]) => {
+  if (!item.songId) return
+  const song: PlayerSong = {
+    id: item.songId,
+    title: item.title || '未知歌曲',
+    artist: item.artist || '未知艺人',
+    album: item.album,
+    cover: item.cover || defaultCover,
+    durationMs: 0,
+    filePath: item.filePath,
+    source: item.source
+  }
+  playerStore.setCurrentSong(song)
+}</script>
 
 <template>
   <div style="height: 100%">
@@ -259,10 +189,13 @@ const metrics = computed(() => [
               <h1 class="page-title">音乐回忆</h1>
               <div class="month-selector">
                 <div
-                  v-for="index in availableMonths"
+                  v-for="index in allMonths"
                   :key="index"
                   class="month-tab"
-                  :class="{ active: selectedMonth === index }"
+                  :class="{
+                    active: selectedMonth === index,
+                    'has-data': availableMonths.includes(index)
+                  }"
                   @click="selectedMonth = index"
                 >
                   <span class="month-tab-text">{{ monthNames[index] }}月</span>
@@ -273,7 +206,7 @@ const metrics = computed(() => [
             <div class="header-right">
               <n-select
                 v-model:value="selectedYear"
-                :options="years.map(year => ({ label: year + '年', value: year }))"
+                :options="years.map((year) => ({ label: year + '年', value: year }))"
                 :bordered="false"
                 class="year-select"
               />
@@ -284,65 +217,79 @@ const metrics = computed(() => [
         <!-- 概览卡片 -->
         <div class="overview-section">
           <div class="stats-card">
-            <!-- 卡片背景遮罩 -->
-            <div class="card-bg-overlay"></div>
-            <div class="card-bg-gradient"></div>
-
-            <!-- 左侧：日期和总播放时长 -->
+            <!-- 左侧：日期 + 本月播放 -->
             <div class="stats-left">
               <div class="date-group">
                 <div class="month">{{ currentMonth }}</div>
                 <div class="year">{{ currentYear }}</div>
               </div>
               <div class="play-total-group">
-                <div class="total-desc">总聆听时长</div>
-                <div class="total-count">
-                  <span class="total-number">{{ animatedTotalMinutes.displayValue }}</span>
-                  <span class="total-unit">分钟</span>
-                </div>
+                <div class="total-count">{{ monthlyPlays }}</div>
+                <div class="total-label">本月播放</div>
+              </div>
+              <div class="play-btn-circle">
+                <n-icon size="24" color="white"><i class="mgc_play_fill"></i></n-icon>
               </div>
             </div>
-
-            <!-- 中间：关键指标带图标 -->
+            <!-- 中间：精彩回顾 -->
             <div class="stats-middle">
-              <div class="metrics-grid">
-                <div
-                  v-for="metric in metrics"
-                  :key="metric.key"
-                  class="metric-item"
-                  :style="{ '--metric-color': metricConfigs[metric.key]?.color || '#fff' }"
-                >
-                  <div class="metric-icon">
-                    <n-icon size="18">
-                      <i :class="metricConfigs[metric.key]?.icon || 'mgc_chart_line'"></i>
-                    </n-icon>
+              <div class="column-header">精彩回顾</div>
+              <div v-if="topSong" class="highlight-item big">
+                <img :src="topSong.cover || defaultCover" class="highlight-img" loading="lazy" />
+                <div class="highlight-info">
+                  <div class="song-name">{{ topSong.displayTitle }}</div>
+                  <div class="artist-name">{{ topSong.artist }}</div>
+                </div>
+                <div class="play-times">{{ topSong.count }}<span class="unit">次</span></div>
+              </div>
+              <div v-else class="highlight-item big" style="justify-content: center; color: #999">暂无播放记录</div>
+              <div class="highlight-row">
+                <div v-if="topArtist" class="highlight-item small">
+                  <img :src="topArtist.cover || defaultCover" class="highlight-img-small" loading="lazy" />
+                  <div class="highlight-info">
+                    <div class="tag">最爱艺人</div>
+                    <div class="name">{{ topArtist.displayTitle }}</div>
                   </div>
-                  <div class="metric-content">
-                    <div class="metric-value">
-                      {{ metric.value }}<span v-if="metric.unit" class="metric-unit">{{ metric.unit }}</span>
-                    </div>
-                    <div class="metric-label">{{ metric.label }}</div>
+                </div>
+                <div v-else class="highlight-item small">
+                  <div class="highlight-info">
+                    <div class="tag">最爱艺人</div>
+                    <div class="name">暂无</div>
+                  </div>
+                </div>
+                <div v-if="topAlbum" class="highlight-item small">
+                  <img :src="topAlbum.cover || defaultCover" class="highlight-img-small" loading="lazy" />
+                  <div class="highlight-info">
+                    <div class="tag">最爱专辑</div>
+                    <div class="name">{{ topAlbum.displayTitle }}</div>
+                  </div>
+                </div>
+                <div v-else class="highlight-item small">
+                  <div class="highlight-info">
+                    <div class="tag">最爱专辑</div>
+                    <div class="name">暂无</div>
                   </div>
                 </div>
               </div>
             </div>
-
             <!-- 右侧：周活跃度 -->
             <div class="stats-right">
               <div class="column-header">活跃动态（周）</div>
               <div class="activity-chart">
-                <div class="chart-bar-wrapper" v-for="(value, i) in weeklyActivity" :key="i">
-                  <div
-                    class="chart-bar"
-                    :style="{
-                      height: value + '%',
-                      '--bar-height': value + '%'
-                    }"
-                  ></div>
-                  <div class="chart-label">
-                    {{ ['一', '二', '三', '四', '五', '六', '日'][i] }}
-                  </div>
-                </div>
+                <n-tooltip
+                  v-for="(value, i) in weeklyActivity"
+                  :key="i"
+                  trigger="hover"
+                  :disabled="weeklyPlayCounts[i] === 0"
+                >
+                  <template #trigger>
+                    <div class="chart-bar-wrapper">
+                      <div class="chart-bar" :style="{ height: value + '%' }"></div>
+                      <div class="chart-label">{{ weeklyLabels[i] }}</div>
+                    </div>
+                  </template>
+                  周{{ weeklyLabels[i] }}：{{ weeklyPlayCounts[i] }} 次播放
+                </n-tooltip>
               </div>
             </div>
           </div>
@@ -361,24 +308,35 @@ const metrics = computed(() => [
                 v-for="(artist, index) in topArtists"
                 :key="index"
                 class="artist-card"
-                :style="{ animationDelay: (index * 0.1) + 's' }"
+                :style="{ animationDelay: index * 0.1 + 's' }"
               >
-                <div class="artist-rank" :class="'rank-' + (index + 1)">{{ index + 1 }}</div>
+                <n-tag
+                  :type="index === 0 ? 'warning' : index === 1 ? 'info' : 'default'"
+                  :bordered="false"
+                  size="small"
+                  round
+                  class="artist-rank"
+                  >{{ index + 1 }}</n-tag
+                >
                 <div class="artist-img-wrapper">
-                  <img :src="artist.cover || defaultCover" class="artist-img" />
+                  <img
+                    :src="artist.cover || defaultCover"
+                    class="artist-img"
+                    loading="lazy"
+                    decoding="async"
+                  />
                   <div class="artist-img-ring"></div>
                 </div>
-                <div class="artist-name">{{ artist.displayTitle }}</div>
+                <div class="artist-name" :title="artist.displayTitle">
+                  {{ artist.displayTitle }}
+                </div>
                 <div class="artist-meta">
                   <n-icon size="14"><i class="mgc_time_line"></i></n-icon>
                   <span>{{ Math.round(artist.count * 3.5) }} 分钟</span>
                 </div>
               </div>
             </div>
-            <div class="empty-state" v-else>
-              <n-icon size="48" color="var(--n-text-color-3)"><i class="mgc_user_3_line"></i></n-icon>
-              <span>暂无播放记录</span>
-            </div>
+            <n-empty v-else description="暂无播放记录" class="empty-state" />
           </div>
 
           <!-- 最爱歌曲 -->
@@ -392,31 +350,37 @@ const metrics = computed(() => [
                 v-for="(song, index) in topSongs"
                 :key="index"
                 class="song-item"
-                :style="{ animationDelay: (index * 0.08) + 's' }"
+                :style="{ animationDelay: index * 0.08 + 's' }"
+                @click="handlePlaySong(song)"
               >
                 <div class="song-rank" :class="{ 'rank-highlight': index < 3 }">
-                  <template v-if="index === 0">
-                    <span class="rank-medal rank-gold">1</span>
-                  </template>
-                  <template v-else-if="index === 1">
-                    <span class="rank-medal rank-silver">2</span>
-                  </template>
-                  <template v-else-if="index === 2">
-                    <span class="rank-medal rank-bronze">3</span>
+                  <template v-if="index < 3">
+                    <n-tag
+                      :type="index === 0 ? 'warning' : index === 1 ? 'info' : 'error'"
+                      :bordered="false"
+                      size="tiny"
+                      class="rank-medal"
+                      >{{ index + 1 }}</n-tag
+                    >
                   </template>
                   <template v-else>
                     {{ index + 1 }}
                   </template>
                 </div>
                 <div class="song-cover-wrapper">
-                  <img :src="song.cover || defaultCover" class="song-img" />
+                  <img
+                    :src="song.cover || defaultCover"
+                    class="song-img"
+                    loading="lazy"
+                    decoding="async"
+                  />
                   <div class="song-play-overlay">
                     <n-icon size="18" color="white"><i class="mgc_play_fill"></i></n-icon>
                   </div>
                 </div>
                 <div class="song-info">
-                  <div class="song-name">{{ song.displayTitle }}</div>
-                  <div class="song-artist">{{ song.artist }}</div>
+                  <div class="song-name" :title="song.displayTitle">{{ song.displayTitle }}</div>
+                  <div class="song-artist" :title="song.artist">{{ song.artist }}</div>
                 </div>
                 <div class="song-stats">
                   <span class="song-plays-count">{{ song.count }}</span>
@@ -424,10 +388,7 @@ const metrics = computed(() => [
                 </div>
               </div>
             </div>
-            <div class="empty-state" v-else>
-              <n-icon size="48" color="var(--n-text-color-3)"><i class="mgc_music_2_line"></i></n-icon>
-              <span>暂无播放记录</span>
-            </div>
+            <n-empty v-else description="暂无播放记录" class="empty-state" />
           </div>
 
           <!-- 最爱专辑 -->
@@ -441,22 +402,29 @@ const metrics = computed(() => [
                 v-for="(album, index) in topAlbums"
                 :key="index"
                 class="album-card"
-                :style="{ animationDelay: (index * 0.12) + 's' }"
+                :style="{ animationDelay: index * 0.12 + 's' }"
               >
                 <div class="album-img-wrapper">
-                  <img :src="album.cover || defaultCover" class="album-img" />
+                  <img
+                    :src="album.cover || defaultCover"
+                    class="album-img"
+                    loading="lazy"
+                    decoding="async"
+                  />
                   <div class="album-img-overlay">
-                    <span class="album-rank-badge">{{ index + 1 }}</span>
+                    <n-tag :bordered="false" size="tiny" class="album-rank-badge">{{
+                      index + 1
+                    }}</n-tag>
                   </div>
                 </div>
-                <div class="album-name">{{ album.displayTitle }}</div>
+                <div class="album-name" :title="album.displayTitle">{{ album.displayTitle }}</div>
+                <div v-if="album.artist" class="album-artist" :title="album.artist">
+                  {{ album.artist }}
+                </div>
                 <div class="album-plays">{{ album.count }} 次</div>
               </div>
             </div>
-            <div class="empty-state" v-else>
-              <n-icon size="48" color="var(--n-text-color-3)"><i class="mgc_album_line"></i></n-icon>
-              <span>暂无播放记录</span>
-            </div>
+            <n-empty v-else description="暂无播放记录" class="empty-state" />
           </div>
         </div>
       </div>
@@ -491,19 +459,23 @@ const metrics = computed(() => [
 }
 
 @keyframes shimmer {
-  0% { background-position: -200% center; }
-  100% { background-position: 200% center; }
+  0% {
+    background-position: -200% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
 }
 
 @keyframes pulse-ring {
-  0% { transform: scale(1); opacity: 0.6; }
-  100% { transform: scale(1.15); opacity: 0; }
-}
-
-@keyframes gradientShift {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
+  0% {
+    transform: scale(1);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(1.15);
+    opacity: 0;
+  }
 }
 
 .statistics-view {
@@ -514,7 +486,7 @@ const metrics = computed(() => [
    头部样式
    ============================================ */
 .header-section {
-  margin: 8px 0 20px 0;
+  margin: 64px 0 20px 0;
 }
 
 .header-content {
@@ -526,6 +498,7 @@ const metrics = computed(() => [
 
 .header-left {
   flex: 1;
+  min-width: 0;
 }
 
 .page-title {
@@ -568,10 +541,12 @@ const metrics = computed(() => [
   background: var(--n-color-card);
   border: 1px solid var(--n-border-color);
   user-select: none;
+  color: var(--n-text-color-3);
 }
 
 .month-tab:hover {
   border-color: var(--n-primary-color);
+  color: var(--n-text-color);
   background: var(--n-primary-color-suppl, rgba(var(--n-primary-color-rgb), 0.08));
 }
 
@@ -581,6 +556,17 @@ const metrics = computed(() => [
   font-weight: 600;
   border-color: var(--n-primary-color);
   box-shadow: 0 2px 8px rgba(var(--n-primary-color-rgb, 0, 0, 0), 0.3);
+}
+
+.month-tab.has-data:not(.active)::after {
+  content: '';
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--n-primary-color);
 }
 
 .month-tab-dot {
@@ -596,6 +582,7 @@ const metrics = computed(() => [
   display: flex;
   align-items: center;
   padding-top: 2px;
+  flex-shrink: 0;
 }
 
 .year-select {
@@ -612,263 +599,183 @@ const metrics = computed(() => [
 .stats-card {
   position: relative;
   overflow: hidden;
-  border-radius: 20px;
-  padding: 28px;
+  border-radius: 16px;
+  padding: 24px;
   color: white;
   display: grid;
-  grid-template-columns: 1.2fr 2.2fr 1fr;
-  gap: 28px;
-  min-height: 210px;
+  backdrop-filter: blur(100px);
+  grid-template-columns: 1.5fr 2fr 1fr;
+  gap: 24px;
+  min-height: 200px;
   z-index: 1;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  box-shadow:
-    0 8px 32px rgba(102, 126, 234, 0.25),
-    0 2px 8px rgba(0, 0, 0, 0.1);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
 }
-
-/* 背景图层 */
-.card-bg-overlay {
+.stats-card::before {
+  content: '';
   position: absolute;
-  inset: 0;
-  z-index: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   background-image: v-bind(statsBgImage);
   background-size: cover;
   background-position: center;
-  filter: blur(50px) brightness(0.35);
-  transform: scale(1.3);
+  filter: blur(60px) brightness(0.7);
+  z-index: -1;
+  transform: scale(1.5);
 }
-
-.card-bg-gradient {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  background: linear-gradient(
-    135deg,
-    rgba(102, 126, 234, 0.5) 0%,
-    rgba(118, 75, 162, 0.3) 50%,
-    rgba(102, 126, 234, 0.5) 100%
-  );
-  background-size: 200% 200%;
-  animation: gradientShift 8s ease infinite;
-}
-
-/* 保证内容在背景上方 */
-.stats-left,
-.stats-middle,
-.stats-right {
-  position: relative;
-  z-index: 1;
-}
-
-/* 左侧 */
 .stats-left {
+  position: relative;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding-right: 28px;
-  border-right: 1px solid rgba(255, 255, 255, 0.15);
+  padding-right: 24px;
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
 }
-
-.date-group {
-  margin-bottom: 8px;
-}
-
 .month {
-  font-size: 38px;
-  font-weight: 800;
+  font-size: 36px;
+  font-weight: bold;
   line-height: 1;
-  letter-spacing: 1px;
 }
-
 .year {
   font-size: 16px;
-  opacity: 0.75;
-  margin-top: 6px;
-  font-weight: 500;
+  opacity: 0.8;
+  margin-top: 4px;
 }
-
-.play-total-group {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.total-desc {
-  font-size: 13px;
-  opacity: 0.7;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  font-weight: 500;
-}
-
 .total-count {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.total-number {
-  font-size: 52px;
-  font-weight: 800;
+  font-size: 36px;
+  font-weight: bold;
   line-height: 1;
-  font-variant-numeric: tabular-nums;
-  background: linear-gradient(to right, #fff, rgba(255, 255, 255, 0.85));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
 }
-
-.total-unit {
-  font-size: 14px;
-  opacity: 0.6;
-  font-weight: 500;
+.total-label {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-top: 4px;
 }
-
-/* 中间指标卡片 */
+.play-btn-circle {
+  position: absolute;
+  right: 24px;
+  bottom: 6px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background-color: rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+.play-btn-circle:hover {
+  background-color: rgba(255, 255, 255, 0.2);
+}
 .stats-middle {
+  max-width: 600px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  gap: 12px;
 }
-
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 14px;
+.column-header {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-bottom: 4px;
 }
-
-.metric-item {
+.highlight-item {
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 12px;
   display: flex;
   align-items: center;
   gap: 12px;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  padding: 14px 16px;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  cursor: default;
+  cursor: pointer;
+  transition: background-color 0.2s;
 }
-
-.metric-item:hover {
-  background: rgba(255, 255, 255, 0.15);
-  transform: translateY(-3px);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
-  border-color: rgba(255, 255, 255, 0.15);
+.highlight-item:hover {
+  background-color: rgba(255, 255, 255, 0.2);
 }
-
-.metric-icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 10px;
-  background: var(--metric-color, rgba(255, 255, 255, 0.15));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: transform 0.3s;
+.highlight-item.big {
+  padding: 16px;
 }
-
-.metric-item:hover .metric-icon {
-  transform: scale(1.1);
+.highlight-img {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  object-fit: cover;
 }
-
-.metric-content {
-  min-width: 0;
+.highlight-img-small {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  object-fit: cover;
 }
-
-.metric-value {
-  font-size: 20px;
-  font-weight: 700;
-  line-height: 1.2;
-  font-variant-numeric: tabular-nums;
+.highlight-info {
+  flex: 1;
+  overflow: hidden;
 }
-
-.metric-unit {
-  font-size: 11px;
-  font-weight: 400;
-  opacity: 0.65;
-  margin-left: 2px;
+.song-name,
+.name {
+  font-size: 14px;
+  font-weight: bold;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
-.metric-label {
-  font-size: 11px;
-  opacity: 0.6;
-  margin-top: 2px;
-  font-weight: 500;
+.song-name {
+  font-size: 16px;
 }
-
-/* 右侧活跃度 */
+.artist-name,
+.tag {
+  font-size: 12px;
+  opacity: 0.8;
+}
+.play-times {
+  text-align: right;
+  font-size: 16px;
+  font-weight: bold;
+}
+.play-times .unit {
+  font-size: 12px;
+  font-weight: normal;
+  opacity: 0.8;
+}
+.highlight-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
 .stats-right {
-  padding-left: 28px;
-  border-left: 1px solid rgba(255, 255, 255, 0.15);
+  padding-left: 24px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
   display: flex;
   flex-direction: column;
 }
-
-.column-header {
-  font-size: 12px;
-  opacity: 0.65;
-  margin-bottom: 16px;
-  font-weight: 500;
-  letter-spacing: 0.5px;
-}
-
 .activity-chart {
   flex: 1;
   display: flex;
+  padding-top: 4px;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 4px;
 }
-
 .chart-bar-wrapper {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   height: 100%;
   justify-content: flex-end;
-  cursor: pointer;
-  transition: transform 0.2s;
 }
-
-.chart-bar-wrapper:hover {
-  transform: translateY(-4px);
-}
-
 .chart-bar {
-  width: 10px;
-  min-height: 4px;
-  border-radius: 5px;
-  transition:
-    height 0.6s cubic-bezier(0.34, 1.56, 0.64, 1),
-    background 0.3s;
-  background: linear-gradient(
-    to top,
-    rgba(255, 255, 255, 0.9),
-    rgba(255, 255, 255, 0.35)
-  );
+  width: 6px;
+  background-color: rgba(255, 255, 255, 0.3);
+  border-radius: 3px;
+  transition: height 0.3s, background-color 0.3s;
 }
-
 .chart-bar-wrapper:hover .chart-bar {
-  background: linear-gradient(
-    to top,
-    #fff,
-    rgba(255, 255, 255, 0.5)
-  );
-  box-shadow: 0 0 12px rgba(255, 255, 255, 0.3);
+  background-color: white;
 }
-
 .chart-label {
   font-size: 10px;
-  color: rgba(255, 255, 255, 0.55);
-  font-weight: 500;
-  transition: color 0.2s;
-}
-
-.chart-bar-wrapper:hover .chart-label {
-  color: rgba(255, 255, 255, 0.9);
+  color: rgba(255, 255, 255, 0.6);
 }
 
 /* ============================================
@@ -916,8 +823,9 @@ const metrics = computed(() => [
    ============================================ */
 .artists-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 220px));
   gap: 20px;
+  justify-content: start;
 }
 
 .artist-card {
@@ -925,6 +833,8 @@ const metrics = computed(() => [
   display: flex;
   flex-direction: column;
   align-items: center;
+  width: 100%;
+  max-width: 220px;
   padding: 24px 18px 20px;
   background: var(--n-color-card);
   border-radius: 16px;
@@ -941,11 +851,7 @@ const metrics = computed(() => [
   position: absolute;
   inset: 0;
   border-radius: 16px;
-  background: radial-gradient(
-    circle at 50% 0%,
-    var(--n-primary-color-suppl, rgba(0, 0, 0, 0.03)) 0%,
-    transparent 70%
-  );
+  background: var(--n-primary-color-suppl, rgba(0, 0, 0, 0.03));
   opacity: 0;
   transition: opacity 0.35s;
 }
@@ -962,31 +868,12 @@ const metrics = computed(() => [
   opacity: 1;
 }
 
-/* 排名徽章 */
+/* 排名徽章（NTag） */
 .artist-rank {
   position: absolute;
   top: 12px;
   left: 12px;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 700;
   z-index: 2;
-  color: white;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
-}
-
-.rank-1 {
-  background: linear-gradient(135deg, #f6d365, #fda085);
-}
-
-.rank-2 {
-  background: linear-gradient(135deg, #a1c4fd, #c2e9fb);
-  color: #555;
 }
 
 /* 艺人头像容器 */
@@ -1068,7 +955,7 @@ const metrics = computed(() => [
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   animation: fadeInRight 0.4s ease forwards;
   opacity: 0;
-  cursor: default;
+  cursor: pointer;
 }
 
 .song-item:nth-child(odd) {
@@ -1094,33 +981,6 @@ const metrics = computed(() => [
   font-weight: 600;
   color: var(--n-text-color-3);
   font-variant-numeric: tabular-nums;
-}
-
-.rank-medal {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 700;
-  color: #fff;
-}
-
-.rank-gold {
-  background: linear-gradient(135deg, #f6d365, #fda085);
-  box-shadow: 0 2px 6px rgba(246, 211, 101, 0.3);
-}
-
-.rank-silver {
-  background: linear-gradient(135deg, #a8c0ff, #c2e9fb);
-  box-shadow: 0 2px 6px rgba(168, 192, 255, 0.3);
-}
-
-.rank-bronze {
-  background: linear-gradient(135deg, #f5af19, #f12711);
-  box-shadow: 0 2px 6px rgba(245, 175, 25, 0.3);
 }
 
 /* 歌曲封面容器 */
@@ -1206,8 +1066,9 @@ const metrics = computed(() => [
    ============================================ */
 .albums-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 180px));
   gap: 20px;
+  justify-content: start;
 }
 
 .album-card {
@@ -1215,6 +1076,8 @@ const metrics = computed(() => [
   display: flex;
   flex-direction: column;
   align-items: center;
+  width: 100%;
+  max-width: 180px;
   padding: 16px 12px 14px;
   background: var(--n-color-card);
   border-radius: 14px;
@@ -1258,11 +1121,7 @@ const metrics = computed(() => [
 .album-img-overlay {
   position: absolute;
   inset: 0;
-  background: linear-gradient(
-    to top,
-    rgba(0, 0, 0, 0.5) 0%,
-    transparent 40%
-  );
+  background: rgba(0, 0, 0, 0.5);
   display: flex;
   align-items: flex-end;
   justify-content: flex-start;
@@ -1270,17 +1129,7 @@ const metrics = computed(() => [
 }
 
 .album-rank-badge {
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.2);
   backdrop-filter: blur(4px);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 700;
 }
 
 .album-name {
@@ -1292,7 +1141,18 @@ const metrics = computed(() => [
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 120px;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
+}
+
+.album-artist {
+  font-size: 11px;
+  color: var(--n-text-color-2);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+  margin-bottom: 2px;
 }
 
 .album-plays {
@@ -1304,17 +1164,10 @@ const metrics = computed(() => [
    空状态
    ============================================ */
 .empty-state {
-  padding: 56px 24px;
   background: var(--n-color-card);
   border-radius: 14px;
   border: 1px dashed var(--n-border-color);
-  text-align: center;
-  color: var(--n-text-color-3);
-  font-size: 14px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
+  padding: 16px;
   animation: fadeInUp 0.4s ease forwards;
 }
 
@@ -1350,15 +1203,6 @@ const metrics = computed(() => [
     padding-bottom: 18px;
   }
 
-  .metrics-grid {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
-  }
-
-  .total-number {
-    font-size: 40px;
-  }
-
   .month-selector {
     width: 100%;
   }
@@ -1369,11 +1213,11 @@ const metrics = computed(() => [
   }
 
   .artists-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .albums-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .song-item {
@@ -1397,23 +1241,11 @@ const metrics = computed(() => [
   }
 
   .albums-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
-  .total-number {
-    font-size: 34px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .month {
     font-size: 28px;
-  }
-
-  .metrics-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .metric-item {
-    padding: 12px;
   }
 }
 </style>
