@@ -21,7 +21,7 @@ export default defineConfig(() => {
       },
       plugins: [vue(), wasm(), topLevelAwait()],
       worker: {
-        format: 'es'
+        format: 'es' as const
       },
       build: {
         cssCodeSplit: false,
