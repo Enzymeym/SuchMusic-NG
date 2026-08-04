@@ -22,6 +22,12 @@ if (-not $cargo) {
     exit 0
 }
 
+# Check if native directory exists (it may be gitignored and excluded from CI checkout)
+if (-not (Test-Path $RustDir)) {
+    Write-Host "[native-build] Native directory not found, skipping build" -ForegroundColor Yellow
+    exit 0
+}
+
 Write-Host "[native-build] Building Rust audio engine ($Profile)..." -ForegroundColor Cyan
 
 Push-Location $RustDir
