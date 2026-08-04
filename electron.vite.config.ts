@@ -20,6 +20,9 @@ export default defineConfig(() => {
         }
       },
       plugins: [vue(), wasm(), topLevelAwait()],
+      worker: {
+        format: 'es'
+      },
       build: {
         cssCodeSplit: false,
         chunkSizeWarningLimit: 500,
