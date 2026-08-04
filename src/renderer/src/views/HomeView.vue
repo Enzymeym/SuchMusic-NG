@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { NScrollbar, NGrid, NGridItem, NSlider } from 'naive-ui'
+import { computed, onMounted, onUnmounted, onActivated, onDeactivated, ref } from 'vue'
+import { NScrollbar, NGrid, NGridItem } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import defaultCover from '@renderer/assets/default-cover.png'
 import { usePlayerStore } from '../stores/playerStore'
 import { useLocalMusicStore } from '../stores/localMusicStore'
 import { usePlaylistTheme } from '../composables/usePlaylistTheme'
+import { albumCache } from '../stores/albumCache'
 import { throttle } from '../utils/performance'
 
 const playerStore = usePlayerStore()
@@ -35,6 +36,14 @@ onMounted(() => {
   startProgressTimer()
 })
 
+onDeactivated(() => {
+  stopProgressTimer()
+})
+
+onActivated(() => {
+  startProgressTimer()
+})
+
 onUnmounted(() => {
   window.removeEventListener('resize', updateDisplayLimit)
   stopProgressTimer()
@@ -54,13 +63,7 @@ const updateDisplayLimit = () => {
 
 const nowPlayingCover = computed(() => playerStore.currentSong?.cover || defaultCover)
 
-const { accentColor, textColor } = usePlaylistTheme(() => nowPlayingCover.value)
-
-const currentProgress = computed(() => {
-  const song = playerStore.currentSong
-  if (!song || song.durationMs <= 0) return 0
-  return Math.min((currentTimeDisplay.value / song.durationMs) * 100, 100)
-})
+const { accentColor: _accentColor, textColor } = usePlaylistTheme(() => nowPlayingCover.value)
 
 const formatTime = (seconds: number): string => {
   if (!isFinite(seconds)) return '0:00'
@@ -81,11 +84,12 @@ const recommendedSongs = computed(() => {
   for (const record of history) {
     if (seenIds.has(record.songId)) continue
     seenIds.add(record.songId)
+    const localSong = localSongs.find(s => s.id === record.songId)
     songs.push({
       id: record.songId,
       title: record.title,
       artist: record.artist,
-      cover: record.cover || defaultCover
+      cover: record.cover || localSong?.picUrl || localSong?.al?.picUrl || defaultCover
     })
     if (songs.length >= 12) break
   }
@@ -143,6 +147,10 @@ const playSong = (songId: string | number) => {
 }
 
 const navigateToAlbum = (albumName: string) => {
+  const album = localMusicStore.albumList.find(a => a.name === albumName)
+  if (album) {
+    albumCache.set(album.name, album)
+  }
   router.push({ name: 'album-detail', params: { name: albumName } })
 }
 
