@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, computed } from 'vue'
+import { ref, watch, nextTick, computed, defineAsyncComponent } from 'vue'
 import { useRouter } from 'vue-router'
 import { usePlayerStore } from '../../stores/playerStore'
 import { useLocalMusicStore } from '../../stores/localMusicStore'
@@ -16,7 +16,8 @@ import {
   NPopover
 } from 'naive-ui'
 import LyricPlayer from '../common/PlayerLyrics/LyricPlayer.vue'
-import BackgroundRender from '../common/AMLL/BackgroundRender.vue'
+import ShinyText from '../common/ShinyText.vue'
+const BackgroundRender = defineAsyncComponent(() => import('../common/AMLL/BackgroundRender.vue'))
 import AudioVisualizer from '../common/AudioVisualizer.vue'
 import AudioVisualizerControls from '../common/AudioVisualizerControls.vue'
 
@@ -36,6 +37,8 @@ const router = useRouter()
 const {
   isControlsVisible,
   isFullscreen,
+  // @ts-ignore: template ref
+  playerPageRef,
   toggleFullscreen,
   togglePlay,
   handlePrev,
@@ -93,6 +96,11 @@ const {
 const emit = defineEmits<{
   (e: 'open-playlist'): void
 }>()
+
+/**
+ * 交叉淡入淡出仅在智能过渡过程中使用，其他切歌场景使用默认缩放淡化
+ */
+const useCrossfadeTransition = computed(() => player.isTransitioning)
 
 /**
  * 歌词模式状态：隐藏封面，歌曲信息移到歌词顶部居中，歌词居中显示
@@ -376,13 +384,17 @@ watch(
           </div>
 
           <!-- Main Area (Split View) -->
-          <Transition name="song-switch" mode="out-in">
-            <div
-              :key="player.currentSong?.id || 'empty'"
-              class="main-area"
-              :class="{ 'lyrics-mode': isLyricsMode, 'no-lyrics': !hasLyrics }"
-              @scroll="handleMainScroll"
+          <div class="main-area-wrapper">
+            <Transition
+              :name="useCrossfadeTransition ? 'song-crossfade' : 'song-switch'"
+              :mode="useCrossfadeTransition ? undefined : 'out-in'"
             >
+              <div
+                :key="player.currentSong?.id || 'empty'"
+                class="main-area"
+                :class="{ 'lyrics-mode': isLyricsMode, 'no-lyrics': !hasLyrics }"
+                @scroll="handleMainScroll"
+              >
               <!-- Left Panel: Cover & Info (隐藏于歌词模式下) -->
               <div v-if="!isLyricsMode" class="left-panel" :style="{ flex: leftPanelFlex }">
                 <div class="cover-wrapper">
@@ -391,6 +403,21 @@ watch(
                     class="main-cover"
                     :class="{ 'is-playing': player.isPlaying }"
                   />
+                  <!-- 智能过渡提示：嵌在封面左下角，带渐变黑色遮罩 -->
+                  <Transition name="cover-overlay">
+                    <div v-if="player.isTransitioning" class="cover-transition-overlay">
+                      <ShinyText
+                        text="正在智能过渡"
+                        :speed="2.5"
+                        color="rgba(255, 255, 255, 0.6)"
+                        shine-color="#ffffff"
+                      >
+                        <template #prefix>
+                          <i class="mgc_ease_in_out_control_point_line"></i>
+                        </template>
+                      </ShinyText>
+                    </div>
+                  </Transition>
                 </div>
 
                 <div class="info-wrapper">
@@ -464,6 +491,7 @@ watch(
               </div>
             </div>
           </Transition>
+          </div>
 
           <!-- Mobile Swipe Indicator（歌词模式或无歌词时隐藏） -->
           <div v-if="!isLyricsMode && hasLyrics" class="mobile-indicator">

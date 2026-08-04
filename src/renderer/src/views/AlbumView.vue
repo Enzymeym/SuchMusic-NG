@@ -111,6 +111,7 @@ watch(albums, (list) => {
 <style scoped>
 .album-view {
   min-height: 100%;
+  padding-top: 56px;
 }
 
 /* Header */

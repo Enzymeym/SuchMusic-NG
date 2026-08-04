@@ -7,6 +7,8 @@ import { monitorEvent } from './monitorEvent'
 import { createWindow } from './windows/mainWindow'
 import { getMainWindow } from './windows/mainWindow'
 import { registerAudioHandlers } from './ipc/audio'
+import { registerAnalyzerHandlers } from './ipc/analyzer'
+import { registerVolumeBalanceHandlers } from './ipc/volumeBalance'
 import { registerLocalMusicHandlers } from './ipc/localMusic'
 import { registerSystemHandlers } from './ipc/system'
 import { registerDesktopLyricHandlers } from './ipc/desktopLyric'
@@ -35,6 +37,15 @@ if (process.platform === 'win32') {
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
+
+// 启用 WebNN（Web Machine Learning）实验特性
+// 用于在支持的环境中通过 NPU/GPU 加速音频特征推理；不支持的平台会自动降级为 CPU，不影响正常使用
+app.commandLine.appendSwitch('enable-features', 'WebMachineLearningNeuralNetwork')
+
+// 强制启用 WebNN 的 DirectML NPU 后端（Chromium 默认对部分 NPU 设备启用了硬件黑名单）
+// --disable_webnn_for_npu=0 是微软官方文档提供的关闭该黑名单的方式（Edge/Chromium 通用）。
+// 注意：若本机 NPU 驱动不稳定，DirectML 可能异常；届时移除本行即可恢复默认行为。
+app.commandLine.appendSwitch('disable-webnn-for-npu', '0')
 
 // 设置应用名称，解决 SMTC（系统媒体传输控制）中显示未知应用或 electron 的问题
 app.name = 'Such Music'
@@ -140,6 +151,8 @@ app.whenReady().then(() => {
 
   // Register IPC handlers
   registerAudioHandlers()
+  registerAnalyzerHandlers()
+  registerVolumeBalanceHandlers()
   registerLocalMusicHandlers()
   registerSystemHandlers()
   registerDesktopLyricHandlers()

@@ -7,15 +7,19 @@ import {
   NButton,
   NPopover,
   NDropdown,
+  NTag,
   useThemeVars,
   NDrawer,
   NDrawerContent,
   NEmpty,
   useMessage,
-  NBadge
+  NBadge,
+  NCheckbox,
+  useDialog
 } from 'naive-ui'
 import { usePlayerStore, type PlayerSong } from '../../stores/playerStore'
 import { usePlaylistStore } from '../../stores/playlistStore'
+import { useVolumeBalanceStore } from '../../stores/volumeBalanceStore'
 import defaultCover from '@renderer/assets/default-cover.png'
 import { audioEngine } from '../../audio/audio-engine'
 import PlayerPage from './PlayerPage.vue'
@@ -24,10 +28,13 @@ import { useDesktopLyric } from '../../composables/useDesktopLyric'
 import { useTaskbarLyric } from '../../composables/useTaskbarLyric'
 import { AudioPlayerManager } from '../../utils/audioPlayerManager'
 import SoundEffectsModal from '../common/SoundEffectsModal.vue'
+import ShinyText from '../common/ShinyText.vue'
 import { useRouter } from 'vue-router'
+import { getTransitionController } from '../../audio/transition-controller'
 
 const themeVars = useThemeVars()
 const message = useMessage()
+const dialog = useDialog()
 const router = useRouter()
 
 // 简单混合两个十六进制颜色，用于活跃列表项背景过渡
@@ -60,6 +67,17 @@ const player = usePlayerStore()
 const playlistStore = usePlaylistStore()
 // 获取全局设置 store
 const settingsStore = useSettingsStore()
+// 音量平衡（本地响度分析）store
+const volumeBalanceStore = useVolumeBalanceStore()
+
+/**
+ * 将音量平衡补偿增益应用到音频引擎（按当前歌曲的本地文件路径查表）
+ * 无 filePath（在线歌曲）或未启用/未分析时应用 0 dB
+ */
+const applyTrackGain = (song: PlayerSong | null) => {
+  const db = volumeBalanceStore.getGainDb((song as any)?.filePath)
+  audioEngine.setTrackGainDb(db)
+}
 
 const { isDesktopLyricOpen, toggleDesktopLyric } = useDesktopLyric()
 const {
@@ -71,29 +89,50 @@ const {
 // 音效调节弹窗
 const showSoundEffectsModal = ref(false)
 
+// Automix 智能过渡调度控制器（任务 4）
+const transitionController = getTransitionController()
+
 // 初始化任务栏歌词、音频引擎和 SMTC 控制
 onMounted(() => {
+  // 恢复音量平衡设置并对当前歌曲应用一次补偿增益（应用启动恢复场景）
+  volumeBalanceStore.load()
+  applyTrackGain(player.currentSong)
   initTaskbarLyric()
   // 提前初始化音频引擎，避免拖动滑块时的初始化开销
   audioEngine.ensureContext()
+  // 初始化智能过渡调度（时域帧采集 + 决策回调 + 交叉淡化完成回调）
+  transitionController.init()
 
   // 设置音频播放结束回调
   audioEngine.setOnEndedCallback(() => {
+    // 防御：过渡标志卡住但引擎并未在交叉淡化（过渡被中断但状态未清理）时，
+    // 复位过渡状态继续切歌，避免 UI 显示播放中而音频静默的卡死状态。
+    // 正常交叉淡化中 sourceA 结束走引擎内部 finalizeCrossfade，不会进此回调
+    if (player.isTransitioning && !audioEngine.isCrossfading) {
+      player.setTransitioning(false)
+    }
     player.handleSongEnd()
   })
 
   // 注册 SMTC 多媒体控制（Windows 任务栏媒体按钮 / 系统媒体键）
   registerMediaSessionHandlers()
-
-  // 启动进度轮询：每 250ms 从音频引擎读取播放位置
-  startProgressPolling()
 })
 
 // 清理音频播放结束回调和 SMTC 控制
 onBeforeUnmount(() => {
+  transitionController.dispose()
   audioEngine.removeOnEndedCallback()
   unregisterMediaSessionHandlers()
   stopProgressPolling()
+
+  if (playlistScrollTimer) {
+    clearTimeout(playlistScrollTimer)
+    playlistScrollTimer = null
+  }
+  if (playerPageShowTimer) {
+    clearTimeout(playerPageShowTimer)
+    playerPageShowTimer = null
+  }
 })
 
 // 播放锁，防止并发播放
@@ -105,12 +144,38 @@ let progressPollTimer: ReturnType<typeof setInterval> | null = null
 const startProgressPolling = () => {
   stopProgressPolling()
   progressPollTimer = setInterval(async () => {
-    if (!player.isPlaying) return
+    if (!player.isPlaying) {
+      return
+    }
     if (isDraggingProgress.value) return // 拖拽时不更新
     try {
       const pos = await audioEngine.getCurrentPosition()
+      // #region debug-point C:poll-pos
+      if (pos <= 0 || !player.isPlaying) {
+        ;(() => {
+          try {
+            fetch('http://127.0.0.1:7777/event', {
+              method: 'POST',
+              body: JSON.stringify({
+                sessionId: 'first-play-no-transition',
+                runId: 'pre',
+                hypothesisId: 'C',
+                location: 'PlayerBar.vue:poll',
+                msg: '[DEBUG] poll-pos 异常',
+                data: { pos, isPlaying: player.isPlaying },
+                ts: Date.now()
+              })
+            }).catch(() => {})
+          } catch {
+            /* 忽略 */
+          }
+        })()
+      }
+      // #endregion
       if (pos > 0) {
         player.setPosition(pos)
+        // Automix：将进度喂给过渡调度，到达触发点执行过渡
+        transitionController.onProgress(pos)
       }
     } catch {
       // 忽略轮询错误
@@ -143,6 +208,9 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
 
 // 实际加载并播放歌曲的逻辑
 const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => {
+  // 应用音量平衡补偿增益（覆盖手动播放、上一首/下一首、自动连播）
+  applyTrackGain(song)
+
   // 决定是否播放：如果是强制播放，则为 true；否则读取 store 中的 shouldAutoPlay
   // 注意：如果是 watch 触发（forcePlay=false），我们需要消费并重置 shouldAutoPlay
   let shouldPlay = forcePlay
@@ -181,6 +249,8 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
         }
         if (shouldPlay) {
           player.setPlaying(true)
+          // Automix：开启当前曲的过渡循环（远程 URL 不支持预解码，controller 内部会跳过）
+          transitionController.onSongStarted(song)
         }
         return
       } catch (e) {
@@ -191,10 +261,7 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
     }
 
     // 先检查文件是否存在
-    const exists = await window.electron.ipcRenderer.invoke(
-      'system:fs-exists',
-      filePath
-    )
+    const exists = await window.electron.ipcRenderer.invoke('system:fs-exists', filePath)
 
     if (player.currentSong?.id !== currentProcessId) return
 
@@ -236,15 +303,19 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
         }
         if (shouldPlay) {
           player.setPlaying(true)
+          // Automix：开启当前曲的过渡循环（预解码下一首 + 实时过渡点分析）
+          transitionController.onSongStarted(song)
         }
         return
       } catch (e: any) {
         console.error('[PlayerBar] Failed to play local file:', e)
         player.setPlaying(false)
         const errMsg = e?.message || String(e)
-        message.error(errMsg.includes('文件不存在')
-          ? `本地文件已不存在，无法播放 (${filePath})`
-          : `播放失败: ${errMsg}`)
+        message.error(
+          errMsg.includes('文件不存在')
+            ? `本地文件已不存在，无法播放 (${filePath})`
+            : `播放失败: ${errMsg}`
+        )
         return
       }
     } else {
@@ -265,15 +336,41 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
 watch(
   () => player.currentSong,
   async (newSong, oldSong) => {
-    if (newSong && newSong !== oldSong) {
-      await loadAndPlaySong(newSong)
+    if (!newSong || newSong === oldSong) return
+
+    // 过渡完成：音频已被 controller 的交叉淡化接管（sourceB 正在播放），
+    // 跳过重复加载，仅复位标志并开启下一曲的过渡循环
+    if (player.transitionConsumed) {
+      player.setTransitionConsumed(false)
+      // 交叉淡化完成后应用下一曲的音量平衡增益
+      applyTrackGain(newSong)
+      // 过渡流程仍在进行中（交叉淡化未完成，UI 已提前切换歌曲信息）：
+      // 不在此开启新过渡循环，等交叉淡化完成后由本 watch 再次触发
+      if (transitionController.isActive || player.isTransitioning) return
+      transitionController.onSongStarted(newSong)
+      return
     }
+
+    await loadAndPlaySong(newSong)
+  }
+)
+
+// 音量平衡开关 / 目标响度 / 增益范围变化时，对当前歌曲即时重新应用补偿增益
+watch(
+  () => [volumeBalanceStore.enabled, volumeBalanceStore.targetLufs, volumeBalanceStore.maxGainDb],
+  () => {
+    applyTrackGain(player.currentSong)
   }
 )
 
 // 播放 / 暂停切换
 const togglePlay = async () => {
   if (player.isPlaying) {
+    // 暂停时若正在过渡（交叉淡化/分析中），中断过渡流程
+    if (transitionController.isActive) {
+      transitionController.abort()
+      player.setTransitioning(false)
+    }
     await audioEngine.pause()
     player.setPlaying(false)
     // 主动更新 SMTC 播放状态
@@ -284,6 +381,11 @@ const togglePlay = async () => {
       const success = await audioEngine.play()
       if (success) {
         player.setPlaying(true)
+        // 手动/恢复播放：重新武装智能过渡（暂停或恢复状态加载时未走 onSongStarted，
+        // 不武装则 transitionController.active 恒为 false，歌曲结束直接硬切）
+        if (!transitionController.isActive) {
+          transitionController.onSongStarted(player.currentSong)
+        }
         // 主动更新 SMTC 播放状态
         updateMediaPlaybackState()
         updateMediaPositionState()
@@ -298,10 +400,16 @@ const togglePlay = async () => {
 
 // 切歌
 const handlePrev = () => {
+  // 中断过渡流程，走现有快速切换路径
+  transitionController.abort()
+  player.setTransitioning(false)
   player.playPrev()
 }
 
 const handleNext = () => {
+  // 中断过渡流程，走现有快速切换路径
+  transitionController.abort()
+  player.setTransitioning(false)
   player.playNext()
 }
 
@@ -325,8 +433,196 @@ const modeIcon = computed(() => {
 // 显示播放列表抽屉
 const showPlaylist = ref(false)
 
-// 显示音量控制
-const showVolumePopover = ref(false)
+// 批量管理模式
+const isBatchMode = ref(false)
+const selectedIds = ref<Set<string>>(new Set())
+
+const toggleBatchMode = () => {
+  if (isBatchMode.value) {
+    isBatchMode.value = false
+    selectedIds.value = new Set()
+  } else {
+    isBatchMode.value = true
+    selectedIds.value = new Set()
+  }
+}
+
+const toggleItemSelection = (songId: string | number | undefined | null) => {
+  if (!songId) return
+  const id = String(songId)
+  const newSet = new Set(selectedIds.value)
+  if (newSet.has(id)) {
+    newSet.delete(id)
+  } else {
+    newSet.add(id)
+  }
+  selectedIds.value = newSet
+}
+
+const allSelected = computed(() => {
+  return (
+    player.playlist.length > 0 &&
+    player.playlist.every((s) => s.id && selectedIds.value.has(String(s.id)))
+  )
+})
+
+const toggleSelectAll = () => {
+  if (allSelected.value) {
+    selectedIds.value = new Set()
+  } else {
+    selectedIds.value = new Set(player.playlist.filter((s) => s.id).map((s) => String(s.id)))
+  }
+}
+
+// 批量模式下拖拽排序
+const dragIndex = ref<number | null>(null)
+const dragOverIndex = ref<number | null>(null)
+
+const handleDragStart = (index: number, e: DragEvent) => {
+  if (!isBatchMode.value) return
+  dragIndex.value = index
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+const handleDragOver = (index: number, e: DragEvent) => {
+  if (!isBatchMode.value || dragIndex.value === null) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  if (dragOverIndex.value !== index) dragOverIndex.value = index
+}
+
+const handleDragLeave = (index: number, e: DragEvent) => {
+  const related = e.relatedTarget as HTMLElement | null
+  if (related && (e.currentTarget as HTMLElement).contains(related)) return
+  if (dragOverIndex.value === index) dragOverIndex.value = null
+}
+
+const handleDrop = (index: number) => {
+  if (!isBatchMode.value || dragIndex.value === null) return
+  player.reorderPlaylist(dragIndex.value, index)
+  dragOverIndex.value = null
+}
+
+const handleDragEnd = () => {
+  dragIndex.value = null
+  dragOverIndex.value = null
+}
+
+const handleBatchDelete = () => {
+  const ids = Array.from(selectedIds.value)
+  if (ids.length === 0) return
+  dialog.warning({
+    title: '确认删除',
+    content: `确定从播放列表中移除 ${ids.length} 首歌曲吗？`,
+    positiveText: '确认删除',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      player.removeMultipleFromPlaylist(ids)
+      message.success(`已移除 ${ids.length} 首歌曲`)
+      toggleBatchMode()
+    }
+  })
+}
+
+const handleBatchFavorite = () => {
+  const ids = Array.from(selectedIds.value)
+  if (ids.length === 0) return
+  let addedCount = 0
+  for (const id of ids) {
+    const song = player.playlist.find((s) => s.id && String(s.id) === id)
+    if (!song) continue
+    playlistStore.toggleFavorite({
+      id: song.id!,
+      title: song.title,
+      artist: song.artist,
+      album: song.album,
+      cover: song.cover,
+      filePath: (song as any).filePath,
+      durationMs: song.durationMs,
+      source: song.source,
+      sourceSongId: song.sourceSongId
+    })
+    addedCount++
+  }
+  message.success(`已收藏 ${addedCount} 首歌曲`)
+  toggleBatchMode()
+}
+
+const batchAddToPlaylistOptions = computed(() => {
+  return playlistStore.playlists.map((pl) => ({
+    label: pl.name,
+    key: pl.id
+  }))
+})
+
+const batchActionOptions = computed(() => [
+  {
+    label: '删除',
+    key: 'delete',
+    disabled: selectedIds.value.size === 0
+  },
+  {
+    label: '收藏',
+    key: 'favorite',
+    disabled: selectedIds.value.size === 0
+  },
+  {
+    type: 'divider' as const,
+    key: 'd1'
+  },
+  {
+    label: '添加到歌单',
+    key: 'add-to-playlist-header',
+    children: batchAddToPlaylistOptions.value
+  }
+])
+
+const handleBatchActionSelect = (key: string) => {
+  if (key === 'delete') {
+    handleBatchDelete()
+  } else if (key === 'favorite') {
+    handleBatchFavorite()
+  } else if (key !== 'add-to-playlist-header' && key !== 'd1') {
+    handleBatchAddToPlaylistSelect(key)
+  }
+}
+
+const handleBatchAddToPlaylistSelect = (playlistId: string | number) => {
+  const id = String(playlistId)
+  const target = playlistStore.playlists.find((p) => p.id === id)
+  if (!target) return
+  const ids = Array.from(selectedIds.value)
+  if (ids.length === 0) return
+
+  const newTracks = ids
+    .map((id) => player.playlist.find((s) => s.id && String(s.id) === id))
+    .filter((s): s is PlayerSong => !!s)
+    .filter((s) => !target.tracks.some((t) => t.id && String(t.id) === String(s.id)))
+    .map((s) => ({
+      id: s.id ?? '',
+      title: s.title,
+      artist: s.artist,
+      album: s.album,
+      cover: s.cover,
+      filePath: (s as any).filePath,
+      durationMs: s.durationMs,
+      source: s.source,
+      sourceSongId: s.sourceSongId
+    }))
+
+  if (newTracks.length === 0) {
+    message.info('所选歌曲均已存在该歌单中')
+    return
+  }
+
+  const updated = { ...target, tracks: [...target.tracks, ...newTracks] }
+  playlistStore.updatePlaylist(updated)
+  message.success(`已添加 ${newTracks.length} 首歌曲到「${target.name}」`)
+  toggleBatchMode()
+}
 
 // 更多菜单显示状态
 const showMoreMenu = ref(false)
@@ -334,26 +630,20 @@ const showMoreMenu = ref(false)
 /**
  * 歌词偏移预设选项
  */
-const lyricsOffsetOptions = computed(() => {
-  const offsets = [-2.0, -1.0, -0.5, 0, 0.5, 1.0, 2.0]
-  return offsets.map((offset) => ({
-    label: offset === 0 ? '0s（默认）' : (offset > 0 ? `+${offset}s` : `${offset}s`),
-    key: `lyrics-offset-${offset}`,
-    offset
-  }))
-})
+const lyricsOffsetOptions = [-2.0, -1.0, -0.5, 0, 0.5, 1.0, 2.0].map((offset) => ({
+  label: offset === 0 ? '0s（默认）' : offset > 0 ? `+${offset}s` : `${offset}s`,
+  key: `lyrics-offset-${offset}`,
+  offset
+}))
 
 /**
  * 播放速度预设选项
  */
-const playbackRateOptions = computed(() => {
-  const rates = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
-  return rates.map((rate) => ({
-    label: rate === 1.0 ? `${rate}x（正常）` : `${rate}x`,
-    key: `playback-rate-${rate}`,
-    rate
-  }))
-})
+const playbackRateOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((rate) => ({
+  label: rate === 1.0 ? `${rate}x（正常）` : `${rate}x`,
+  key: `playback-rate-${rate}`,
+  rate
+}))
 
 /**
  * 更多菜单选项
@@ -363,13 +653,13 @@ const moreMenuOptions = computed(() => [
     label: '歌词偏移',
     key: 'lyrics-offset-header',
     icon: () => null,
-    children: lyricsOffsetOptions.value
+    children: lyricsOffsetOptions
   },
   {
     label: '播放速度',
     key: 'playback-rate-header',
     icon: () => null,
-    children: playbackRateOptions.value
+    children: playbackRateOptions
   },
   {
     type: 'divider' as const,
@@ -419,16 +709,15 @@ const togglePlaylist = () => {
   showPlaylist.value = !showPlaylist.value
 }
 
-const toggleVolumePopover = () => {
-  showVolumePopover.value = !showVolumePopover.value
-}
-
 // 从播放页打开发送播放列表时使用（只负责打开，不切换）
 const openPlaylist = () => {
   showPlaylist.value = true
 }
 
 const handlePlaylistClick = (song: PlayerSong) => {
+  // 手动选择歌曲，中断过渡流程
+  transitionController.abort()
+  player.setTransitioning(false)
   player.setCurrentSong(song)
   // 触发播放逻辑 (依赖 watch)
 }
@@ -445,15 +734,32 @@ const progressPercent = computed(() => {
 })
 
 /**
+ * 中断过渡流程后再执行 seek：seek 会改变播放位置并可能打断引擎交叉淡化
+ * （触发 onended），先放弃当前过渡避免状态错乱。
+ * 注意：需在音频引擎 seek 前调用，且不能顺手清掉 isTransitioning 以外的状态。
+ */
+const abortTransitionForSeek = () => {
+  if (transitionController.isActive) {
+    transitionController.abort()
+    player.setTransitioning(false)
+  }
+}
+
+/**
  * 执行 seek 跳转
  */
 const doSeek = (percent: number) => {
   if (!player.currentSong || player.currentSong.durationMs <= 0) return
 
+  // seek 会打断引擎交叉淡化（触发 onended），先中断过渡流程避免状态错乱
+  abortTransitionForSeek()
+
   const ratio = Math.min(Math.max(percent, 0), 100) / 100
   const targetMs = player.currentSong.durationMs * ratio
   player.setPosition(targetMs)
   audioEngine.seek(targetMs)
+  // seek 中断了过渡流程：重新武装智能过渡，剩余播放时间仍能触发过渡
+  transitionController.rearmAfterSeek()
 }
 
 const handleProgressUpdate = (val: number) => {
@@ -666,7 +972,10 @@ const registerMediaSessionHandlers = () => {
   mediaSession.setActionHandler('seekbackward', (details: any) => {
     const offsetSec = details?.seekOffset ?? 10
     const targetMs = Math.max(0, player.positionMs - offsetSec * 1000)
+    abortTransitionForSeek()
     audioEngine.seek(targetMs)
+    // seek 中断了过渡流程：重新武装智能过渡
+    transitionController.rearmAfterSeek()
     updateMediaPositionState()
   })
 
@@ -674,7 +983,10 @@ const registerMediaSessionHandlers = () => {
   mediaSession.setActionHandler('seekforward', (details: any) => {
     const offsetSec = details?.seekOffset ?? 10
     const targetMs = player.positionMs + offsetSec * 1000
+    abortTransitionForSeek()
     audioEngine.seek(targetMs)
+    // seek 中断了过渡流程：重新武装智能过渡
+    transitionController.rearmAfterSeek()
     updateMediaPositionState()
   })
 
@@ -682,7 +994,10 @@ const registerMediaSessionHandlers = () => {
   mediaSession.setActionHandler('seekto', (details: any) => {
     if (typeof details?.seekTime !== 'number') return
     const targetMs = Math.max(0, details.seekTime * 1000)
+    abortTransitionForSeek()
     audioEngine.seek(targetMs)
+    // seek 中断了过渡流程：重新武装智能过渡
+    transitionController.rearmAfterSeek()
     updateMediaPositionState()
   })
 }
@@ -692,7 +1007,16 @@ const unregisterMediaSessionHandlers = () => {
   if (!supportsMediaSession) return
 
   const mediaSession = (navigator as any).mediaSession
-  const actions = ['play', 'pause', 'stop', 'previoustrack', 'nexttrack', 'seekbackward', 'seekforward', 'seekto']
+  const actions = [
+    'play',
+    'pause',
+    'stop',
+    'previoustrack',
+    'nexttrack',
+    'seekbackward',
+    'seekforward',
+    'seekto'
+  ]
   for (const action of actions) {
     mediaSession.setActionHandler(action, null)
   }
@@ -714,12 +1038,17 @@ watch(
   { immediate: true }
 )
 
-// 监听播放状态，更新 SMTC 播放状态
+// 监听播放状态，更新 SMTC 播放状态并管理进度轮询
 watch(
   () => player.isPlaying,
-  () => {
+  (isPlaying) => {
     updateMediaPlaybackState()
     updateMediaPositionState()
+    if (isPlaying) {
+      startProgressPolling()
+    } else {
+      stopProgressPolling()
+    }
   },
   { immediate: true }
 )
@@ -904,28 +1233,48 @@ const handleClear = () => {
 const scrollToCurrent = () => {
   if (!player.currentSong?.id || !playlistContainerRef.value) return
 
-  const el = playlistContainerRef.value.querySelector(`#song-${player.currentSong.id}`)
+  // id 可能是 Windows 文件路径（含 \ : 空格等），必须转义后才能用于 CSS 选择器
+  const el = playlistContainerRef.value.querySelector(
+    `#song-${CSS.escape(String(player.currentSong.id))}`
+  )
   if (el) {
     el.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }
 }
 
+let playlistScrollTimer: ReturnType<typeof setTimeout> | null = null
+
 watch(showPlaylist, (val) => {
+  if (playlistScrollTimer) {
+    clearTimeout(playlistScrollTimer)
+    playlistScrollTimer = null
+  }
   if (val) {
-    setTimeout(scrollToCurrent, 100)
+    playlistScrollTimer = setTimeout(scrollToCurrent, 100)
+  } else {
+    // 关闭抽屉时退出批量模式
+    if (isBatchMode.value) {
+      toggleBatchMode()
+    }
   }
 })
 
 import { nextTick } from 'vue'
 const drawerTarget = ref('body')
+let playerPageShowTimer: ReturnType<typeof setTimeout> | null = null
 watch(
   () => player.isPlayerPageShown,
   async (val) => {
+    if (playerPageShowTimer) {
+      clearTimeout(playerPageShowTimer)
+      playerPageShowTimer = null
+    }
     if (val) {
       await nextTick()
       // Wait an extra tick to ensure Transition has started and element is fully inserted
-      setTimeout(() => {
+      playerPageShowTimer = setTimeout(() => {
         drawerTarget.value = '#player-page-container'
+        playerPageShowTimer = null
       }, 50)
     } else {
       drawerTarget.value = 'body'
@@ -965,6 +1314,21 @@ watch(
             <n-text strong class="song-title">
               {{ player.currentSong?.title || '未选择歌曲' }}
             </n-text>
+            <n-tag
+              v-if="player.isTransitioning"
+              size="tiny"
+              type="info"
+              round
+              :bordered="false"
+              class="transition-badge"
+            >
+              <ShinyText
+                text="智能过渡中"
+                :speed="2.5"
+                color="rgba(255, 255, 255, 0.7)"
+                shine-color="#ffffff"
+              />
+            </n-tag>
             <n-button text style="display: none" @click="toggleFavorite">
               <n-icon size="18" :color="isCurrentFavorite ? '#d03050' : undefined">
                 <i :class="isCurrentFavorite ? 'mgc_heart_fill' : 'mgc_heart_line'"></i>
@@ -1026,11 +1390,7 @@ watch(
       >
         <n-icon size="22" style="margin-left: -5px"><i class="mgc_text_line"></i></n-icon>
       </n-button>
-      <n-button
-        quaternary
-        class="action-btn"
-        @click="showSoundEffectsModal = true"
-      >
+      <n-button quaternary class="action-btn" @click="showSoundEffectsModal = true">
         <n-icon size="22" style="margin-left: -5px"><i class="mgc_settings_2_line"></i></n-icon>
       </n-button>
 
@@ -1040,7 +1400,7 @@ watch(
         :show="showMoreMenu"
         :to="drawerTarget"
         @select="handleMoreMenuSelect"
-        @update:show="(val: boolean) => showMoreMenu = val"
+        @update:show="(val: boolean) => (showMoreMenu = val)"
       >
         <n-button quaternary class="action-btn">
           <n-icon size="22" style="margin-left: -5px"><i class="mgc_more_2_line"></i></n-icon>
@@ -1049,20 +1409,14 @@ watch(
 
       <div class="volume-control">
         <n-popover
-          v-model:show="showVolumePopover"
-          trigger="manual"
+          trigger="click"
           :show-arrow="false"
           overlay-class="player-bar-volume-popover"
           :placement="'top'"
           :to="drawerTarget"
         >
           <template #trigger>
-            <n-button
-              style="width: 40px; height: 40px"
-              quaternary
-              class="action-btn"
-              @click="toggleVolumePopover"
-            >
+            <n-button style="width: 40px; height: 40px" quaternary class="action-btn">
               <n-icon size="22" style="margin-left: -4px"><i class="mgc_volume_line"></i></n-icon
             ></n-button>
           </template>
@@ -1112,11 +1466,14 @@ watch(
             <div class="playlist-title">播放队列</div>
             <div class="playlist-header-right">
               <div class="playlist-count">{{ player.playlist.length }} 首歌曲</div>
+              <n-button size="tiny" quaternary @click="toggleBatchMode">
+                {{ isBatchMode ? '退出批量' : '批量管理' }}
+              </n-button>
             </div>
           </div>
         </template>
 
-        <div ref="playlistContainerRef" style="padding: 12px">
+        <div ref="playlistContainerRef" style="padding: 12px; overflow-x: hidden">
           <n-empty
             v-if="player.playlist.length === 0"
             description="暂无歌曲"
@@ -1127,12 +1484,29 @@ watch(
             v-for="(song, index) in player.playlist"
             :key="song.id || index"
             class="playlist-item"
-            :class="{ active: player.currentSong?.id === song.id }"
-            @click="handlePlaylistClick(song)"
+            :class="{
+              active: player.currentSong?.id === song.id,
+              dragging: dragIndex === index,
+              'drag-over': dragOverIndex === index
+            }"
+            @click="isBatchMode ? toggleItemSelection(song.id) : handlePlaylistClick(song)"
             :id="'song-' + song.id"
+            :draggable="isBatchMode"
+            @dragstart="handleDragStart(index, $event)"
+            @dragover="handleDragOver(index, $event)"
+            @dragleave="handleDragLeave(index, $event)"
+            @drop="handleDrop(index)"
+            @dragend="handleDragEnd"
           >
             <div class="item-index">
-              <n-icon v-if="player.currentSong?.id === song.id" :color="themeVars.primaryColor"
+              <n-checkbox
+                v-if="isBatchMode"
+                :checked="song.id ? selectedIds.has(String(song.id)) : false"
+                size="small"
+                @click.stop
+                @update:checked="toggleItemSelection(song.id)"
+              />
+              <n-icon v-else-if="player.currentSong?.id === song.id" :color="themeVars.primaryColor"
                 ><i class="mgc_music_fill"></i
               ></n-icon>
               <span v-else>{{ index + 1 }}</span>
@@ -1154,17 +1528,41 @@ watch(
               </div>
               <div class="item-artist">{{ song.artist }}</div>
             </div>
-            <div class="item-actions">
+            <div class="item-actions" v-if="!isBatchMode">
               <n-button text class="delete-btn" @click.stop="handleRemove(song)">
                 <n-icon size="18"><i class="mgc_delete_line"></i></n-icon>
               </n-button>
+            </div>
+            <div v-else class="drag-handle">
+              <n-icon size="18" :depth="3"><i class="mgc_dot_grid_line"></i></n-icon>
             </div>
           </div>
         </div>
 
         <template #footer>
-          <div class="playlist-footer">
-            <n-button class="footer-btn" quaternary @click="handleClear">
+          <!-- 批量操作栏 -->
+          <div v-if="isBatchMode" class="batch-footer">
+            <div class="batch-select-all" @click="toggleSelectAll">
+              <n-checkbox :checked="allSelected" size="small" />
+              <span style="margin-left: 6px; font-size: 13px; cursor: pointer">全选</span>
+            </div>
+            <span class="batch-count">已选 {{ selectedIds.size }} 首</span>
+            <n-dropdown
+              trigger="click"
+              :options="batchActionOptions"
+              @select="handleBatchActionSelect"
+            >
+              <n-button size="small" quaternary :disabled="selectedIds.size === 0">
+                <template #icon
+                  ><n-icon size="16"><i class="mgc_more_2_line"></i></n-icon
+                ></template>
+                批量操作
+              </n-button>
+            </n-dropdown>
+          </div>
+          <!-- 普通操作栏 -->
+          <div v-else class="playlist-footer">
+            <n-button class="footer-btn" tertiary @click="handleClear">
               <template #icon
                 ><n-icon><i class="mgc_delete_2_line"></i></n-icon
               ></template>
@@ -1318,6 +1716,10 @@ html[data-theme='dark'] .progress-wrapper :deep(.n-slider .n-slider-rail) {
   gap: 8px;
 }
 
+.transition-badge {
+  flex-shrink: 0;
+}
+
 .song-title {
   font-size: 15px;
   white-space: nowrap;
@@ -1441,6 +1843,27 @@ html[data-theme='dark'] .progress-wrapper :deep(.n-slider .n-slider-rail) {
   height: 40px;
 }
 
+.batch-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 8px;
+}
+
+.batch-select-all {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.batch-count {
+  font-size: 13px;
+  color: var(--n-text-color-3);
+  flex-shrink: 0;
+}
+
 .playlist-item {
   display: flex;
   align-items: center;
@@ -1471,6 +1894,34 @@ html[data-theme='dark'] .playlist-item:hover {
 
 html[data-theme='dark'] .playlist-item.active {
   background-color: v-bind('mixHexColor(themeVars.primaryColor, "#000000", 0.15)');
+}
+
+/* 批量模式拖拽排序 */
+.playlist-item.dragging {
+  opacity: 0.4;
+  border: 1px dashed v-bind('themeVars.primaryColor');
+}
+
+.playlist-item.drag-over {
+  border: 1px dashed v-bind('themeVars.primaryColor');
+  background-color: v-bind('mixHexColor(themeVars.primaryColor, "#ffffff", 0.1)');
+}
+
+html[data-theme='dark'] .playlist-item.drag-over {
+  background-color: v-bind('mixHexColor(themeVars.primaryColor, "#000000", 0.25)');
+}
+
+.drag-handle {
+  margin-left: 8px;
+  color: #999;
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
 }
 
 .item-index {

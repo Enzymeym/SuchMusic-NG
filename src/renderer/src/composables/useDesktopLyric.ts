@@ -49,6 +49,16 @@ export function useDesktopLyric() {
     window.electron.ipcRenderer.send('desktop-lyric:time-update', player.positionMs / 1000)
   }
 
+  // 节流：桌面歌词时间同步最多每 100ms 发送一次 IPC
+  let lastTimeUpdate = 0
+  const throttledUpdateTime = () => {
+    const now = Date.now()
+    if (now - lastTimeUpdate >= 100) {
+      lastTimeUpdate = now
+      updateTime()
+    }
+  }
+
   const updateSettings = () => {
     if (!isDesktopLyricOpen.value) return
     const config = {
@@ -70,7 +80,7 @@ export function useDesktopLyric() {
   })
 
   watch(() => player.positionMs, () => {
-    updateTime()
+    throttledUpdateTime()
   })
   
   watch(() => player.isPlaying, () => {

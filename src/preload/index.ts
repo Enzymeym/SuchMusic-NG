@@ -3,149 +3,153 @@ import { electronAPI } from '@electron-toolkit/preload'
 
 // 音频引擎配置接口
 interface AudioEngineConfig {
-  sampleRate?: number;
-  bufferSize?: number;
-  channels?: number;
-  enableEq?: boolean;
-  enableCompressor?: boolean;
-  enableLimiter?: boolean;
-  enableLoudness?: boolean;
+  sampleRate?: number
+  bufferSize?: number
+  channels?: number
+  enableEq?: boolean
+  enableCompressor?: boolean
+  enableLimiter?: boolean
+  enableLoudness?: boolean
 }
 
 // 轨道信息接口
 interface TrackInfo {
-  durationMs: number;
-  sampleRate: number;
-  channels: number;
-  format: string;
+  durationMs: number
+  sampleRate: number
+  channels: number
+  format: string
 }
 
 // EQ 频段设置接口
 interface EqBandSettings {
-  frequency: number;
-  preGain: number;
-  postGain: number;
-  preQ: number;
-  postQ: number;
-  bandType: 'lowShelf' | 'highShelf' | 'peaking' | 'notch';
+  frequency: number
+  preGain: number
+  postGain: number
+  preQ: number
+  postQ: number
+  bandType: 'lowShelf' | 'highShelf' | 'peaking' | 'notch'
 }
 
 // 压缩器参数接口
 interface CompressorParams {
-  thresholdDb: number;
-  ratio: number;
-  attackMs: number;
-  releaseMs: number;
-  kneeDb: number;
+  thresholdDb: number
+  ratio: number
+  attackMs: number
+  releaseMs: number
+  kneeDb: number
 }
 
 // 限制器参数接口
 interface LimiterParams {
-  ceilingDb: number;
-  releaseMs: number;
+  ceilingDb: number
+  releaseMs: number
 }
 
 // 等响度参数接口
 interface LoudnessParams {
-  enabled: boolean;
-  compensation: number;
-  referenceLoudness: number;
-  direction: 'low' | 'high' | 'both';
+  enabled: boolean
+  compensation: number
+  referenceLoudness: number
+  direction: 'low' | 'high' | 'both'
 }
 
 // 循环模式类型
-type LoopMode = 'none' | 'one' | 'all';
+type LoopMode = 'none' | 'one' | 'all'
 
 // 引擎状态类型
-type EngineState = 'idle' | 'loading' | 'playing' | 'paused' | 'stopped';
+type EngineState = 'idle' | 'loading' | 'playing' | 'paused' | 'stopped'
 
 // 版本信息接口
 interface VersionInfo {
-  major: number;
-  minor: number;
-  patch: number;
+  major: number
+  minor: number
+  patch: number
 }
 
 // 引擎管理器 - 管理引擎实例 ID
 class AudioEngineManager {
-  private currentEngineId: string | null = null;
+  private currentEngineId: string | null = null
 
-  async create(config?: AudioEngineConfig): Promise<{ success: boolean; engineId?: string; error?: string }> {
-    const result = await ipcRenderer.invoke('audio-engine:create', config);
+  async create(
+    config?: AudioEngineConfig
+  ): Promise<{ success: boolean; engineId?: string; error?: string }> {
+    const result = await ipcRenderer.invoke('audio-engine:create', config)
     if (result.success) {
-      this.currentEngineId = result.engineId;
-      return { success: true, engineId: result.engineId };
+      this.currentEngineId = result.engineId
+      return { success: true, engineId: result.engineId }
     }
-    return { success: false, error: result.error };
+    return { success: false, error: result.error }
   }
 
   getEngineId(): string | null {
-    return this.currentEngineId;
+    return this.currentEngineId
   }
 
   async destroy(): Promise<boolean> {
-    if (!this.currentEngineId) return false;
-    const result = await ipcRenderer.invoke('audio-engine:destroy', this.currentEngineId);
+    if (!this.currentEngineId) return false
+    const result = await ipcRenderer.invoke('audio-engine:destroy', this.currentEngineId)
     if (result.success) {
-      this.currentEngineId = null;
+      this.currentEngineId = null
     }
-    return result.success;
+    return result.success
   }
 
   private ensureEngineId(): string {
     if (!this.currentEngineId) {
-      throw new Error('音频引擎未初始化，请先调用 create()');
+      throw new Error('音频引擎未初始化，请先调用 create()')
     }
-    return this.currentEngineId;
+    return this.currentEngineId
   }
 
   // === 播放控制 ===
 
-  async load(filePath: string): Promise<{ success: boolean; trackInfo?: TrackInfo; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:load', this.ensureEngineId(), filePath);
+  async load(
+    filePath: string
+  ): Promise<{ success: boolean; trackInfo?: TrackInfo; error?: string }> {
+    return ipcRenderer.invoke('audio-engine:load', this.ensureEngineId(), filePath)
   }
 
   async play(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:play', this.ensureEngineId());
+    return ipcRenderer.invoke('audio-engine:play', this.ensureEngineId())
   }
 
   async pause(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:pause', this.ensureEngineId());
+    return ipcRenderer.invoke('audio-engine:pause', this.ensureEngineId())
   }
 
   async stop(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:stop', this.ensureEngineId());
+    return ipcRenderer.invoke('audio-engine:stop', this.ensureEngineId())
   }
 
   async seek(positionMs: number): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:seek', this.ensureEngineId(), positionMs);
+    return ipcRenderer.invoke('audio-engine:seek', this.ensureEngineId(), positionMs)
   }
 
   async seekAndPlay(positionMs: number): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:seek-and-play', this.ensureEngineId(), positionMs);
+    return ipcRenderer.invoke('audio-engine:seek-and-play', this.ensureEngineId(), positionMs)
   }
 
   async setVolume(volume: number): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-volume', this.ensureEngineId(), volume);
+    return ipcRenderer.invoke('audio-engine:set-volume', this.ensureEngineId(), volume)
   }
 
   async getVolume(): Promise<number> {
-    const result = await ipcRenderer.invoke('audio-engine:get-volume', this.ensureEngineId());
-    return result.volume ?? 1.0;
+    const result = await ipcRenderer.invoke('audio-engine:get-volume', this.ensureEngineId())
+    return result.volume ?? 1.0
   }
 
   async setLoopMode(mode: LoopMode): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-loop-mode', this.ensureEngineId(), mode);
+    return ipcRenderer.invoke('audio-engine:set-loop-mode', this.ensureEngineId(), mode)
   }
 
   async getLoopMode(): Promise<LoopMode> {
-    const result = await ipcRenderer.invoke('audio-engine:get-loop-mode', this.ensureEngineId());
-    return result.mode ?? 'none';
+    const result = await ipcRenderer.invoke('audio-engine:get-loop-mode', this.ensureEngineId())
+    return result.mode ?? 'none'
   }
 
   async getPosition(): Promise<number> {
-    const result = await ipcRenderer.invoke('audio-engine:get-position', this.ensureEngineId());
-    return result.position ?? 0;
+    const result = await ipcRenderer.invoke('audio-engine:get-position', this.ensureEngineId())
+    return result.position ?? 0
   }
 
   /**
@@ -153,116 +157,150 @@ class AudioEngineManager {
    * @returns 当前播放位置（毫秒）
    */
   async getPositionMs(): Promise<number> {
-    return this.getPosition();
+    return this.getPosition()
   }
 
   async isPlaying(): Promise<boolean> {
-    const result = await ipcRenderer.invoke('audio-engine:is-playing', this.ensureEngineId());
-    return result.isPlaying ?? false;
+    const result = await ipcRenderer.invoke('audio-engine:is-playing', this.ensureEngineId())
+    return result.isPlaying ?? false
   }
 
   async getState(): Promise<EngineState> {
-    const result = await ipcRenderer.invoke('audio-engine:get-state', this.ensureEngineId());
-    return result.state ?? 'idle';
+    const result = await ipcRenderer.invoke('audio-engine:get-state', this.ensureEngineId())
+    return result.state ?? 'idle'
   }
 
   // === EQ 控制 ===
 
   async setEqEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-eq-enabled', this.ensureEngineId(), enabled);
+    return ipcRenderer.invoke('audio-engine:set-eq-enabled', this.ensureEngineId(), enabled)
   }
 
   async isEqEnabled(): Promise<boolean> {
-    const result = await ipcRenderer.invoke('audio-engine:is-eq-enabled', this.ensureEngineId());
-    return result.enabled ?? true;
+    const result = await ipcRenderer.invoke('audio-engine:is-eq-enabled', this.ensureEngineId())
+    return result.enabled ?? true
   }
 
-  async setEqBand(bandIndex: number, settings: Partial<EqBandSettings>): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-eq-band', this.ensureEngineId(), bandIndex, settings);
+  async setEqBand(
+    bandIndex: number,
+    settings: Partial<EqBandSettings>
+  ): Promise<{ success: boolean; error?: string }> {
+    return ipcRenderer.invoke(
+      'audio-engine:set-eq-band',
+      this.ensureEngineId(),
+      bandIndex,
+      settings
+    )
   }
 
   async getEqBand(bandIndex: number): Promise<EqBandSettings | null> {
-    const result = await ipcRenderer.invoke('audio-engine:get-eq-band', this.ensureEngineId(), bandIndex);
-    return result.band ?? null;
+    const result = await ipcRenderer.invoke(
+      'audio-engine:get-eq-band',
+      this.ensureEngineId(),
+      bandIndex
+    )
+    return result.band ?? null
   }
 
   async getEqBands(): Promise<EqBandSettings[]> {
-    const result = await ipcRenderer.invoke('audio-engine:get-eq-bands', this.ensureEngineId());
-    return result.bands ?? [];
+    const result = await ipcRenderer.invoke('audio-engine:get-eq-bands', this.ensureEngineId())
+    return result.bands ?? []
   }
 
   async setEqGains(gains: number[]): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-eq-gains', this.ensureEngineId(), gains);
+    return ipcRenderer.invoke('audio-engine:set-eq-gains', this.ensureEngineId(), gains)
   }
 
   // === 压缩器控制 ===
 
   async setCompressorEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-compressor-enabled', this.ensureEngineId(), enabled);
+    return ipcRenderer.invoke('audio-engine:set-compressor-enabled', this.ensureEngineId(), enabled)
   }
 
   async isCompressorEnabled(): Promise<boolean> {
-    const result = await ipcRenderer.invoke('audio-engine:is-compressor-enabled', this.ensureEngineId());
-    return result.enabled ?? true;
+    const result = await ipcRenderer.invoke(
+      'audio-engine:is-compressor-enabled',
+      this.ensureEngineId()
+    )
+    return result.enabled ?? true
   }
 
   async setCompressor(params: CompressorParams): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-compressor', this.ensureEngineId(), params);
+    return ipcRenderer.invoke('audio-engine:set-compressor', this.ensureEngineId(), params)
   }
 
   async getCompressor(): Promise<CompressorParams> {
-    const result = await ipcRenderer.invoke('audio-engine:get-compressor', this.ensureEngineId());
-    return result.params ?? { thresholdDb: -24, ratio: 4, attackMs: 10, releaseMs: 100, kneeDb: 6 };
+    const result = await ipcRenderer.invoke('audio-engine:get-compressor', this.ensureEngineId())
+    return result.params ?? { thresholdDb: -24, ratio: 4, attackMs: 10, releaseMs: 100, kneeDb: 6 }
   }
 
   async getCompressorGainReduction(): Promise<number> {
-    const result = await ipcRenderer.invoke('audio-engine:get-compressor-gain-reduction', this.ensureEngineId());
-    return result.gainReduction ?? 0;
+    const result = await ipcRenderer.invoke(
+      'audio-engine:get-compressor-gain-reduction',
+      this.ensureEngineId()
+    )
+    return result.gainReduction ?? 0
   }
 
   // === 限制器控制 ===
 
   async setLimiterEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-limiter-enabled', this.ensureEngineId(), enabled);
+    return ipcRenderer.invoke('audio-engine:set-limiter-enabled', this.ensureEngineId(), enabled)
   }
 
   async isLimiterEnabled(): Promise<boolean> {
-    const result = await ipcRenderer.invoke('audio-engine:is-limiter-enabled', this.ensureEngineId());
-    return result.enabled ?? true;
+    const result = await ipcRenderer.invoke(
+      'audio-engine:is-limiter-enabled',
+      this.ensureEngineId()
+    )
+    return result.enabled ?? true
   }
 
   async setLimiter(params: LimiterParams): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-limiter', this.ensureEngineId(), params);
+    return ipcRenderer.invoke('audio-engine:set-limiter', this.ensureEngineId(), params)
   }
 
   async getLimiter(): Promise<LimiterParams> {
-    const result = await ipcRenderer.invoke('audio-engine:get-limiter', this.ensureEngineId());
-    return result.params ?? { ceilingDb: -0.3, releaseMs: 50 };
+    const result = await ipcRenderer.invoke('audio-engine:get-limiter', this.ensureEngineId())
+    return result.params ?? { ceilingDb: -0.3, releaseMs: 50 }
   }
 
   async getLimiterGainReduction(): Promise<number> {
-    const result = await ipcRenderer.invoke('audio-engine:get-limiter-gain-reduction', this.ensureEngineId());
-    return result.gainReduction ?? 0;
+    const result = await ipcRenderer.invoke(
+      'audio-engine:get-limiter-gain-reduction',
+      this.ensureEngineId()
+    )
+    return result.gainReduction ?? 0
   }
 
   // === 等响度控制 ===
 
   async setLoudness(params: LoudnessParams): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-loudness', this.ensureEngineId(), params);
+    return ipcRenderer.invoke('audio-engine:set-loudness', this.ensureEngineId(), params)
   }
 
   async getLoudness(): Promise<LoudnessParams> {
-    const result = await ipcRenderer.invoke('audio-engine:get-loudness', this.ensureEngineId());
-    return result.params ?? { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' };
+    const result = await ipcRenderer.invoke('audio-engine:get-loudness', this.ensureEngineId())
+    return (
+      result.params ?? {
+        enabled: false,
+        compensation: 1.0,
+        referenceLoudness: -20,
+        direction: 'both'
+      }
+    )
   }
 
   async setLoudnessEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-loudness-enabled', this.ensureEngineId(), enabled);
+    return ipcRenderer.invoke('audio-engine:set-loudness-enabled', this.ensureEngineId(), enabled)
   }
 
   async isLoudnessEnabled(): Promise<boolean> {
-    const result = await ipcRenderer.invoke('audio-engine:is-loudness-enabled', this.ensureEngineId());
-    return result.enabled ?? false;
+    const result = await ipcRenderer.invoke(
+      'audio-engine:is-loudness-enabled',
+      this.ensureEngineId()
+    )
+    return result.enabled ?? false
   }
 
   // === 生命周期 ===
@@ -273,9 +311,9 @@ class AudioEngineManager {
    * @returns 文件原始 Buffer
    */
   async readAudioFile(filePath: string): Promise<{
-    success: boolean;
-    data?: Uint8Array;
-    error?: string;
+    success: boolean
+    data?: Uint8Array
+    error?: string
   }> {
     return ipcRenderer.invoke('audio-engine:read-audio-file', filePath)
   }
@@ -286,14 +324,14 @@ class AudioEngineManager {
    * @returns PCM 数据（Uint8Array 形式的 f32 PCM）、采样率、声道数
    */
   async decodeAllProcessed(): Promise<{
-    success: boolean;
-    data?: Uint8Array;
-    sampleRate?: number;
-    channels?: number;
-    isPartial?: boolean;
-    error?: string;
+    success: boolean
+    data?: Uint8Array
+    sampleRate?: number
+    channels?: number
+    isPartial?: boolean
+    error?: string
   }> {
-    return ipcRenderer.invoke('audio-engine:decode-processed', this.ensureEngineId());
+    return ipcRenderer.invoke('audio-engine:decode-processed', this.ensureEngineId())
   }
 
   /**
@@ -302,34 +340,40 @@ class AudioEngineManager {
    * @returns PCM 数据
    */
   async decodePartial(targetSamples: number): Promise<{
-    success: boolean;
-    data?: Uint8Array;
-    sampleRate?: number;
-    channels?: number;
-    isPartial?: boolean;
-    error?: string;
+    success: boolean
+    data?: Uint8Array
+    sampleRate?: number
+    channels?: number
+    isPartial?: boolean
+    error?: string
   }> {
-    return ipcRenderer.invoke('audio-engine:decode-partial', this.ensureEngineId(), targetSamples);
+    return ipcRenderer.invoke('audio-engine:decode-partial', this.ensureEngineId(), targetSamples)
   }
 
   async reset(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:reset', this.ensureEngineId());
+    return ipcRenderer.invoke('audio-engine:reset', this.ensureEngineId())
   }
 
   static async getVersion(): Promise<VersionInfo> {
-    const result = await ipcRenderer.invoke('audio-engine:get-version');
-    return result.version ?? { major: 0, minor: 0, patch: 0 };
+    const result = await ipcRenderer.invoke('audio-engine:get-version')
+    return result.version ?? { major: 0, minor: 0, patch: 0 }
   }
 }
 
-const audioEngineManager = new AudioEngineManager();
+const audioEngineManager = new AudioEngineManager()
 
 const api = {
   rustAudio: audioEngineManager,
 
+  /** 起始点分析模型：获取 onnxruntime WASM 二进制 */
+  analyzer: {
+    getWasmBinary: () => ipcRenderer.invoke('analyzer:get-wasm-binary')
+  },
+
   audioEngine: {
     create: (config?: AudioEngineConfig) => audioEngineManager.create(config),
     destroy: () => audioEngineManager.destroy(),
+    getEngineId: () => audioEngineManager.getEngineId(),
     load: (filePath: string) => audioEngineManager.load(filePath),
     play: () => audioEngineManager.play(),
     pause: () => audioEngineManager.pause(),
@@ -346,7 +390,8 @@ const api = {
 
     setEqEnabled: (enabled: boolean) => audioEngineManager.setEqEnabled(enabled),
     isEqEnabled: () => audioEngineManager.isEqEnabled(),
-    setEqBand: (bandIndex: number, settings: Partial<EqBandSettings>) => audioEngineManager.setEqBand(bandIndex, settings),
+    setEqBand: (bandIndex: number, settings: Partial<EqBandSettings>) =>
+      audioEngineManager.setEqBand(bandIndex, settings),
     getEqBand: (bandIndex: number) => audioEngineManager.getEqBand(bandIndex),
     getEqBands: () => audioEngineManager.getEqBands(),
     setEqGains: (gains: number[]) => audioEngineManager.setEqGains(gains),
@@ -377,51 +422,61 @@ const api = {
     readAudioFile: (filePath: string) => audioEngineManager.readAudioFile(filePath),
 
     on: (channel: string, callback: (...args: any[]) => void) => {
-      const validChannels = ['audio-engine:ended', 'audio-engine:error', 'audio-engine:progress', 'audio-engine:stateChange'];
+      const validChannels = [
+        'audio-engine:ended',
+        'audio-engine:error',
+        'audio-engine:progress',
+        'audio-engine:stateChange'
+      ]
       if (validChannels.includes(channel)) {
-        ipcRenderer.on(channel, (_event, ...args) => callback(...args));
+        ipcRenderer.on(channel, (_event, ...args) => callback(...args))
       }
     },
     off: (channel: string, callback: (...args: any[]) => void) => {
-      ipcRenderer.removeListener(channel, callback);
+      ipcRenderer.removeListener(channel, callback)
     },
 
-    getGainReductions: () => Promise.resolve({
-      compressorGR: 0,
-      limiterGR: 0
-    }),
+    getGainReductions: () =>
+      Promise.resolve({
+        compressorGR: 0,
+        limiterGR: 0
+      }),
 
     getVersion: () => AudioEngineManager.getVersion(),
 
     setFftCallback: (callback: (spectrum: number[]) => void) => {
-      const engineId = audioEngineManager.getEngineId();
-      if (!engineId) return () => {};
+      const engineId = audioEngineManager.getEngineId()
+      if (!engineId) return () => {}
 
-      let lastFftTime = 0;
-      const FFT_THROTTLE_MS = 60; // 约 16fps，平衡流畅度与性能
+      let lastFftTime = 0
+      const FFT_THROTTLE_MS = 60 // 约 16fps，平衡流畅度与性能
 
       const handler = (_event: any, spectrum: number[]) => {
-        const now = Date.now();
-        if (now - lastFftTime < FFT_THROTTLE_MS) return;
-        lastFftTime = now;
-        callback(spectrum);
-      };
-      ipcRenderer.on('audio-engine:fft-data', handler);
-      ipcRenderer.send('audio-engine:set-fft-callback', engineId);
+        const now = Date.now()
+        if (now - lastFftTime < FFT_THROTTLE_MS) return
+        lastFftTime = now
+        callback(spectrum)
+      }
+      ipcRenderer.on('audio-engine:fft-data', handler)
+      ipcRenderer.send('audio-engine:set-fft-callback', engineId)
 
       return () => {
-        ipcRenderer.removeListener('audio-engine:fft-data', handler);
+        ipcRenderer.removeListener('audio-engine:fft-data', handler)
         // 通知主进程停止从 Rust 引擎推送 FFT 数据
-        ipcRenderer.send('audio-engine:remove-fft-callback', engineId);
-      };
-    },
+        ipcRenderer.send('audio-engine:remove-fft-callback', engineId)
+      }
+    }
   },
 
   // WASAPI 音频输出 (独占/共享模式)
   wasapi: {
     enumerateDevices: () => ipcRenderer.invoke('wasapi:enumerate-devices'),
-    create: (sampleRate: number, channels: number, mode: 'Shared' | 'Exclusive', deviceId?: string) =>
-      ipcRenderer.invoke('wasapi:create', sampleRate, channels, mode, deviceId),
+    create: (
+      sampleRate: number,
+      channels: number,
+      mode: 'Shared' | 'Exclusive',
+      deviceId?: string
+    ) => ipcRenderer.invoke('wasapi:create', sampleRate, channels, mode, deviceId),
     destroy: (engineId: string) => ipcRenderer.invoke('wasapi:destroy', engineId),
     start: (engineId: string) => ipcRenderer.invoke('wasapi:start', engineId),
     stop: (engineId: string) => ipcRenderer.invoke('wasapi:stop', engineId),
@@ -429,7 +484,7 @@ const api = {
       ipcRenderer.invoke('wasapi:output-audio', engineId, data, channels, sampleRate),
     flush: (engineId: string) => ipcRenderer.invoke('wasapi:flush', engineId),
     getState: (engineId: string) => ipcRenderer.invoke('wasapi:get-state', engineId),
-    getVersion: () => ipcRenderer.invoke('wasapi:get-version'),
+    getVersion: () => ipcRenderer.invoke('wasapi:get-version')
   },
 
   updater: {
@@ -465,8 +520,18 @@ const api = {
      * 监听下载进度
      * @param callback 进度回调函数
      */
-    onProgress: (callback: (progress: { downloaded: number; total: number; percent: number; speed: number }) => void) => {
-      const wrapper = (_event: any, progress: { downloaded: number; total: number; percent: number; speed: number }) => callback(progress)
+    onProgress: (
+      callback: (progress: {
+        downloaded: number
+        total: number
+        percent: number
+        speed: number
+      }) => void
+    ) => {
+      const wrapper = (
+        _event: any,
+        progress: { downloaded: number; total: number; percent: number; speed: number }
+      ) => callback(progress)
       ;(callback as any).__updateProgressWrapper = wrapper
       ipcRenderer.on('update:progress', wrapper)
     },
@@ -474,7 +539,14 @@ const api = {
      * 移除下载进度监听
      * @param callback 进度回调函数
      */
-    offProgress: (callback: (progress: { downloaded: number; total: number; percent: number; speed: number }) => void) => {
+    offProgress: (
+      callback: (progress: {
+        downloaded: number
+        total: number
+        percent: number
+        speed: number
+      }) => void
+    ) => {
       const wrapper = (callback as any).__updateProgressWrapper
       if (wrapper) {
         ipcRenderer.removeListener('update:progress', wrapper)
@@ -526,43 +598,61 @@ const api = {
     onNotice: (callback: (data: any) => void) => {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('plugin:notice', handler)
-      return () => { ipcRenderer.removeListener('plugin:notice', handler) }
+      return () => {
+        ipcRenderer.removeListener('plugin:notice', handler)
+      }
     },
     /** 监听插件日志 */
     onLog: (callback: (level: string, ...args: any[]) => void) => {
       const handler = (_event: any, level: string, ...args: any[]) => callback(level, ...args)
       ipcRenderer.on('plugin:log', handler)
-      return () => { ipcRenderer.removeListener('plugin:log', handler) }
+      return () => {
+        ipcRenderer.removeListener('plugin:log', handler)
+      }
     },
     /** 监听敏感操作确认请求 */
     onConfirmRequest: (callback: (request: any) => void) => {
       const handler = (_event: any, request: any) => callback(request)
       ipcRenderer.on('plugin:request-confirm', handler)
-      return () => { ipcRenderer.removeListener('plugin:request-confirm', handler) }
+      return () => {
+        ipcRenderer.removeListener('plugin:request-confirm', handler)
+      }
     },
     /** 监听批量敏感操作确认请求 */
     onBatchConfirmRequest: (callback: (request: any) => void) => {
       const handler = (_event: any, request: any) => callback(request)
       ipcRenderer.on('plugin:request-batch-confirm', handler)
-      return () => { ipcRenderer.removeListener('plugin:request-batch-confirm', handler) }
+      return () => {
+        ipcRenderer.removeListener('plugin:request-batch-confirm', handler)
+      }
     },
     /** 响应敏感操作确认 */
     respondConfirm: (response: { requestId: string; confirmed: boolean; skipSession: boolean }) =>
       ipcRenderer.invoke('plugin:confirm-response', response),
     /** 响应批量敏感操作确认 */
-    respondBatchConfirm: (response: { requestId: string; confirmed: boolean; rejectedOpIds?: string[]; skipSession: boolean }) =>
-      ipcRenderer.invoke('plugin:batch-confirm-response', response),
+    respondBatchConfirm: (response: {
+      requestId: string
+      confirmed: boolean
+      rejectedOpIds?: string[]
+      skipSession: boolean
+    }) => ipcRenderer.invoke('plugin:batch-confirm-response', response),
     /** 监听插件 emit 事件 */
     onEmit: (callback: (data: { pluginId: string; eventName: string; args: any[] }) => void) => {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('plugin:emit', handler)
-      return () => { ipcRenderer.removeListener('plugin:emit', handler) }
+      return () => {
+        ipcRenderer.removeListener('plugin:emit', handler)
+      }
     },
     /** 监听插件 props 变更（setProps 触发） */
-    onPropsChanged: (callback: (data: { pluginId: string; props: Record<string, any> }) => void) => {
+    onPropsChanged: (
+      callback: (data: { pluginId: string; props: Record<string, any> }) => void
+    ) => {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('plugin:props-changed', handler)
-      return () => { ipcRenderer.removeListener('plugin:props-changed', handler) }
+      return () => {
+        ipcRenderer.removeListener('plugin:props-changed', handler)
+      }
     },
 
     // ========== 歌单操作 ==========
@@ -570,7 +660,9 @@ const api = {
     onPlaylistOp: (callback: (request: any) => void) => {
       const handler = (_event: any, request: any) => callback(request)
       ipcRenderer.on('plugin:playlist-op', handler)
-      return () => { ipcRenderer.removeListener('plugin:playlist-op', handler) }
+      return () => {
+        ipcRenderer.removeListener('plugin:playlist-op', handler)
+      }
     },
     /** 响应歌单操作 */
     respondPlaylistOp: (response: any) =>
@@ -586,6 +678,6 @@ if (process.contextIsolated) {
     console.error(error)
   }
 } else {
-  (window as any).electron = electronAPI
+  ;(window as any).electron = electronAPI
   ;(window as any).api = api
 }

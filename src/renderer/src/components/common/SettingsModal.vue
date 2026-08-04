@@ -17,7 +17,9 @@ import SettingsAppearanceSection from './Settings/SettingsAppearanceSection.vue'
 import SettingsPlaybackSection from './Settings/SettingsPlaybackSection.vue'
 import SettingsLyricsSection from './Settings/SettingsLyricsSection.vue'
 import SettingsLocalSection from './Settings/SettingsLocalSection.vue'
+import SettingsPluginSection from './Settings/SettingsPluginSection.vue'
 import SettingsAboutSection from './Settings/SettingsAboutSection.vue'
+import SettingsMorphaeumSection from './Settings/SettingsMorphaeumSection.vue'
 
 const themeVars = useThemeVars()
 const { isDark } = useAutoNaiveTheme()
@@ -57,6 +59,7 @@ const menuOptions = [
   { label: '播放设置', key: 'playback', icon: renderIcon('mgc_play_circle_line') },
   { label: '歌词设置', key: 'lyrics', icon: renderIcon('mgc_music_line') },
   { label: '本地与缓存', key: 'local', icon: renderIcon('mgc_folder_line') },
+  { label: '插件管理', key: 'plugins', icon: renderIcon('mgc_cube_3d_line') },
   { label: '关于', key: 'about', icon: renderIcon('mgc_information_line') }
 ]
 
@@ -252,6 +255,12 @@ const searchOptions = [
     value: 'local.scanDirs',
     section: 'local',
     desc: '配置本地音乐扫描时需要遍历的目录列表'
+  },
+  {
+    label: '插件管理',
+    value: 'plugins.manage',
+    section: 'plugins',
+    desc: '管理已加载的插件，支持加载、激活与移除'
   }
 ]
 
@@ -265,6 +274,7 @@ const autoCompleteOptions = computed(() => {
     playback: '播放',
     lyrics: '歌词',
     local: '本地',
+    plugins: '插件',
     about: '关于'
   }
 
@@ -379,9 +389,11 @@ const settingItemBgColor = computed(() => {
   return isDark.value ? themeVars.value.cardColor : '#FFFFFF'
 })
 
-// 设置项卡片边框颜色（优先主题边框色，其次分隔线色）
+// 设置项卡片边框颜色（优先主题边框色，其次分隔线色），弱化为半透明以弱化边框
 const settingItemBorderColor = computed(() => {
-  return themeVars.value.borderColor || themeVars.value.dividerColor || 'transparent'
+  const base = themeVars.value.borderColor || themeVars.value.dividerColor || 'transparent'
+  if (base === 'transparent') return base
+  return `color-mix(in srgb, ${base} 60%, transparent)`
 })
 
 // 处理搜索选择，切换到对应分组并高亮目标项
@@ -428,27 +440,18 @@ watch(
 </script>
 
 <template>
-  <n-modal
-    v-model:show="showModal"
-    style="
-      width: 60vw;
-      max-width: 1000px;
-      height: 70vh;
-      max-height: 600px;
-      min-width: 800px;
-      min-height: 400px;
-      border-radius: 12px;
-      overflow: hidden;
-    "
-  >
+  <n-modal v-model:show="showModal" style="border-radius: 12px; overflow: hidden">
     <n-card
       class="settings-root-card"
       :bordered="false"
       role="dialog"
       aria-modal="true"
-      style="height: 100%; width: 100%"
-      :style="{ backgroundColor: themeVars.modalColor }"
-      content-style="padding: 0; height: 100%; display: flex; flex-direction: column;"
+      :style="{
+        backgroundColor: themeVars.modalColor,
+        maxWidth: 'calc(100vw - 96px)',
+        height: '80vh'
+      }"
+      content-style="padding: 0; display: flex; flex-direction: column; min-height: 0;"
     >
       <!-- 顶部右上角关闭按钮区域 -->
       <div class="modal-topbar">
@@ -460,7 +463,7 @@ watch(
         class="settings-container"
         style="flex: 1; min-height: 0; display: flex; flex-direction: column"
       >
-        <n-layout has-sider style="height: 540px">
+        <n-layout has-sider style="height: 100%; min-height: 0">
           <n-layout-sider bordered width="220" content-style="padding: 16px 0; overflow: hidden;">
             <!-- 侧边栏标题 -->
             <div class="sider-header">
@@ -529,7 +532,24 @@ watch(
                   :highlight-key="highlightedKey"
                 />
 
-                <settings-about-section v-else-if="activeKey === 'about'" />
+                <settings-plugin-section
+                  v-else-if="activeKey === 'plugins'"
+                  :setting-item-bg-color="settingItemBgColor"
+                  :setting-item-border-color="settingItemBorderColor"
+                  :highlight-key="highlightedKey"
+                />
+
+                <settings-morphaeum-section
+                  v-else-if="activeKey === 'morphaeum'"
+                  :setting-item-bg-color="settingItemBgColor"
+                  :setting-item-border-color="settingItemBorderColor"
+                  :highlight-key="highlightedKey"
+                />
+
+                <settings-about-section
+                  v-else-if="activeKey === 'about'"
+                  @open-morphaeum="activeKey = 'morphaeum'"
+                />
               </div>
             </transition>
           </n-layout-content>

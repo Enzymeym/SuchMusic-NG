@@ -1,7 +1,6 @@
 import { ipcMain, app, dialog } from 'electron'
 import { promises as fs } from 'fs'
 import { join, extname, basename, dirname } from 'path'
-import { loadNativeDecoder } from '../services/nativeDecoder'
 import { writeAudioMeta } from '../utils/musicMetaWriter'
 
 // 本地音乐扫描结果的数据结构
@@ -29,7 +28,6 @@ async function getMusicMetadataParser(): Promise<(filePath: string, options?: Re
 }
 
 export function registerLocalMusicHandlers(): void {
-  const { decode_audio_to_pcm } = loadNativeDecoder()
 
   // 按需读取单个音频文件的元数据（时长 + 封面）
   ipcMain.handle('local-music:get-meta', async (_event, filePath: string) => {
@@ -82,30 +80,10 @@ export function registerLocalMusicHandlers(): void {
           m.format.numberOfSamples / m.format.sampleRate
         durationMs = Math.round(secondsFromSamples * 1000)
       } else {
-        // 如果 metadata 也拿不到时长，最后兜底使用 native 解码结果估算
-        try {
-          const decoded = decode_audio_to_pcm(filePath)
-          if (
-            decoded &&
-            typeof decoded.sample_rate === 'number' &&
-            decoded.sample_rate > 0 &&
-            typeof decoded.channels === 'number' &&
-            decoded.channels > 0 &&
-            Array.isArray(decoded.data) &&
-            decoded.data.length > 0
-          ) {
-            if (!sampleRate) {
-              sampleRate = decoded.sample_rate
-            }
-            const frames = decoded.data.length / decoded.channels
-            const secondsFromDecoded = frames / decoded.sample_rate
-            if (Number.isFinite(secondsFromDecoded) && secondsFromDecoded > 0.1) {
-              durationMs = Math.round(secondsFromDecoded * 1000)
-            }
-          }
-        } catch (e) {
-          console.warn('decode_audio_to_pcm 估算时长失败:', filePath, e)
-        }
+        // metadata 无法获取时长时，不兜底使用原生解码器（decode_audio_to_pcm 会将
+        // 整个文件解码为 PCM number[]，对 3 分钟立体声歌曲占用 ~127MB，严重浪费内存）。
+        // durationMs 返回 undefined，实际播放时音频引擎会通过解码结果自动更新。
+        durationMs = undefined
       }
 
       const picture = m.common.picture?.[0]

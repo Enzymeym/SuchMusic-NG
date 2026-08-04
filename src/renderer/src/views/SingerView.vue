@@ -68,38 +68,23 @@ const goToArtistDetail = (artist: ArtistInfo) => {
           </div>
         </div>
 
-        <!-- Artist List -->
-        <div class="artists-list" v-if="filteredArtists.length > 0">
+        <!-- Artist Grid -->
+        <div class="artists-grid" v-if="filteredArtists.length > 0">
           <div
-            v-for="(artist, index) in filteredArtists"
+            v-for="artist in filteredArtists"
             :key="artist.name"
-            class="artist-row"
+            class="artist-card"
             @click="goToArtistDetail(artist)"
           >
-            <div class="artist-col-index">
-              <span class="index-num">{{ index + 1 }}</span>
+            <div class="artist-avatar">
+              <img
+                :src="artist.cover || defaultCover"
+                loading="lazy"
+                decoding="async"
+              />
             </div>
-            <div class="artist-col-main">
-              <div class="artist-row-cover">
-                <img
-                  :src="artist.cover || defaultCover"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </div>
-              <div class="artist-row-info">
-                <span class="artist-row-name" :title="artist.name">{{ artist.name }}</span>
-              </div>
-            </div>
-            <div class="artist-col-songs">
-              <span>{{ artist.songCount }} 首歌曲</span>
-            </div>
-            <div class="artist-col-plays">
-              <span>{{ artist.playCount }} 次播放</span>
-            </div>
-            <div class="artist-col-arrow">
-              <n-icon size="20"><i class="mgc_right_line"></i></n-icon>
-            </div>
+            <span class="artist-name" :title="artist.name">{{ artist.name }}</span>
+            <span class="artist-meta">{{ artist.songCount }} 首 · {{ artist.playCount }} 次播放</span>
           </div>
         </div>
 
@@ -117,6 +102,7 @@ const goToArtistDetail = (artist: ArtistInfo) => {
 <style scoped>
 .singer-view {
   min-height: 100%;
+  padding-top: 56px;
 }
 
 /* Header */
@@ -158,111 +144,65 @@ html[data-theme='dark'] .search-input {
   align-items: center;
 }
 
-/* Artist List */
-.artists-list {
+/* Artist Grid */
+.artists-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 20px 16px;
+}
+
+.artist-card {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-}
-
-.artist-row {
-  display: flex;
   align-items: center;
-  padding: 8px 16px;
-  background: var(--n-color-card);
-  border-radius: 12px;
-  border: 1px solid transparent;
+  text-align: center;
   cursor: pointer;
-  transition: all 0.2s ease;
-  gap: 12px;
-}
-
-.artist-row:hover {
-  background: var(--n-color-hover);
-  border-color: var(--n-border-color);
-}
-
-.artist-col-index {
-  width: 36px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.index-num {
-  font-size: 14px;
-  color: var(--n-text-color-3);
-  font-variant-numeric: tabular-nums;
-}
-
-.artist-col-main {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  padding: 12px 8px;
+  border-radius: 12px;
+  transition: background 0.2s ease;
   min-width: 0;
 }
 
-.artist-row-cover {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  overflow: hidden;
-  flex-shrink: 0;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+.artist-card:hover {
+  background: var(--n-color-hover);
 }
 
-.artist-row-cover img {
+.artist-avatar {
+  width: 80%;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  overflow: hidden;
+  margin-bottom: 10px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.artist-card:hover .artist-avatar {
+  transform: scale(1.04);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.artist-avatar img {
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
 
-.artist-row-info {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-}
-
-.artist-row-name {
-  font-size: 15px;
+.artist-name {
+  font-size: 14px;
   font-weight: 600;
   color: var(--n-text-color);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 100%;
+  line-height: 1.4;
 }
 
-.artist-col-songs {
-  width: 120px;
-  flex-shrink: 0;
-  text-align: left;
-  font-size: 13px;
+.artist-meta {
+  font-size: 12px;
   color: var(--n-text-color-3);
-}
-
-.artist-col-plays {
-  width: 100px;
-  flex-shrink: 0;
-  text-align: left;
-  font-size: 13px;
-  color: var(--n-text-color-3);
-}
-
-.artist-col-arrow {
-  width: 32px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--n-text-color-3);
-  opacity: 0;
-  transition: opacity 0.2s ease;
-}
-
-.artist-row:hover .artist-col-arrow {
-  opacity: 1;
+  margin-top: 2px;
 }
 
 /* Empty */
@@ -281,18 +221,41 @@ html[data-theme='dark'] .search-input {
 }
 
 /* Responsive */
+@media (max-width: 1400px) {
+  .artists-grid {
+    grid-template-columns: repeat(5, 1fr);
+  }
+}
+
+@media (max-width: 1100px) {
+  .artists-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
 @media (max-width: 768px) {
-  .artist-row {
-    padding: 8px 12px;
+  .artists-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px 10px;
   }
 
-  .artist-col-songs,
-  .artist-col-plays {
-    display: none;
+  .artist-card {
+    padding: 8px 4px;
   }
 
-  .artist-col-arrow {
-    opacity: 1;
+  .artist-name {
+    font-size: 13px;
+  }
+
+  .artist-meta {
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 480px) {
+  .artists-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px 8px;
   }
 }
 </style>

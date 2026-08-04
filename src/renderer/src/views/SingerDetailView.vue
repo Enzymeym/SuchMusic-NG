@@ -11,22 +11,55 @@
           <div class="artist-meta">
             <span>{{ artist.songCount }} 首歌曲</span>
             <span class="meta-sep">·</span>
+            <span>{{ albumCount }} 张专辑</span>
+            <span class="meta-sep">·</span>
             <span>{{ artist.playCount }} 次播放</span>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Song List -->
-    <div class="song-list-section">
-      <SongList
-        :songs="songsForList"
-        :loading="false"
-        :current-playing-song-id="playerStore.currentSong?.id ?? null"
-        :transparent-header="true"
-        item-variant="plain"
-        @song-click="handleSongClick"
-      />
+    <!-- Tabs -->
+    <div class="tabs-section">
+      <n-tabs v-model:value="activeTab" type="segment" animated>
+        <n-tab-pane name="songs" tab="歌曲">
+          <SongList
+            :songs="songsForList"
+            :loading="false"
+            :current-playing-song-id="playerStore.currentSong?.id ?? null"
+            :transparent-header="true"
+            item-variant="plain"
+            @song-click="handleSongClick"
+          />
+        </n-tab-pane>
+        <n-tab-pane name="albums" tab="专辑">
+          <div class="albums-grid" v-if="albums.length > 0">
+            <div
+              v-for="album in albums"
+              :key="album.name"
+              class="album-card"
+              @click="openAlbumDetail(album)"
+            >
+              <div class="album-cover-wrapper">
+                <img
+                  :src="album.cover || defaultCover"
+                  class="album-cover"
+                  loading="lazy"
+                  decoding="async"
+                />
+                <div class="album-play-overlay">
+                  <n-icon size="28" color="white"><i class="mgc_play_fill"></i></n-icon>
+                </div>
+              </div>
+              <div class="album-info">
+                <div class="album-name" :title="album.name">{{ album.name }}</div>
+                <div class="album-song-count">{{ album.songs.length }} 首</div>
+              </div>
+            </div>
+          </div>
+          <n-empty v-else description="暂无专辑" style="margin-top: 40px" />
+        </n-tab-pane>
+      </n-tabs>
     </div>
   </div>
 
@@ -37,11 +70,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NEmpty } from 'naive-ui'
+import { NButton, NEmpty, NIcon, NTabs, NTabPane } from 'naive-ui'
 import { usePlayerStore } from '../stores/playerStore'
 import { useLocalMusicStore } from '../stores/localMusicStore'
+import { albumCache } from '../stores/albumCache'
 import SongList from '../components/common/SongList.vue'
 import defaultCover from '@renderer/assets/default-cover.png'
 
@@ -49,6 +83,8 @@ const route = useRoute()
 const router = useRouter()
 const playerStore = usePlayerStore()
 const localMusicStore = useLocalMusicStore()
+
+const activeTab = ref('songs')
 
 onMounted(() => {
   playerStore.loadHistory()
@@ -150,6 +186,26 @@ const songsForList = computed(() => {
   }))
 })
 
+// 该歌手的专辑列表
+const albums = computed(() => {
+  const name = artistName.value
+  if (!name) return []
+  return localMusicStore.albumList.filter(a => a.artist === name)
+})
+
+const albumCount = computed(() => albums.value.length)
+
+// 同步专辑到缓存，供 AlbumDetailView 使用
+watch(albums, (list) => {
+  for (const a of list) {
+    albumCache.set(a.name, a)
+  }
+}, { immediate: true })
+
+const openAlbumDetail = (album: { name: string }) => {
+  router.push('/album/' + encodeURIComponent(album.name))
+}
+
 const handleSongClick = (song: any) => {
   if (!artist.value) return
 
@@ -175,6 +231,7 @@ const handleSongClick = (song: any) => {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  padding-top: 64px;
 }
 
 /* Header */
@@ -232,11 +289,87 @@ const handleSongClick = (song: any) => {
   color: #999;
 }
 
-/* Song List */
-.song-list-section {
+/* Tabs */
+.tabs-section {
   flex: 1;
   overflow: hidden;
   padding: 0 40px;
+}
+
+.albums-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 16px;
+}
+
+.album-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--n-color-card);
+  border-radius: 12px;
+  border: 1px solid var(--n-border-color);
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+
+.album-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+  border-color: var(--n-primary-color);
+}
+
+.album-cover-wrapper {
+  position: relative;
+  width: 100%;
+  padding-bottom: 100%;
+  overflow: hidden;
+}
+
+.album-cover {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.album-play-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.25s;
+}
+
+.album-card:hover .album-play-overlay {
+  opacity: 1;
+}
+
+.album-info {
+  padding: 10px 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.album-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--n-text-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+
+.album-song-count {
+  font-size: 11px;
+  color: #999;
 }
 
 /* Not Found */
@@ -269,8 +402,13 @@ const handleSongClick = (song: any) => {
     font-size: 22px;
   }
 
-  .song-list-section {
+  .tabs-section {
     padding: 0 16px;
+  }
+
+  .albums-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 12px;
   }
 }
 </style>

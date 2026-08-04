@@ -1,4 +1,4 @@
-import { ref, reactive, watch } from 'vue'
+import { ref, reactive, watch, watchEffect } from 'vue'
 import { audioEngine } from '../audio/audio-engine'
 import { useSettingsStore } from '../stores/settingsStore'
 
@@ -467,14 +467,14 @@ export function useAudioEngine() {
   function getCurrentSnapshot(): Omit<Preset, 'id' | 'name' | 'builtin'> {
     return {
       eqEnabled: eqEnabled.value,
-      eqBands: JSON.parse(JSON.stringify(eqBands.value)),
+      eqBands: eqBands.value.map(b => ({ ...b })),
       compressorEnabled: compressorEnabled.value,
-      compressor: JSON.parse(JSON.stringify(compressor.value)),
+      compressor: { ...compressor.value },
       limiterEnabled: limiterEnabled.value,
-      limiter: JSON.parse(JSON.stringify(limiter.value)),
-      loudness: JSON.parse(JSON.stringify(loudness.value)),
-      virtualBass: JSON.parse(JSON.stringify(virtualBass.value)),
-      softClipper: JSON.parse(JSON.stringify(softClipper.value))
+      limiter: { ...limiter.value },
+      loudness: { ...loudness.value },
+      virtualBass: { ...virtualBass.value },
+      softClipper: { ...softClipper.value }
     };
   }
 
@@ -613,7 +613,7 @@ export function useAudioEngine() {
   watch(currentPresetId, () => saveCurrentPresetId());
 
   // 增益减少量轮询定时器
-  let gainReductionTimer: number | null = null;
+  let gainReductionRafId: number | null = null;
 
   /**
    * 初始化音频引擎
@@ -681,6 +681,10 @@ export function useAudioEngine() {
    */
   async function destroy() {
     stopGainReductionPolling();
+    if (engineSaveTimer) {
+      clearTimeout(engineSaveTimer);
+      engineSaveTimer = null;
+    }
     if (api) {
       await api.destroy();
     }
@@ -768,17 +772,26 @@ export function useAudioEngine() {
    * 开始增益减少量轮询
    */
   function startGainReductionPolling() {
-    if (gainReductionTimer !== null) return;
-    gainReductionTimer = window.setInterval(refreshGainReductions, 100);
+    if (gainReductionRafId !== null) return;
+    let lastTime = 0;
+    const tick = (now: number) => {
+      if (gainReductionRafId === null) return;
+      if (now - lastTime >= 200) {
+        lastTime = now;
+        refreshGainReductions();
+      }
+      gainReductionRafId = requestAnimationFrame(tick);
+    };
+    gainReductionRafId = requestAnimationFrame(tick);
   }
 
   /**
    * 停止增益减少量轮询
    */
   function stopGainReductionPolling() {
-    if (gainReductionTimer !== null) {
-      window.clearInterval(gainReductionTimer);
-      gainReductionTimer = null;
+    if (gainReductionRafId !== null) {
+      cancelAnimationFrame(gainReductionRafId);
+      gainReductionRafId = null;
     }
   }
 
@@ -786,10 +799,11 @@ export function useAudioEngine() {
 
   /**
    * 保存音效引擎当前状态到 localStorage
+   * @param snapshot - 可选的预构建快照，避免重复浅拷贝
    */
-  function saveEngineState() {
+  function saveEngineState(snapshot?: Record<string, unknown>) {
     try {
-      const stateData = {
+      const stateData = snapshot ?? {
         eqEnabled: eqEnabled.value,
         eqBands: eqBands.value,
         compressorEnabled: compressorEnabled.value,
@@ -808,14 +822,21 @@ export function useAudioEngine() {
 
   /**
    * 防抖保存音效引擎状态
-   * @param delay - 防抖延迟时间（毫秒）
+   * @param delayOrSnapshot - 防抖延迟时间（毫秒）或预构建快照对象
    */
   let engineSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  function debouncedSaveEngineState(delay: number = 300) {
+  function debouncedSaveEngineState(delayOrSnapshot: number | Record<string, unknown> = 300) {
     if (engineSaveTimer) clearTimeout(engineSaveTimer);
-    engineSaveTimer = setTimeout(() => {
-      saveEngineState();
-    }, delay);
+    if (typeof delayOrSnapshot === 'object') {
+      // 从 watchEffect 传入的预构建快照
+      engineSaveTimer = setTimeout(() => {
+        saveEngineState(delayOrSnapshot);
+      }, 300);
+    } else {
+      engineSaveTimer = setTimeout(() => {
+        saveEngineState();
+      }, delayOrSnapshot);
+    }
   }
 
   /**
@@ -933,8 +954,7 @@ export function useAudioEngine() {
   async function setEqBand(bandIndex: number, settings: Partial<EqBandSettings>) {
     if (bandIndex < 0 || bandIndex >= eqBands.value.length) return;
 
-    const current = JSON.parse(JSON.stringify(eqBands.value[bandIndex]));
-    const updated = { ...current, ...settings };
+    const updated = { ...eqBands.value[bandIndex], ...settings };
     eqBands.value[bandIndex] = updated;
 
     // 通过 audioEngine 分发
@@ -987,8 +1007,7 @@ export function useAudioEngine() {
    * @param params - 压缩器参数
    */
   async function setCompressorParams(params: Partial<CompressorParams>) {
-    const current = JSON.parse(JSON.stringify(compressor.value));
-    compressor.value = { ...current, ...params };
+    compressor.value = { ...compressor.value, ...params };
     try {
       await audioEngine.setCompressorParams(compressor.value);
     } catch (error) {
@@ -1016,8 +1035,7 @@ export function useAudioEngine() {
    * @param params - 限制器参数
    */
   async function setLimiterParams(params: Partial<LimiterParams>) {
-    const current = JSON.parse(JSON.stringify(limiter.value));
-    limiter.value = { ...current, ...params };
+    limiter.value = { ...limiter.value, ...params };
     try {
       await audioEngine.setLimiterParams(limiter.value);
     } catch (error) {
@@ -1032,8 +1050,7 @@ export function useAudioEngine() {
    * @param params - 等响度参数
    */
   async function setLoudnessParams(params: Partial<LoudnessParams>) {
-    const current = JSON.parse(JSON.stringify(loudness.value));
-    loudness.value = { ...current, ...params };
+    loudness.value = { ...loudness.value, ...params };
     try {
       await audioEngine.setLoudnessParams(loudness.value);
     } catch (error) {
@@ -1057,8 +1074,7 @@ export function useAudioEngine() {
    * @param params - 虚拟低频参数（部分更新）
    */
   async function setVirtualBassParams(params: Partial<VirtualBassParams>) {
-    const current = JSON.parse(JSON.stringify(virtualBass.value));
-    virtualBass.value = { ...current, ...params };
+    virtualBass.value = { ...virtualBass.value, ...params };
     audioEngine.setVirtualBassParams(virtualBass.value);
   }
 
@@ -1069,33 +1085,28 @@ export function useAudioEngine() {
    * @param params - 软限幅器参数（部分更新）
    */
   async function setSoftClipperParams(params: Partial<SoftClipperParams>) {
-    const current = JSON.parse(JSON.stringify(softClipper.value));
-    softClipper.value = { ...current, ...params };
+    softClipper.value = { ...softClipper.value, ...params };
     audioEngine.setSoftClipperParams(softClipper.value);
   }
 
   // === 监听音效参数变化，自动保存到 localStorage ===
-
-  // 监听 EQ 状态变化
-  watch(eqEnabled, () => debouncedSaveEngineState());
-  watch(eqBands, () => debouncedSaveEngineState(), { deep: true });
-
-  // 监听压缩器状态变化
-  watch(compressorEnabled, () => debouncedSaveEngineState());
-  watch(compressor, () => debouncedSaveEngineState(), { deep: true });
-
-  // 监听限制器状态变化
-  watch(limiterEnabled, () => debouncedSaveEngineState());
-  watch(limiter, () => debouncedSaveEngineState(), { deep: true });
-
-  // 监听等响度状态变化（deep 模式已覆盖 loudness.value.enabled 变更）
-  watch(loudness, () => debouncedSaveEngineState(), { deep: true });
-
-  // 监听虚拟低频状态变化
-  watch(virtualBass, () => debouncedSaveEngineState(), { deep: true });
-
-  // 监听软限幅器状态变化
-  watch(softClipper, () => debouncedSaveEngineState(), { deep: true });
+  // 使用单个 watchEffect 替代 8 个独立 deep watch，减少重复序列化
+  watchEffect(() => {
+    // 访问所有需要追踪的属性，建立响应式依赖
+    const snapshot = {
+      eqEnabled: eqEnabled.value,
+      eqBands: eqBands.value.map(b => ({ ...b })),
+      compressorEnabled: compressorEnabled.value,
+      compressor: { ...compressor.value },
+      limiterEnabled: limiterEnabled.value,
+      limiter: { ...limiter.value },
+      loudness: { ...loudness.value },
+      virtualBass: { ...virtualBass.value },
+      softClipper: { ...softClipper.value }
+    }
+    // 防抖写入，避免频繁操作时的性能损耗
+    debouncedSaveEngineState(snapshot)
+  })
 
   return {
     // 状态

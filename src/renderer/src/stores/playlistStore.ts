@@ -33,6 +33,8 @@ interface PlaylistState {
 }
 
 const STORAGE_KEY = 'user_playlists'
+/** localStorage 安全存储上限（保守估计，实际限制因浏览器/环境而异） */
+const STORAGE_SAFE_LIMIT_BYTES = 3 * 1024 * 1024 // 3MB
 
 export const usePlaylistStore = defineStore('playlist', {
   state: (): PlaylistState => {
@@ -94,10 +96,18 @@ export const usePlaylistStore = defineStore('playlist', {
     saveToStorage(): void {
       try {
         const json = JSON.stringify(this.playlists)
+        const sizeBytes = new Blob([json]).size
+
+        if (sizeBytes > STORAGE_SAFE_LIMIT_BYTES) {
+          console.warn(
+            `[playlistStore] 歌单数据过大 (${(sizeBytes / 1024).toFixed(2)} KB)，` +
+            `接近 localStorage 限制。建议清理不常用的歌单。`
+          )
+        }
+
         localStorage.setItem(STORAGE_KEY, json)
       } catch (e) {
         console.error('Failed to save playlists to storage', e)
-        // 输出数据大小帮助排查 localStorage 配额问题
         try {
           const size = JSON.stringify(this.playlists).length
           console.error(`Playlists data size: ${(size / 1024).toFixed(2)} KB`)

@@ -323,7 +323,11 @@ export const fetchImageAsDataURL = async (src: string): Promise<string> => {
   const blob = await resp.blob()
   return await new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
-    reader.onload = () => resolve(reader.result as string)
+    reader.onload = () => {
+      const result = reader.result as string
+      reader.abort()
+      resolve(result)
+    }
     reader.onerror = (e) => reject(e)
     reader.readAsDataURL(blob)
   })

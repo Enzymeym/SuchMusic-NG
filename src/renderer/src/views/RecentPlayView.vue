@@ -77,6 +77,8 @@ interface RecentSong {
   filePath?: string
   source?: string
   sourceSongId?: string | number
+  lyrics?: string
+  translatedLyrics?: string
 }
 
 const player = usePlayerStore()
@@ -100,6 +102,7 @@ const buildSongsFromHistory = () => {
       ar: r.artist
         ? r.artist.split(/[/,]/).map((n) => ({ name: n.trim() })).filter((a) => a.name)
         : [{ name: '未知歌手' }],
+      dt: r.durationMs || 0,
       // 优先使用历史记录中的封面；如果为空则留空，后续尝试从本地文件补充
       picUrl: r.cover || undefined,
       filePath: r.filePath,
@@ -108,7 +111,9 @@ const buildSongsFromHistory = () => {
       // 2. 如果没有，但有 filePath，则视为 local
       // 3. 否则默认标记为 local
       source: (r as any).source || (r.filePath ? 'local' : 'local'),
-      sourceSongId: r.songId
+      sourceSongId: r.songId,
+      lyrics: r.lyrics,
+      translatedLyrics: r.translatedLyrics
     })
   }
 
@@ -189,7 +194,9 @@ const handleSongClick = async (song: RecentSong) => {
       album: song.al?.name || '未知专辑',
       cover: song.picUrl || '',
       durationMs: song.dt || 0,
-      filePath: exists ? (song.id as string) : undefined // 如果文件不存在，清除 filePath
+      filePath: exists ? (song.id as string) : undefined, // 如果文件不存在，清除 filePath
+      lyrics: song.lyrics || '',
+      translatedLyrics: song.translatedLyrics || ''
     }
     
     // 统一交由 PlayerBar 的 watch 监听 currentSong 变化来处理实际播放

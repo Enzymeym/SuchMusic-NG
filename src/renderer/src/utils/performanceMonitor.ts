@@ -9,6 +9,19 @@ class PerformanceMonitor {
   /** 存储所有 measure 和 event 记录 */
   private records: Array<{ name: string; duration: number; timestamp: number }> = []
 
+  /** 最大记录数量，防止长期运行后数组无限增长 */
+  private readonly MAX_RECORDS = 200
+
+  /**
+   * 添加记录并自动裁剪超限条目
+   */
+  private addRecord(record: { name: string; duration: number; timestamp: number }): void {
+    this.records.push(record)
+    if (this.records.length > this.MAX_RECORDS) {
+      this.records.shift()
+    }
+  }
+
   /**
    * 记录自定义时间标记
    * @param name - 标记名称，用于后续与另一个标记配对 measure
@@ -32,7 +45,7 @@ class PerformanceMonitor {
   measure(name: string, startMark: string, endMark: string): number {
     try {
       const measure = performance.measure(name, startMark, endMark)
-      this.records.push({
+      this.addRecord({
         name,
         duration: measure.duration,
         timestamp: Date.now()
@@ -167,7 +180,7 @@ class PerformanceMonitor {
    * @param duration - 耗时（毫秒）
    */
   logEvent(eventName: string, duration: number): void {
-    this.records.push({
+    this.addRecord({
       name: eventName,
       duration,
       timestamp: Date.now()

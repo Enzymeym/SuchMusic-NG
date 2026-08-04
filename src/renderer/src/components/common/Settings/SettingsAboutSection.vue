@@ -91,12 +91,7 @@ const localChangelog: Record<string, string> = {
 
 ### 新增功能
 
-- 新增 Morphaeum 智能过渡模式（Automix），支持曲目间自动交叉淡化切换
-- 新增基于 WebNN + ONNX 的 AI 起始点检测，智能定位最佳过渡时机
-- 新增播放页流光文字提示（ShinyText），过渡状态嵌入封面蒙层展示
-- 新增音量平衡功能，按曲目自动补偿响度差异（ReplayGain 风格）
-- 新增歌手详情页专辑标签，支持专辑封面网格浏览与快速跳转
-- 新增过渡实验设置分区（Morphaeum 变形实验室），可调节过渡灵敏度
+- 关于页面的 App 名称有惊喜，双击试试哦））
 
 ### 优化改进
 

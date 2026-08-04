@@ -27,6 +27,9 @@ export class AudioPlayerManager {
   // 播放队列，防止并发播放
   private static playQueue: Promise<void> = Promise.resolve()
 
+  // 上一首临时文件路径，用于切歌时清理
+  private static lastTempPath: string | null = null
+
   private static getApi() {
     return (window as any).api?.audioEngine
   }
@@ -36,14 +39,16 @@ export class AudioPlayerManager {
    * @param options 播放选项
    */
   static async play(options: PlayAudioOptions): Promise<void> {
-    return this.playQueue = this.playQueue.then(() => this.handleAudio(options, true))
+    const prev = this.playQueue.catch(() => {})
+    return this.playQueue = prev.then(() => this.handleAudio(options, true))
   }
 
   /**
    * 加载音频但不播放
    */
   static async load(options: PlayAudioOptions): Promise<void> {
-    return this.playQueue = this.playQueue.then(() => this.handleAudio(options, false))
+    const prev = this.playQueue.catch(() => {})
+    return this.playQueue = prev.then(() => this.handleAudio(options, false))
   }
 
   private static async handleAudio(options: PlayAudioOptions, autoPlay: boolean): Promise<void> {
@@ -57,9 +62,22 @@ export class AudioPlayerManager {
 
     const vol = volume ?? playerStore.volume
 
-    // 停止当前播放
-    await audioEngine.stop()
+    // WASAPI 顺序淡入淡出降级：过渡启用且实际播放时，先淡出当前曲再加载新曲
+    // （Web Audio 模式的过渡由 TransitionController 调度，此处仍走即时停止）
+    const fadeOnWASAPI = !isWebAudioMode() && autoPlay && playerStore.transitionEnabled
+
+    // 停止当前播放并清理上一首临时文件（淡入淡出场景延迟到 WASAPI 分支处理）
+    if (!fadeOnWASAPI) {
+      await audioEngine.stop()
+    }
     await audioEngine.setVolume(vol)
+
+    // 清理上一首通过 URL 下载的临时文件
+    if (this.lastTempPath && window.electron?.ipcRenderer) {
+      const pathToClean = this.lastTempPath
+      this.lastTempPath = null
+      window.electron.ipcRenderer.invoke('audio:cleanup-temp', pathToClean).catch(() => {})
+    }
 
     // 解析文件路径
     let targetPath = filePath
@@ -67,6 +85,9 @@ export class AudioPlayerManager {
       if (window.electron && window.electron.ipcRenderer) {
         try {
           targetPath = await window.electron.ipcRenderer.invoke('audio:download-to-temp', url)
+          if (targetPath) {
+            this.lastTempPath = targetPath
+          }
         } catch (e) {
           console.error('[AudioPlayerManager] Failed to download URL:', e)
         }
@@ -100,18 +121,60 @@ export class AudioPlayerManager {
     }
 
     // ====== WASAPI 模式（现有 Rust 引擎路径）======
-    console.log(`[AudioPlayerManager] ${autoPlay ? 'Playing' : 'Loading'} from:`, targetPath)
-    const loadResult = await api.load(targetPath)
-
-    // 使用解码器返回的真实时长更新 store，确保 seek 位置准确（元数据时长可能与实际不符）
-    if (loadResult?.trackInfo?.durationMs && playerStore.currentSong) {
-      playerStore.setDuration(loadResult.trackInfo.durationMs)
+    if (fadeOnWASAPI) {
+      // 顺序淡入淡出：显示过渡提示，先淡出当前曲再加载新曲
+      playerStore.setTransitioning(true)
     }
+    try {
+      if (fadeOnWASAPI) {
+        // 顺序淡入淡出：仅当旧曲仍在播放时淡出（自然结束时引擎已停止，直接跳过）
+        const playing = await audioEngine.isCurrentlyPlaying()
+        if (playing) {
+          await audioEngine.fadeOutAndStop(playerStore.transitionDuration)
+        } else {
+          await audioEngine.stop()
+        }
+      }
 
-    if (autoPlay) {
-      await api.play()
-      playerStore.setPlaying(true)
+      console.log(`[AudioPlayerManager] ${autoPlay ? 'Playing' : 'Loading'} from:`, targetPath)
+      const loadResult = await api.load(targetPath)
+
+      // 使用解码器返回的真实时长更新 store，确保 seek 位置准确（元数据时长可能与实际不符）
+      if (loadResult?.trackInfo?.durationMs && playerStore.currentSong) {
+        playerStore.setDuration(loadResult.trackInfo.durationMs)
+      }
+
+      if (autoPlay) {
+        if (fadeOnWASAPI) {
+          // 从静音开始播放，再顺序淡入到目标音量
+          await audioEngine.setVolume(0)
+          await api.play()
+          playerStore.setPlaying(true)
+          await this.fadeInVolume(vol, playerStore.transitionDuration)
+        } else {
+          await api.play()
+          playerStore.setPlaying(true)
+        }
+      }
+    } finally {
+      // 无论成功与否都复位过渡提示，避免指示器卡在"过渡中"
+      if (fadeOnWASAPI) playerStore.setTransitioning(false)
     }
+  }
+
+  /**
+   * WASAPI 顺序淡入：音量从 0 渐变到目标值（配合 fadeOutAndStop 组成顺序淡入淡出）
+   * @param targetVolume 目标音量（0.0 - 1.0）
+   * @param durationMs 淡入时长（毫秒）
+   */
+  private static async fadeInVolume(targetVolume: number, durationMs: number): Promise<void> {
+    const steps = 10
+    const stepDelay = Math.max(20, durationMs / steps)
+    for (let i = 1; i <= steps; i++) {
+      await audioEngine.setVolume(targetVolume * (i / steps))
+      await new Promise((resolve) => setTimeout(resolve, stepDelay))
+    }
+    await audioEngine.setVolume(targetVolume)
   }
 
   /**
@@ -136,17 +199,23 @@ export class AudioPlayerManager {
     console.log(`[AudioPlayerManager] Web Audio: file read ${(readResult.data?.byteLength ?? 0) / 1024 / 1024} MB`)
 
     // 2. 浏览器原生解码（异步，硬件加速，极快）
+    // 直接传递原始 ArrayBuffer 给解码器，无需 .slice() 创建副本
+    // decodeAudioData 内部会复制数据，额外的拷贝纯属浪费
     console.log(`[AudioPlayerManager] Web Audio: decoding via browser...`)
-    const buf = readResult.data!.buffer.slice(
-      readResult.data!.byteOffset,
-      readResult.data!.byteOffset + readResult.data!.byteLength
-    )
+    const buf = readResult.data!.buffer
     const ok = await webAudioOutputEngine.loadFromArrayBuffer(buf)
+    // 立即释放 IPC 返回的大数据引用，帮助 GC 及时回收
+    ;(readResult as any).data = null
     if (!ok) {
       console.error('[AudioPlayerManager] Web Audio: decode failed')
       return
     }
     console.log(`[AudioPlayerManager] Web Audio: decoded ${webAudioOutputEngine.sampleRate}Hz ${webAudioOutputEngine.channels}ch ${webAudioOutputEngine.getDurationMs()}ms`)
+
+    // 用解码结果补齐真实时长（元数据缺失时进度与智能过渡依赖该值）
+    if (playerStore.currentSong) {
+      playerStore.setDuration(webAudioOutputEngine.getDurationMs())
+    }
 
     // 3. 播放（通过 audioEngine 设置音量以应用音量增强）
     await audioEngine.setVolume(volume)

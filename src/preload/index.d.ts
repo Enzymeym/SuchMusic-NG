@@ -5,6 +5,9 @@ declare global {
     electron: ElectronAPI
     api: {
       rustAudio: any
+      analyzer: {
+        getWasmBinary: () => Promise<Uint8Array | null>
+      }
       audioEngine: any
       wasapi: {
         enumerateDevices: () => Promise<{ success: boolean; devices?: any[]; error?: string }>

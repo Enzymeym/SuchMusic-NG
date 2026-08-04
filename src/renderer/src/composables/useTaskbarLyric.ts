@@ -29,8 +29,7 @@ export function useTaskbarLyric() {
       const translatedContent = playerStore.currentSong?.translatedLyrics || ''
       const parsedLyrics = parseLyricsToCore(lyricsContent, translatedContent)
       window.electron.ipcRenderer.send('taskbar-lyric:set-lyrics', parsedLyrics)
-    },
-    { deep: true }
+    }
   )
 
   // Sync playing state
@@ -55,11 +54,15 @@ export function useTaskbarLyric() {
     { deep: true, immediate: true }
   )
 
-  // Sync time
+  // Sync time with throttle to reduce IPC overhead
+  let lastTimeUpdate = 0
   watch(
     () => playerStore.positionMs,
     (time) => {
-      if (isOpen.value) {
+      if (!isOpen.value) return
+      const now = Date.now()
+      if (now - lastTimeUpdate >= 200) {
+        lastTimeUpdate = now
         window.electron.ipcRenderer.send('taskbar-lyric:time-update', time / 1000)
       }
     }

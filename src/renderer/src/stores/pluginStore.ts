@@ -210,7 +210,14 @@ export const usePluginStore = defineStore('plugin', () => {
   }
 
   // ========== 初始化事件监听 ==========
+
+  // 事件监听只初始化一次，避免重复注册 IPC 处理器
+  let listenersInitialized = false
+
   function initListeners(): void {
+    if (listenersInitialized) return
+    listenersInitialized = true
+
     // 监听插件通知
     window.api.plugins.onNotice((data: any) => {
       if (data.type === 'loaded') {

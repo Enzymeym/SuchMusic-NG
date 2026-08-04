@@ -188,8 +188,11 @@ export const useLocalMusicStore = defineStore('localMusic', {
       if (this.loading) return
       this.loading = true
       const settingsStore = useSettingsStore()
-      
+
       try {
+        // 释放旧数据的 Blob URL，避免内存泄漏
+        this.revokeCovers()
+
         const rawDirs = settingsStore.local.scanDirs
         const plainDirs = Array.isArray(rawDirs) ? [...rawDirs] : []
         
@@ -248,6 +251,7 @@ export const useLocalMusicStore = defineStore('localMusic', {
         })
         
         if (targets.length) {
+          // 限制并发为 3，避免同时读取多个大文件导致主进程/渲染进程内存峰值过高
           await batchPromiseAll(
             targets,
             async (song) => {
@@ -280,8 +284,15 @@ export const useLocalMusicStore = defineStore('localMusic', {
                 }
 
                 if (result.cover && result.cover.base64 && !song.picUrl) {
-                  const coverUrl = `data:${result.cover.mimeType};base64,${result.cover.base64}`
-                  song.picUrl = coverUrl
+                  // 将 base64 封面转换为 Blob URL，避免大字符串占用 Pinia 响应式内存
+                  // Blob URL 是一个短引用字符串（~50字节），而非 100-300KB 的 base64 数据
+                  const binaryStr = atob(result.cover.base64)
+                  const bytes = new Uint8Array(binaryStr.length)
+                  for (let i = 0; i < binaryStr.length; i++) {
+                    bytes[i] = binaryStr.charCodeAt(i)
+                  }
+                  const blob = new Blob([bytes], { type: result.cover.mimeType })
+                  song.picUrl = URL.createObjectURL(blob)
                 }
 
                 if (result.title) song.name = result.title
@@ -316,7 +327,7 @@ export const useLocalMusicStore = defineStore('localMusic', {
                 console.error('读取歌曲 meta 失败', song.filePath, error)
               }
             }
-          )
+          , 3)
         }
 
         // 本地音乐元数据补全后，把封面同步回播放器状态和用户歌单
@@ -325,6 +336,28 @@ export const useLocalMusicStore = defineStore('localMusic', {
       } finally {
         this.fillingMeta = false
       }
+    },
+
+    /**
+     * 释放所有通过 URL.createObjectURL 创建的 Blob URL
+     * 避免 Blob URL 引用的数据无法被 GC 回收
+     */
+    revokeCovers(): void {
+      this.songs.forEach((song) => {
+        if (song.picUrl && song.picUrl.startsWith('blob:')) {
+          URL.revokeObjectURL(song.picUrl)
+        }
+      })
+    },
+
+    /**
+     * 清空本地音乐数据并释放所有 Blob URL
+     */
+    clear(): void {
+      this.revokeCovers()
+      this.songs = []
+      this.loading = false
+      this.fillingMeta = false
     }
   }
 })

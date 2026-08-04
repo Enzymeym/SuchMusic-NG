@@ -1,17 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import {
-  NCard,
-  NSwitch,
-  NSlider,
-  NSelect,
-  NButton,
-  NButtonGroup,
-  NAlert,
-  NSpace
-} from 'naive-ui'
+import { NCard, NSwitch, NSlider, NSelect, NButton, NButtonGroup, NAlert, NSpace } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
-import { usePlayerStore } from '../../../stores/playerStore'
 import {
   AudioOutputModeManager,
   cleanRustError,
@@ -22,23 +12,6 @@ import {
 
 // 使用设置仓库，驱动播放设置选项
 const settingsStore = useSettingsStore()
-const playerStore = usePlayerStore()
-
-// 过渡时长显示值（秒）
-const transitionDurationSeconds = computed({
-  get: () => playerStore.transitionDuration / 1000,
-  set: (val: number) => {
-    const durationMs = val * 1000
-    playerStore.setTransitionDuration(durationMs)
-  }
-})
-
-// 过渡效果类型选项
-const transitionTypeOptions = [
-  { label: '智能过渡', value: 'smart' },
-  { label: '交叉淡入淡出', value: 'crossfade' },
-  { label: '普通淡入淡出', value: 'fade' }
-]
 
 // 音量增强显示值（100-300，对应 1.0x-3.0x）
 const volumeBoostPercent = computed({
@@ -227,9 +200,7 @@ function selectDevice(deviceId: string) {
   modeSwitchError.value = '' // 清除之前的切换错误
 
   // 如果在 WASAPI 模式下，重新应用
-  if (
-    settingsStore.playback.audioOutputMode !== 'webaudio'
-  ) {
+  if (settingsStore.playback.audioOutputMode !== 'webaudio') {
     applyOutputMode(settingsStore.playback.audioOutputMode, deviceId)
   }
 }
@@ -477,63 +448,6 @@ const props = defineProps<{
             style="width: 160px"
           />
           <span class="time-text">{{ volumeBoostPercent }}%</span>
-        </div>
-      </div>
-    </n-card>
-
-    <n-card
-      class="setting-item"
-      :class="{ 'setting-item--highlight': props.highlightKey === 'playback.transition' }"
-      data-setting-key="playback.transition"
-      :bordered="true"
-      size="small"
-      :style="{
-        backgroundColor: props.settingItemBgColor,
-        borderColor: props.settingItemBorderColor
-      }"
-    >
-      <div class="setting-row" style="flex-direction: column; align-items: flex-start; gap: 12px">
-        <div class="setting-label">
-          <div class="main-label">智能过渡</div>
-          <div class="sub-label">实现歌曲之间的无缝衔接，提升播放体验</div>
-        </div>
-        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px">
-          <n-switch
-            v-model:value="playerStore.transitionEnabled"
-            @update:value="playerStore.setTransitionEnabled($event)"
-          />
-          <span class="time-text">{{ playerStore.transitionEnabled ? '已启用' : '已关闭' }}</span>
-        </div>
-        <div v-if="playerStore.transitionEnabled" style="width: 100%">
-          <div class="setting-row" style="margin-bottom: 8px">
-            <div class="setting-label">
-              <div class="main-label">过渡时长</div>
-              <div class="sub-label">调整歌曲切换时的过渡时间</div>
-            </div>
-            <div style="display: flex; align-items: center; gap: 12px; min-width: 220px">
-              <n-slider
-                v-model:value="transitionDurationSeconds"
-                :min="0.5"
-                :max="10"
-                :step="0.5"
-                :tooltip="false"
-                style="width: 160px"
-              />
-              <span class="time-text">{{ transitionDurationSeconds }} 秒</span>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-label">
-              <div class="main-label">过渡效果</div>
-              <div class="sub-label">选择不同的过渡效果类型</div>
-            </div>
-            <n-select
-              v-model:value="playerStore.transitionType"
-              :options="transitionTypeOptions"
-              style="width: 180px"
-              @update:value="playerStore.setTransitionType($event)"
-            />
-          </div>
         </div>
       </div>
     </n-card>

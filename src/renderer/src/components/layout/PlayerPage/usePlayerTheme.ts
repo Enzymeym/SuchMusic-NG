@@ -107,15 +107,18 @@ export function usePlayerTheme() {
   })
 
   // 根据封面自动更新播放页主题色
+  let extractSeq = 0
   watch(
     () => player.currentSong?.cover,
     async (cover) => {
       if (!cover) return
       if (cover === lastCoverForTheme.value) return
       lastCoverForTheme.value = cover
+      const seq = ++extractSeq
       try {
         // 根据当前主题模式传入 isLightMode 参数
         const palette = await extractImageColors(cover, { isLightMode: !isDark.value })
+        if (seq !== extractSeq) return // 竞态：已切换到新封面
         const candidates = [palette.main, palette.secondary, palette.third].filter(Boolean)
         if (!candidates.length) return
         let best = candidates[0]

@@ -120,6 +120,8 @@ export class WebAudioDspChain {
 
   // === 链连接状态 ===
   private _isConnected = false
+  private _builtNodes: AudioNode[] = [] // 缓存已构建的内部节点，用于重建时复用
+  private _ctx: BaseAudioContext | null = null
 
   // ====== 属性访问器 ======
 
@@ -134,14 +136,33 @@ export class WebAudioDspChain {
 
   /**
    * 将 DSP 链插入到 inputNode → outputNode 之间
-   * @param inputNode 输入节点（通常为音量 GainNode 或 AudioBufferSourceNode）
+   * 首次调用时构建全部内部节点，后续调用仅重新连线输入/输出
+   * @param inputNode 输入节点（通常为音量 GainNode）
    * @param outputNode 输出节点（通常为 ctx.destination）
    */
   connect(inputNode: AudioNode, outputNode: AudioNode): void {
     const ctx = inputNode.context as BaseAudioContext
-    this.disconnect()
 
-    // 构建完整处理链
+    // 如果已构建内部节点且 AudioContext 未变，仅重新连线输入/输出
+    if (this._builtNodes.length > 0 && this._ctx === ctx) {
+      this.disconnectInputOutput()
+      this.wireInputOutput(inputNode, outputNode)
+      this._isConnected = true
+      return
+    }
+
+    // 首次构建或 AudioContext 已变更：完整重建
+    this.disconnect()
+    this._ctx = ctx
+    this.buildChain(ctx, inputNode, outputNode)
+    this._isConnected = true
+
+    // 应用已保存的参数
+    this.syncAllParams()
+  }
+
+  /** 构建完整 DSP 节点链（仅首次或 AudioContext 变更时调用） */
+  private buildChain(ctx: BaseAudioContext, inputNode: AudioNode, outputNode: AudioNode): void {
     let prevNode: AudioNode = inputNode
 
     // --- EQ (10 段 BiquadFilter) ---
@@ -186,12 +207,10 @@ export class WebAudioDspChain {
     prevNode = this.loudnessHighShelf
 
     // --- Virtual Bass (parallel: dry + waveshaper) ---
-    // Dry path
     this.virtualBassDryGain = ctx.createGain()
     this.virtualBassDryGain.gain.value = 1
     prevNode.connect(this.virtualBassDryGain)
 
-    // Wet path
     this.virtualBassLowpass = ctx.createBiquadFilter()
     this.virtualBassLowpass.type = 'lowpass'
     this.virtualBassLowpass.frequency.value = this.virtualBassCrossover
@@ -207,7 +226,6 @@ export class WebAudioDspChain {
     this.virtualBassWetGain.gain.value = 0
     this.virtualBassShaper.connect(this.virtualBassWetGain)
 
-    // Mix both paths
     this.virtualBassMixGain = ctx.createGain()
     this.virtualBassMixGain.gain.value = 1
     this.virtualBassDryGain.connect(this.virtualBassMixGain)
@@ -234,10 +252,33 @@ export class WebAudioDspChain {
     // 输出
     prevNode.connect(outputNode)
 
-    this._isConnected = true
+    // 缓存所有内部节点的引用
+    this._builtNodes = [
+      ...this.eqNodes,
+      this.compressorNode, this.limiterNode,
+      this.loudnessLowShelf, this.loudnessHighShelf,
+      this.virtualBassLowpass, this.virtualBassShaper,
+      this.virtualBassWetGain, this.virtualBassDryGain, this.virtualBassMixGain,
+      this.softClipperNode, this.softClipperPreGain, this.softClipperPostGain
+    ].filter((n): n is NonNullable<typeof n> => n != null)
+  }
 
-    // 应用已保存的参数
-    this.syncAllParams()
+  /** 仅连接输入/输出（内部链已在 buildChain 中连接好，无需重建） */
+  private wireInputOutput(inputNode: AudioNode, outputNode: AudioNode): void {
+    // 输入：inputNode → 第一个 EQ 节点
+    if (this.eqNodes.length > 0) {
+      inputNode.connect(this.eqNodes[0])
+    }
+    // 输出：最后一个节点（softClipperPostGain）→ outputNode
+    if (this.softClipperPostGain) {
+      this.softClipperPostGain.connect(outputNode)
+    }
+  }
+
+  /** 仅断开输入/输出连线（内部链保持完整） */
+  private disconnectInputOutput(): void {
+    try { this.eqNodes[0]?.disconnect() } catch { /* ignore */ }
+    try { this.softClipperPostGain?.disconnect() } catch { /* ignore */ }
   }
 
   /**
@@ -275,6 +316,7 @@ export class WebAudioDspChain {
     this.softClipperPreGain = null
     this.softClipperPostGain = null
 
+    this._builtNodes = []
     this._isConnected = false
   }
 

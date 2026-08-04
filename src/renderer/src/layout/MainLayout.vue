@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { NLayout, NLayoutSider, NLayoutHeader, NLayoutContent, NLayoutFooter, NWatermark } from 'naive-ui'
+import { NLayout, NLayoutSider, NLayoutHeader, NLayoutContent, NLayoutFooter } from 'naive-ui'
 import { usePlayerStore } from '../stores/playerStore'
 import { throttle } from '../utils/performance'
 import AppSidebar from '../components/layout/AppSidebar.vue'
@@ -97,8 +97,6 @@ onUnmounted(() => {
 
   <n-layout class="main-layout" content-style="display: flex; flex-direction: column; height: 100%;">
     <!-- Main Content Area (Sidebar + Header/Content) -->
-    <n-watermark content="Beta 测试版本" cross fullscreen :font-size="16" :line-height="16" :width="384" :height="384"
-      :x-offset="12" :y-offset="60" :rotate="-15" />
     <n-layout has-sider class="middle-layout" :style="collapsed ? 'position: relative;' : ''">
       <n-layout-sider width="240" :bordered="!collapsed" collapse-mode="width" :collapsed-width="0"
         :native-scrollbar="false" class="sidebar" :style="[
@@ -124,7 +122,8 @@ onUnmounted(() => {
             <router-view v-slot="{ Component, route }">
               <PageTransition>
                 <keep-alive
-                  :include="['home', 'statistics', 'local', 'playlist', 'recent', 'playlist-square', 'toplist', 'singer', 'album']">
+                  :include="['home', 'statistics', 'local', 'playlist', 'recent', 'singer', 'album']"
+                  :max="5">
                   <component :is="Component" :key="route.fullPath" />
                 </keep-alive>
               </PageTransition>

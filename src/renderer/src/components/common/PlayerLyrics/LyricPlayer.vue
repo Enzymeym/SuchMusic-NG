@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, watch, nextTick, ref } from 'vue'
+import { computed, watch, nextTick, ref, defineAsyncComponent } from 'vue'
 import type { LyricLine as CoreLyricLine } from '@applemusic-like-lyrics/core'
 import { LyricsView, parseLyrics } from 'suth-lyric-kit'
-import AMLLLyricPlayer from '../AMLL/LyricPlayer.vue'
+const AMLLLyricPlayer = defineAsyncComponent(() => import('../AMLL/LyricPlayer.vue'))
 import type { LyricPlayerRef } from '../AMLL/LyricPlayer.vue'
 import { parseLyricsToCore } from '../../../utils/lyric/lyricParser'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePlayerStore } from '../../../stores/playerStore'
 import { audioEngine } from '../../../audio/audio-engine'
+import { getTransitionController } from '../../../audio/transition-controller'
 
 const settingsStore = useSettingsStore()
 const playerStore = usePlayerStore()
@@ -124,6 +125,13 @@ const handleLineClick = (event: any) => {
 
   const targetMs = Math.round(startTime)
 
+  // 手动 seek：中断过渡流程，避免跳到末尾区域后仍按原触发点执行交叉淡化
+  const transitionController = getTransitionController()
+  if (transitionController.isActive) {
+    transitionController.abort()
+    playerStore.setTransitioning(false)
+  }
+
   audioEngine.seek(targetMs)
   playerStore.setPosition(targetMs)
 
@@ -131,6 +139,9 @@ const handleLineClick = (event: any) => {
     void audioEngine.resume()
     playerStore.setPlaying(true)
   }
+
+  // seek 中断了过渡流程：重新武装智能过渡，剩余播放时间仍能触发过渡
+  transitionController.rearmAfterSeek()
 }
 
 /**
@@ -182,7 +193,7 @@ watch([hidePassedLines, appleLyrics], ([enabled]) => {
         ref="lyricPlayerRef"
         :lyric-lines="appleLyrics"
         :current-time="currentTimeMs"
-        :playing="true"
+        :playing="playerStore.isPlaying"
         :enable-blur="enableBlur"
         :enable-spring="enableSpring"
         :hide-passed-lines="hidePassedLines"

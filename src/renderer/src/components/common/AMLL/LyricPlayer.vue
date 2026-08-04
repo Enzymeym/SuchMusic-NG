@@ -214,7 +214,7 @@ onUnmounted(() => {
 
 // 动画帧更新
 watchEffect((onCleanup) => {
-  if (!props.disabled) {
+  if (!props.disabled && props.playing) {
     let canceled = false
     let lastTime = -1
     const onFrame = (time: number) => {

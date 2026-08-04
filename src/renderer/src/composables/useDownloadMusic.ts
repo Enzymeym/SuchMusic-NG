@@ -7,7 +7,14 @@ export function useDownloadMusic() {
   const settingsStore = useSettingsStore()
   const message = useMessage()
 
+  let isDownloading = false
+
   const downloadMusic = async (song: PlayerSong) => {
+    if (isDownloading) {
+      message.warning('正在下载中，请稍后再试')
+      return
+    }
+    isDownloading = true
     try {
       // 1. 获取源信息
       let source = song.source || 'wy'
@@ -90,6 +97,8 @@ export function useDownloadMusic() {
     } catch (error: any) {
       console.error('下载失败:', error)
       message.error(`下载失败: ${error.message || '未知错误'}`)
+    } finally {
+      isDownloading = false
     }
   }
 

@@ -6,6 +6,7 @@
  * 延迟初始化策略：组件挂载后延迟一帧再设置 Canvas 和注册 FFT 回调，
  * 避免与播放页面的初次渲染竞争资源导致前端卡死。
  * 渲染循环按需启动：仅在收到 FFT 数据或播放状态变化时启动/停止。
+ * 可见性检测：组件不可见或页面隐藏时自动暂停渲染循环，减少 CPU/GPU 占用。
  */
 import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { usePlayerStore } from '../../stores/playerStore'
@@ -25,6 +26,8 @@ let smoothedData = new Float32Array(128)
 let rawSpectrum = new Float32Array(128)
 let fftCleanup: (() => void) | null = null
 let isUnmounted = false
+let isVisible = true
+let observer: IntersectionObserver | null = null
 
 // 缓存的主题色 RGB
 let cachedAccentR = 255
@@ -86,19 +89,21 @@ function drawBars(): void {
 
   ctx.clearRect(0, 0, canvasW, canvasH)
 
+  // 将所有柱状图合并到单个路径，一次 fill() 完成，减少 GPU 绘制调用
+  const midAlpha = 0.44
+  ctx.fillStyle = `rgba(${cachedAccentR}, ${cachedAccentG}, ${cachedAccentB}, ${midAlpha})`
+  ctx.beginPath()
+
   for (let i = 0; i < BAR_COUNT; i++) {
     const value = Math.min(displayData[i], 1) * props.intensity
     if (value < 0.01) continue
 
     const barHeight = Math.max(value * maxBarHeight, 2)
-    const alpha = 0.4 + value * 0.08
 
     const x = barPositions[i]
     const y = canvasH - barHeight - (canvasH - maxBarHeight) / 2
     const radius = Math.min(barWidth / 2, 2)
 
-    ctx.fillStyle = `rgba(${cachedAccentR}, ${cachedAccentG}, ${cachedAccentB}, ${alpha})`
-    ctx.beginPath()
     ctx.moveTo(x + radius, y)
     ctx.lineTo(x + barWidth - radius, y)
     ctx.arcTo(x + barWidth, y, x + barWidth, y + radius, radius)
@@ -107,8 +112,9 @@ function drawBars(): void {
     ctx.lineTo(x, y + radius)
     ctx.arcTo(x, y, x + radius, y, radius)
     ctx.closePath()
-    ctx.fill()
   }
+
+  ctx.fill()
 }
 
 // 预分配 displayData 避免每帧创建
@@ -118,6 +124,12 @@ function renderFrame(): void {
   if (isUnmounted || !ctx) {
     renderActive = false
     animationId = null
+    return
+  }
+
+  // 组件不可见或页面隐藏时暂停渲染
+  if (!isVisible || document.hidden) {
+    animationId = requestAnimationFrame(renderFrame)
     return
   }
 
@@ -167,10 +179,15 @@ function ensureRenderLoop(): void {
   animationId = requestAnimationFrame(renderFrame)
 }
 
-function handleResize(): void {
-  if (canvasRef.value) {
-    setupCanvas(canvasRef.value, props.size)
-  }
+let resizeTimer: ReturnType<typeof setTimeout> | null = null
+
+function debouncedHandleResize(): void {
+  if (resizeTimer) clearTimeout(resizeTimer)
+  resizeTimer = setTimeout(() => {
+    if (canvasRef.value) {
+      setupCanvas(canvasRef.value, props.size)
+    }
+  }, 150)
 }
 
 onMounted(() => {
@@ -198,14 +215,33 @@ onMounted(() => {
       }
     }
 
-    window.addEventListener('resize', handleResize)
+    // 可见性检测：离开视口时暂停渲染
+    observer = new IntersectionObserver(
+      (entries) => {
+        isVisible = entries[0]?.isIntersecting ?? true
+      },
+      { threshold: 0 }
+    )
+    if (canvasRef.value) {
+      observer.observe(canvasRef.value)
+    }
+
+    window.addEventListener('resize', debouncedHandleResize)
   })
 })
 
 onUnmounted(() => {
   isUnmounted = true
   renderActive = false
-  window.removeEventListener('resize', handleResize)
+  window.removeEventListener('resize', debouncedHandleResize)
+  if (resizeTimer) {
+    clearTimeout(resizeTimer)
+    resizeTimer = null
+  }
+  if (observer) {
+    observer.disconnect()
+    observer = null
+  }
   if (fftCleanup) {
     fftCleanup()
     fftCleanup = null
@@ -218,7 +254,7 @@ onUnmounted(() => {
 })
 
 watch(() => props.size, () => {
-  handleResize()
+  debouncedHandleResize()
 })
 </script>
 

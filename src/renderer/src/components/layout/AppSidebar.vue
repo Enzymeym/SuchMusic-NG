@@ -64,7 +64,6 @@ watch(
     else if (newPath === '/recent') activeKey.value = 'recent'
     else if (newPath === '/singer') activeKey.value = 'singer'
     else if (newPath === '/album') activeKey.value = 'album'
-    else if (newPath === '/plugins') activeKey.value = 'plugins'
   },
   { immediate: true }
 )
@@ -78,7 +77,6 @@ watch(activeKey, (newKey) => {
   else if (newKey === 'recent') router.push('/recent')
   else if (newKey === 'singer') router.push('/singer')
     else if (newKey === 'album') router.push('/album')
-    else if (newKey === 'plugins') router.push('/plugins')
 })
 
 const menuOptions: MenuOption[] = [
@@ -116,11 +114,6 @@ const menuOptions: MenuOption[] = [
     label: '统计',
     key: 'statistics',
     icon: renderIcon('mgc_chart_bar_line')
-  },
-  {
-    label: '插件',
-    key: 'plugins',
-    icon: renderIcon('mgc_cube_3d_line')
   },
 ]
 </script>

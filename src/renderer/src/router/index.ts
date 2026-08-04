@@ -15,8 +15,6 @@ const AlbumView = () => import('../views/AlbumView.vue')
 const AlbumDetailView = () => import('../views/AlbumDetailView.vue')
 const DesktopLyricView = () => import('../views/DesktopLyricView.vue')
 const TaskbarLyricView = () => import('../views/TaskbarLyricView.vue')
-const PluginView = () => import('../views/PluginView.vue')
-const PluginDetailView = () => import('../views/PluginDetailView.vue')
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -79,16 +77,6 @@ const router = createRouter({
           path: 'statistics',
           name: 'statistics',
           component: StatisticsView
-        },
-        {
-          path: 'plugins',
-          name: 'plugins',
-          component: PluginView
-        },
-        {
-          path: 'plugin/:id',
-          name: 'plugin-detail',
-          component: PluginDetailView
         }
       ]
     },

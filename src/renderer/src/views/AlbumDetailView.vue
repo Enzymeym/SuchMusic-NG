@@ -180,6 +180,7 @@ onMounted(() => {
   overflow-x: hidden;
   position: relative;
   width: 100%;
+  padding-top: 64px;
 }
 
 .not-found {

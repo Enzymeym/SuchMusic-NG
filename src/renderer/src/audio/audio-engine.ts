@@ -32,6 +32,8 @@ class AudioEngine {
   private onEndedRef: (() => void) | null = null
   private currentVolume = 1.0
   private volumeBoost = 1.0
+  /** 按曲补偿增益（dB，音量平衡功能），默认 0 */
+  private trackGainDb = 0
 
   private getApi() {
     return (window as any).api?.audioEngine
@@ -48,15 +50,18 @@ class AudioEngine {
   /** 检查 Web Audio API 是否可用 */
   public isWebAudioAvailable(): boolean {
     try {
-      return typeof AudioContext !== 'undefined' || typeof (window as any).webkitAudioContext !== 'undefined';
+      return (
+        typeof AudioContext !== 'undefined' ||
+        typeof (window as any).webkitAudioContext !== 'undefined'
+      )
     } catch {
-      return false;
+      return false
     }
   }
 
   // 确保引擎初始化
   public async ensureContext(): Promise<void> {
-    if (isWebAudioMode()) return  // Web Audio 无需初始化 Rust 引擎
+    if (isWebAudioMode()) return // Web Audio 无需初始化 Rust 引擎
     const api = this.getApi()
     if (!api) return
     try {
@@ -77,7 +82,9 @@ class AudioEngine {
     }
     const api = this.getApi()
     if (!api) return
-    await api.stop().catch((err) => { console.error('[AudioEngine] stop failed:', err) })
+    await api.stop().catch((err) => {
+      console.error('[AudioEngine] stop failed:', err)
+    })
   }
 
   // 淡出并停止
@@ -107,7 +114,9 @@ class AudioEngine {
       await api.stop()
       await api.setVolume(currentVol)
     } catch {
-      await api.stop().catch((err) => { console.error('[AudioEngine] fadeOutAndStop cleanup failed:', err) })
+      await api.stop().catch((err) => {
+        console.error('[AudioEngine] fadeOutAndStop cleanup failed:', err)
+      })
     }
   }
 
@@ -119,15 +128,21 @@ class AudioEngine {
     }
     const api = this.getApi()
     if (!api) return
-    await api.pause().catch((err) => { console.error('[AudioEngine] pause failed:', err) })
+    await api.pause().catch((err) => {
+      console.error('[AudioEngine] pause failed:', err)
+    })
   }
 
   // 恢复播放
   public async play(): Promise<boolean> {
     if (isWebAudioMode()) {
-      // Web Audio: 如果是暂停状态则恢复，否则是全新播放（由 audioPlayerManager 触发）
+      // Web Audio: 暂停状态 → 恢复；否则视为全新播放（由 audioPlayerManager 触发）
       if (webAudioOutputEngine.isPaused) {
         webAudioOutputEngine.resume()
+      } else if (!webAudioOutputEngine.isPlaying && webAudioOutputEngine.isReady) {
+        // 引擎已加载但处于"非暂停、未播放"状态（歌曲自然结束 / stop 后）：
+        // 从当前位置重新播放，避免 UI 显示播放中而引擎静默的卡死状态
+        webAudioOutputEngine.play(webAudioOutputEngine.getPositionMs() / 1000)
       }
       return true
     }
@@ -210,16 +225,29 @@ class AudioEngine {
     await this.applyEffectiveVolume()
   }
 
-  // 应用 effective gain = volume * boost 到底层引擎
+  // 设置按曲补偿增益（dB，音量平衡功能），安全钳制到 ±24 dB
+  public async setTrackGainDb(db: number): Promise<void> {
+    this.trackGainDb = Math.max(-24, Math.min(24, db))
+    await this.applyEffectiveVolume()
+  }
+
+  // 应用 effective gain = volume * boost * trackGain 到底层引擎
   private async applyEffectiveVolume(): Promise<void> {
-    const effectiveGain = this.currentVolume * this.volumeBoost
+    const trackGain = Math.pow(10, this.trackGainDb / 20)
+    // 有效增益钳制在 [0.125, 4]，防止极端补偿导致爆音或无声
+    const effectiveGain = Math.min(4, Math.max(0.125, this.currentVolume * this.volumeBoost * trackGain))
     if (isWebAudioMode()) {
       webAudioOutputEngine.setVolume(effectiveGain)
       return
     }
     const api = this.getApi()
     if (!api) return
-    await api.setVolume(effectiveGain).catch((err) => { console.error('[AudioEngine] setVolume failed:', err) })
+    // WASAPI 引擎尚未创建（如应用启动早期 / 模式切换前）时静默跳过：
+    // 音量值已记录在 currentVolume，引擎创建后、播放前会再次应用
+    if (!api.getEngineId?.()) return
+    await api.setVolume(effectiveGain).catch((err) => {
+      console.error('[AudioEngine] setVolume failed:', err)
+    })
   }
 
   /**
@@ -233,7 +261,9 @@ class AudioEngine {
     }
     const api = this.getApi()
     if (!api) return
-    await api.setPlaybackRate?.(rate).catch((err) => { console.error('[AudioEngine] setPlaybackRate failed:', err) })
+    await api.setPlaybackRate?.(rate).catch((err) => {
+      console.error('[AudioEngine] setPlaybackRate failed:', err)
+    })
   }
 
   /**
@@ -293,7 +323,7 @@ class AudioEngine {
       if (!dsp) return
       if (strength > 0) {
         dsp.setLimiterEnabled(true)
-        const ceiling = -0.3 - (strength * 2.7)
+        const ceiling = -0.3 - strength * 2.7
         dsp.setLimiterParams({
           ceiling: Math.max(ceiling, -3),
           release: 50
@@ -310,7 +340,7 @@ class AudioEngine {
       if (!state) return
       if (strength > 0) {
         await api.setLimiterEnabled(true)
-        const ceiling = -0.3 - (strength * 2.7)
+        const ceiling = -0.3 - strength * 2.7
         await api.setLimiter({
           ceilingDb: Math.max(ceiling, -3),
           releaseMs: 50
@@ -354,7 +384,10 @@ class AudioEngine {
       const state = await api.getState().catch(() => null)
       if (!state) return
       const bandTypeMap: Record<string, string> = {
-        lowShelf: 'lowShelf', highShelf: 'highShelf', peaking: 'peaking', notch: 'notch'
+        lowShelf: 'lowShelf',
+        highShelf: 'highShelf',
+        peaking: 'peaking',
+        notch: 'notch'
       }
       await api.setEqBand(index, {
         frequency: settings.frequency ?? 1000,
@@ -400,7 +433,9 @@ class AudioEngine {
       const state = await api.getState().catch(() => null)
       if (!state) return
       await api.setCompressorEnabled(enabled)
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   public async setCompressorParams(params: CompressorParams): Promise<void> {
@@ -421,7 +456,9 @@ class AudioEngine {
         releaseMs: params.release,
         kneeDb: params.knee
       })
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   public getCompressorGainReduction(): number {
@@ -445,7 +482,9 @@ class AudioEngine {
       const state = await api.getState().catch(() => null)
       if (!state) return
       await api.setLimiterEnabled(enabled)
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   public async setLimiterParams(params: LimiterParams): Promise<void> {
@@ -463,7 +502,9 @@ class AudioEngine {
         ceilingDb: params.ceiling,
         releaseMs: params.release
       })
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   public getLimiterGainReduction(): number {
@@ -484,7 +525,9 @@ class AudioEngine {
     // Rust 引擎通过 IPC 设置，若不可用则忽略
     const api = this.getApi()
     if (api && typeof api.setLoudnessEnabled === 'function') {
-      api.setLoudnessEnabled(enabled).catch(() => { /* ignore */ })
+      api.setLoudnessEnabled(enabled).catch(() => {
+        /* ignore */
+      })
     }
   }
 
@@ -507,7 +550,9 @@ class AudioEngine {
           direction: params.direction
         })
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   // ====== 虚拟低频控制 ======
@@ -564,6 +609,104 @@ class AudioEngine {
     const api = this.getApi()
     if (api?.setFftCallback) {
       return api.setFftCallback(callback)
+    }
+    return () => {}
+  }
+
+  // ====== Automix 智能过渡（Web Audio 模式） ======
+
+  /**
+   * 解码下一曲（Automix 预加载），不打断当前播放
+   * 仅 Web Audio 模式支持；其他模式返回 false
+   */
+  public async loadNextFromArrayBuffer(buffer: ArrayBuffer): Promise<boolean> {
+    if (isWebAudioMode()) {
+      return webAudioOutputEngine.loadNextFromArrayBuffer(buffer)
+    }
+    return false
+  }
+
+  /**
+   * 加载并解码为当前曲（Automix fade 过渡切歌用）
+   * 会停止当前播放；仅 Web Audio 模式支持
+   */
+  public async loadFromArrayBuffer(buffer: ArrayBuffer): Promise<boolean> {
+    if (isWebAudioMode()) {
+      return webAudioOutputEngine.loadFromArrayBuffer(buffer)
+    }
+    return false
+  }
+
+  /**
+   * 已解码的下一曲 AudioBuffer（供 head 特征分析）；无预加载时返回 null
+   */
+  public get nextAudioBuffer(): AudioBuffer | null {
+    if (!isWebAudioMode()) return null
+    return webAudioOutputEngine.nextAudioBuffer
+  }
+
+  /**
+   * 当前播放/加载曲目的 AudioBuffer（供智能过渡人声结尾分析）；
+   * 仅 Web Audio 模式可用，未加载曲目时返回 null
+   */
+  public get currentAudioBuffer(): AudioBuffer | null {
+    if (!isWebAudioMode()) return null
+    return webAudioOutputEngine.currentAudioBuffer
+  }
+
+  /**
+   * 用变速处理后的缓冲替换预解码的下一曲（Automix BPM 对齐变速用）
+   */
+  public setNextAudioBuffer(buf: AudioBuffer): void {
+    if (!isWebAudioMode()) return
+    webAudioOutputEngine.setNextAudioBuffer(buf)
+  }
+
+  /** 当前曲目时长（毫秒）；无已加载曲目返回 0（供过渡调度在元数据缺失时兜底） */
+  public getDurationMs(): number {
+    if (isWebAudioMode()) return webAudioOutputEngine.getDurationMs()
+    return 0
+  }
+
+  /**
+   * 开始交叉淡化过渡到下一曲（Automix）
+   * 前置条件：正在播放且已通过 loadNextFromArrayBuffer 预解码
+   * @param durationMs 交叉淡化时长（毫秒）
+   * @param nextStartOffsetMs 下一曲起始偏移（毫秒，跳过前奏），默认 0
+   */
+  public beginCrossfade(durationMs: number, nextStartOffsetMs: number = 0): boolean {
+    if (isWebAudioMode()) {
+      return webAudioOutputEngine.beginCrossfade(durationMs, nextStartOffsetMs)
+    }
+    return false
+  }
+
+  /** 设置交叉淡化完成回调 */
+  public setOnCrossfadeComplete(callback: (() => void) | null): void {
+    if (isWebAudioMode()) {
+      webAudioOutputEngine.setOnCrossfadeComplete(callback)
+    }
+  }
+
+  /** 是否正在交叉淡化过渡中 */
+  public get isCrossfading(): boolean {
+    if (isWebAudioMode()) return webAudioOutputEngine.isCrossfading
+    return false
+  }
+
+  /** 是否已有解码好的下一曲 */
+  public get hasNextBuffer(): boolean {
+    if (isWebAudioMode()) return webAudioOutputEngine.hasNextBuffer
+    return false
+  }
+
+  /**
+   * 注册实时时域帧数据回调（Automix 实时过渡点分析）
+   * 仅 Web Audio 模式支持；其他模式返回空函数
+   */
+  public onTimeDomainData(callback: (data: Float32Array) => void): () => void {
+    if (isWebAudioMode()) {
+      return webAudioOutputEngine.onTimeDomainData(callback)
     }
     return () => {}
   }

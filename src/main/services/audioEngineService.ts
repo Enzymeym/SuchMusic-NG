@@ -80,6 +80,9 @@ const decodedAudioCache = new Map<string, Buffer>();
 /** 预解码 Promise：load 时启动异步解码，play 时直接 await 结果 */
 const decodePromises = new Map<string, Promise<Buffer | null>>();
 
+/** 跟踪哪些 WebContents 设置了 FFT 回调，用于自动清理 */
+const engineToWebContents = new Map<string, Electron.WebContents>();
+
 let engineIdCounter = 0;
 
 /** 用户选择的音频输出配置（由渲染进程通过 IPC 同步） */
@@ -465,9 +468,30 @@ export function registerAudioEngineHandlers(): void {
       console.warn('[AudioEngine] 引擎不支持 FFT 回调');
       return;
     }
+
+    // 清理此 WebContents 之前的 FFT 回调，避免旧引用泄漏
+    const wc = event.sender;
+    if (engineToWebContents.has(engineId)) {
+      const oldWc = engineToWebContents.get(engineId)!;
+      if (oldWc !== wc && !oldWc.isDestroyed()) {
+        oldWc.removeAllListeners('destroyed');
+      }
+    }
+    engineToWebContents.set(engineId, wc);
+
+    // WebContents 销毁时自动清理 FFT 回调
+    wc.once('destroyed', () => {
+      if (engineToWebContents.get(engineId) === wc) {
+        engineToWebContents.delete(engineId);
+        if (engine && typeof engine.setFftCallback === 'function') {
+          engine.setFftCallback(() => {});
+        }
+      }
+    });
+
     engine.setFftCallback((spectrum: number[]) => {
       try {
-        event.sender.send('audio-engine:fft-data', spectrum);
+        wc.send('audio-engine:fft-data', spectrum);
       } catch (err) {
         // WebContents may be destroyed (e.g., page reload), silently ignore
       }
@@ -480,6 +504,12 @@ export function registerAudioEngineHandlers(): void {
     if (!engine || typeof engine.setFftCallback !== 'function') return;
     // 传入空函数清空回调，停止从 Rust 端推送 FFT 数据
     engine.setFftCallback(() => {});
+    // 清理 WebContents 追踪
+    const wc = engineToWebContents.get(engineId);
+    if (wc && !wc.isDestroyed()) {
+      wc.removeAllListeners('destroyed');
+    }
+    engineToWebContents.delete(engineId);
   });
 
   // 创建引擎

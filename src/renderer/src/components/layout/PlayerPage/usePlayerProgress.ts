@@ -1,6 +1,7 @@
 import { ref, computed } from 'vue'
 import { usePlayerStore } from '../../../stores/playerStore'
 import { audioEngine } from '../../../audio/audio-engine'
+import { getTransitionController } from '../../../audio/transition-controller'
 
 /**
  * 进度条相关的组合式函数
@@ -63,8 +64,18 @@ export function usePlayerProgress() {
     if (now - _lastSeekTime < 200) return
     _lastSeekTime = now
 
+    // 手动 seek 会改变播放位置：中断过渡流程，避免跳到末尾区域后
+    // 控制器仍按原触发点执行交叉淡化，导致歌曲信息/进度再次跳变
+    const transitionController = getTransitionController()
+    if (transitionController.isActive) {
+      transitionController.abort()
+      player.setTransitioning(false)
+    }
+
     player.setPosition(targetMs)
     audioEngine.seek(targetMs)
+    // seek 中断了过渡流程：重新武装智能过渡，剩余播放时间仍能触发过渡
+    transitionController.rearmAfterSeek()
   }
 
   /**
@@ -97,6 +108,14 @@ export function usePlayerProgress() {
       dragValue.value = (player.positionMs / player.currentSong.durationMs) * 100
     } else {
       dragValue.value = 0
+    }
+
+    // 拖拽开始即中断过渡流程：拖拽期间轮询仍在推进播放位置，
+    // 若不中断，拖到末尾区域时过渡可能在拖拽中执行并切换歌曲信息
+    const transitionController = getTransitionController()
+    if (transitionController.isActive) {
+      transitionController.abort()
+      player.setTransitioning(false)
     }
 
     isDraggingProgress.value = true
