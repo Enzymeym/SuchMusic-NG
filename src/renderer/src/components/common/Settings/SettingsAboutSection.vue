@@ -16,6 +16,16 @@ const themeVars = useThemeVars()
 const message = useMessage()
 const settingsStore = useSettingsStore()
 
+// 双击应用名称触发打开隐藏的 Morphaeum 实验分区
+const emit = defineEmits<{
+  (e: 'open-morphaeum'): void
+}>()
+
+const handleAppNameDblClick = () => {
+  message.success('正在进入 Morphaeum 变形实验室...')
+  emit('open-morphaeum')
+}
+
 // 使用更新系统 composable
 const {
   updateInfo,
@@ -71,7 +81,82 @@ try {
 
 // 应用名称与版本信息
 const appName = computed(() => 'Such Music')
-const appVersion = computed(() => currentVersion.value || '0.2.0')
+const appVersion = computed(() => currentVersion.value || '1.1.0')
+
+// 本地更新日志（优先使用，GitHub 获取失败时回退）
+const localChangelog: Record<string, string> = {
+  '1.1.0': `## v1.1.0
+
+> 发布日期：2026-08-04
+
+### 新增功能
+
+- 新增 Morphaeum 智能过渡模式（Automix），支持曲目间自动交叉淡化切换
+- 新增基于 WebNN + ONNX 的 AI 起始点检测，智能定位最佳过渡时机
+- 新增播放页流光文字提示（ShinyText），过渡状态嵌入封面蒙层展示
+- 新增音量平衡功能，按曲目自动补偿响度差异（ReplayGain 风格）
+- 新增歌手详情页专辑标签，支持专辑封面网格浏览与快速跳转
+- 新增过渡实验设置分区（Morphaeum 变形实验室），可调节过渡灵敏度
+
+### 优化改进
+
+- 播放栏全面重构，支持智能过渡模式切换与可视化反馈
+- 音频引擎升级为双音源架构（sourceA/sourceB），支持无缝交叉淡化
+- Web Audio 引擎新增时域帧回调，为过渡分析提供实时音频数据
+- 音频可视化器增强，优化频谱渲染与视觉效果
+- 播放页布局优化，过渡提示嵌入封面增强沉浸感
+- 设置页面交互与布局改进
+- 桌面歌词与任务栏歌词性能优化
+- 统计页面精简，移除冗余展示
+- 启用 WebNN 实验特性，NPU 环境自动加速 AI 推理
+
+### 移除
+
+- 移除在线插件系统（PluginView / PluginDetailView）及相关路由
+- 移除在线服务依赖，专注纯本地播放体验`,
+  '1.0.0-beta3': `## v1.0.0-beta3
+
+> 发布日期：2026-07-28
+
+### 新增功能
+
+- 新增本地更新日志展示，无需依赖网络即可查看版本变更
+- 新增播放列表底部状态栏，显示列表总数信息
+
+### 优化改进
+
+- 优化应用整体性能，减少内存占用
+- 优化设置页面布局与交互体验
+- 改进播放器控制栏交互与布局
+- 优化歌词解析与展示性能
+- 改进主界面布局结构的稳定性
+
+### Bug 修复
+
+- 修复播放列表页面滚动与布局相关显示问题
+- 修复若干已知 UI 问题，提升使用体验`,
+  '1.0.0-beta.2': `## v1.0.0-beta.2
+
+> 发布日期：2026-06-16
+
+### 新增功能
+
+- 新增歌词翻译支持
+- 新增 QQ 音乐歌词源优化
+- 重构歌词解析引擎，提升兼容性
+- 新增插件自动更新机制
+
+### 优化改进
+
+- 移除在线服务依赖，重构为纯本地音乐播放器
+- 大规模代码重构，优化整体架构
+- 优化 Linux 平台打包配置
+
+### Bug 修复
+
+- 修复 Linux 包打包失败问题
+- 修复部分依赖路径与编译错误`
+}
 
 // 更新日志相关
 const showChangelog = ref(false)
@@ -165,6 +250,15 @@ const fetchChangelog = async () => {
   showChangelog.value = true
   if (changelogContent.value) return
 
+  const version = appVersion.value
+
+  // 优先使用本地更新日志
+  if (localChangelog[version]) {
+    changelogContent.value = localChangelog[version]
+    currentChangelogVersion.value = version
+    return
+  }
+
   changelogLoading.value = true
   changelogError.value = ''
 
@@ -222,7 +316,16 @@ const fetchChangelog = async () => {
     }
   } catch (e: any) {
     console.error('Fetch changelog error:', e)
-    changelogError.value = '获取更新日志失败，请检查网络连接或稍后重试。'
+    // 网络请求失败时，尝试使用任意本地日志作为回退
+    const localKeys = Object.keys(localChangelog)
+    if (localKeys.length > 0) {
+      changelogContent.value =
+        `> **提示**：无法获取在线更新日志，以下为本地缓存的更新日志：\n\n` +
+        localChangelog[localKeys[0]]
+      currentChangelogVersion.value = localKeys[0]
+    } else {
+      changelogError.value = '获取更新日志失败，请检查网络连接或稍后重试。'
+    }
   } finally {
     changelogLoading.value = false
   }
@@ -251,7 +354,7 @@ const renderedChangelog = computed(() => {
 <template>
   <div class="settings-content about-root">
     <div class="about-hero">
-      <div class="about-hero-title">
+      <div class="about-hero-title" title="Such Music" @dblclick="handleAppNameDblClick">
         {{ appName }}
       </div>
       <div class="about-hero-version">

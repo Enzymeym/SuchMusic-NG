@@ -1,6 +1,6 @@
 {
   "name": "such-pc-ng",
-  "version": "1.0.0-beta.2",
+  "version": "1.1.0",
   "description": "一款简洁，美观的音乐播放器",
   "main": "./out/main/index.js",
   "author": "Enzymeym",
@@ -17,6 +17,7 @@
     "build": "powershell -ExecutionPolicy Bypass -File scripts/build-native.ps1 -Release && npm run typecheck && electron-vite build",
     "build:native": "powershell -ExecutionPolicy Bypass -File scripts/build-native.ps1",
     "build:native:release": "powershell -ExecutionPolicy Bypass -File scripts/build-native.ps1 -Release",
+    "generate:model": "node scripts/generate-onset-model.mjs",
     "postinstall": "electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",
     "build:win": "npm run build && powershell -ExecutionPolicy Bypass -File scripts/generate-appx-icons.ps1 && electron-builder --win",
@@ -63,6 +64,7 @@
     "music-metadata": "^9.0.3",
     "naive-ui": "^2.43.2",
     "node-id3": "^0.2.9",
+    "onnxruntime-web": "^1.27.0",
     "pinia": "^3.0.4",
     "suth-lyric-kit": "link:packages/suth-lyric-kit",
     "vue-router": "^4.6.4",
