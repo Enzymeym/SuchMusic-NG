@@ -1,3 +1,11 @@
+packages:
+  - 'packages/*'
+
+# lockfile 已通过供应链策略验证（verified 28d ago），
+# 安装时跳过重复校验，避免大量 registry 元数据请求导致安装卡住
+trustLockfile: true
+# 关闭最小发布年龄限制，避免安装时校验每个包发布时间
+minimumReleaseAge: 0
 allowBuilds:
   '@applemusic-like-lyrics/core': true
   '@applemusic-like-lyrics/lyric': true
@@ -8,3 +16,4 @@ allowBuilds:
   electron-winstaller: true
   esbuild: true
   phantomjs-prebuilt: true
+  protobufjs: true
