@@ -50,6 +50,10 @@ export const BEAT_HISTORY_SEC = 60
 export const EARLY_DECIDE_SEC = 30
 /** 结尾人声分析范围（秒）：从歌曲结尾向前扫描该窗口内最后一个持续人声段 */
 export const VOCAL_END_ANALYSIS_SEC = 90
+/** 结尾无人声段分析窗口（秒）：与 EARLY_DECIDE_SEC 一致，仅在结尾窗口内寻找过渡用无人声段 */
+export const VOCAL_GAP_ANALYSIS_SEC = EARLY_DECIDE_SEC
+/** 无人声段最小可用时长（秒）：结尾 30s 内无人声段不足该时长时沿用老逻辑过渡 */
+export const MIN_VOCAL_GAP_SEC = 10
 /** 两次决策产出的最小间隔（秒） */
 export const DECIDE_MIN_INTERVAL_SEC = 0.5
 /** 尾部分析所需最少历史时长（秒），数据不足不产出决策 */
@@ -93,6 +97,14 @@ export interface TailFeatures {
   decayStartSec: number
   /** 衰减速率（能量相对每秒下降比例，0~1） */
   decayRate: number
+}
+
+/** 结尾无人声段（人声间隔） */
+export interface VocalGap {
+  /** 无人声段起始位置（秒，相对传入数据开头） */
+  startSec: number
+  /** 无人声段时长（秒） */
+  durationSec: number
 }
 
 /** 过渡策略 */
@@ -409,6 +421,56 @@ function findVocalEnd(windows: VocalWindow[], windowSec: number): number {
 }
 
 /**
+ * 从频谱窗口序列中判定"结尾无人声段"（纯函数，同步/异步版本共用）
+ * 在结尾窗口内寻找时长 ≥ minGapSec 的无人声段（人声间隔）：
+ * - 复用 findVocalEnd 的 vocal 活跃判定（1k-4kHz 占比显著且能量达底限）
+ * - 收集所有连续非活跃窗口段为 gap，过滤时长 ≥ minGapSec，返回最晚出现的 gap
+ * - 窗口内无任何活跃窗口（无人声信号，如纯器乐曲）时返回 null，由调用方沿用老逻辑
+ * @returns 最晚出现的可用无人声段；无符合条件段返回 null
+ */
+function findVocalGap(windows: VocalWindow[], windowSec: number, minGapSec: number): VocalGap | null {
+  if (windows.length < 10) return null
+
+  // 阈值与人声起点/结尾检测一致：全段 70 分位的 60%，能量需高于内容底限
+  const sorted = [...windows.map((w) => w.vocalRatio)].sort((a, b) => a - b)
+  const vocalLevel = sorted[Math.floor(sorted.length * 0.7)]
+  const threshold = Math.max(0.05, vocalLevel * VOCAL_LEVEL_RATIO)
+  const minContentRms = Math.max(ONSET_MIN_RMS * 0.6, SILENCE_THRESHOLD * 2)
+
+  const active = windows.map((w) => w.vocalRatio >= threshold && w.rms >= minContentRms)
+  // 窗口内无任何人声 → 无人声段概念不适用，返回 null（沿用老逻辑）
+  if (!active.some((a) => a)) return null
+
+  // 收集连续非活跃窗口段（gap）
+  const gaps: VocalGap[] = []
+  let gapStartIdx = -1
+  for (let i = 0; i < active.length; i++) {
+    const isActive = i < active.length && active[i]
+    if (!isActive && gapStartIdx < 0) {
+      gapStartIdx = i
+    } else if (isActive && gapStartIdx >= 0) {
+      gaps.push({
+        startSec: windows[gapStartIdx].startSec,
+        durationSec: (i - gapStartIdx) * windowSec
+      })
+      gapStartIdx = -1
+    }
+  }
+  if (gapStartIdx >= 0) {
+    // 延伸到窗口末尾的 gap（最后的器乐尾奏）
+    gaps.push({
+      startSec: windows[gapStartIdx].startSec,
+      durationSec: (active.length - gapStartIdx) * windowSec
+    })
+  }
+
+  const qualifying = gaps.filter((g) => g.durationSec >= minGapSec)
+  if (qualifying.length === 0) return null
+  // 取最晚出现的可用无人声段（尽可能保留更多歌曲内容）
+  return qualifying.reduce((best, g) => (g.startSec > best.startSec ? g : best))
+}
+
+/**
  * 当前歌曲"人声结尾"分析（智能过渡触发点）
  * 过渡应从上一首"人声接近结尾处"开始：从歌曲结尾向前扫描最后一个持续
  * 人声活跃段（1k-4kHz 占比显著且能量达底限），返回该段结束位置。
@@ -448,6 +510,49 @@ export async function analyzeVocalEndAsync(
     startSample
   )
   return findVocalEnd(windows, windowSec)
+}
+
+/**
+ * 当前歌曲"结尾无人声段"分析（智能过渡触发点优化）
+ * 在结尾 windowSec（默认 30s）窗口内寻找最晚出现的、时长 ≥ MIN_VOCAL_GAP_SEC
+ * 的无人声段（人声间隔：器乐尾奏 / 器乐间奏），返回其起点，使过渡在无人声段内进行，
+ * 避免与歌声重叠产生突兀听感；窗口内无人声段不足 10s 或无任何人声时返回 null，
+ * 由调用方沿用老逻辑（人声结尾 / 实时决策 / 最晚兜底）。
+ *
+ * 注意：本函数为同步版本，扫描 30s 需数百 ms，阻塞主线程；播放路径
+ * 请使用 analyzeVocalGapAsync（分块让出主线程，避免 UI 卡死）。
+ *
+ * @param channelData 单声道 PCM 数据
+ * @param sampleRate 采样率
+ * @param windowSec 从歌曲结尾向前分析的范围（秒），默认 VOCAL_GAP_ANALYSIS_SEC
+ * @returns 无人声段 { startSec, durationSec }（相对 channelData 开头）；无符合条件段返回 null
+ */
+export function analyzeVocalGap(
+  channelData: Float32Array,
+  sampleRate: number,
+  windowSec: number = VOCAL_GAP_ANALYSIS_SEC
+): VocalGap | null {
+  const startSample = Math.max(0, channelData.length - Math.floor(windowSec * sampleRate))
+  const { windows, windowSec: winSec } = computeVocalProfile(channelData, sampleRate, startSample)
+  return findVocalGap(windows, winSec, MIN_VOCAL_GAP_SEC)
+}
+
+/**
+ * 分块异步版本的"结尾无人声段"分析：与 analyzeVocalGap 结果一致，但每批
+ * 窗口处理完让出主线程，避免长时间同步 FFT 阻塞 UI（播放卡死）。
+ */
+export async function analyzeVocalGapAsync(
+  channelData: Float32Array,
+  sampleRate: number,
+  windowSec: number = VOCAL_GAP_ANALYSIS_SEC
+): Promise<VocalGap | null> {
+  const startSample = Math.max(0, channelData.length - Math.floor(windowSec * sampleRate))
+  const { windows, windowSec: winSec } = await computeVocalProfileAsync(
+    channelData,
+    sampleRate,
+    startSample
+  )
+  return findVocalGap(windows, winSec, MIN_VOCAL_GAP_SEC)
 }
 
 /**
@@ -521,6 +626,56 @@ export async function analyzeContentStartAsync(
   const length = Math.min(channelData.length, Math.floor(maxSec * sampleRate))
   const { windows, windowSec } = await computeVocalProfileAsync(channelData, sampleRate, 0, length)
   return findContentStart(windows, windowSec)
+}
+
+/**
+ * 下一首"人声起点"分析（gap 过渡落点优化）
+ * 无人声段过渡时，下一首应从其"人声起点"（第一个显著人声进入点）开始淡入，
+ * 使衔接呈现"器乐 → 人声"的自然过渡。扫描数据前 maxSec 秒，复用
+ * detectVocalRise（1k-4kHz 占比相对基线显著跃升且持续）检测人声起点；
+ * 检测不到（纯器乐 / 前奏过长 / 数据过短）返回 -1，由调用方沿用内容起点逻辑。
+ *
+ * @param channelData 单声道 PCM 数据
+ * @param sampleRate 采样率
+ * @param maxSec 从数据开头向后扫描的范围（秒），默认 CONTENT_ANALYSIS_SEC
+ * @returns 人声起点（秒，相对数据开头，≥ 0）；未检测到返回 -1
+ */
+export function analyzeVocalStart(
+  channelData: Float32Array,
+  sampleRate: number,
+  maxSec: number = CONTENT_ANALYSIS_SEC
+): number {
+  const dataLenSec = channelData.length / sampleRate
+  if (dataLenSec < 1) return -1
+  const scanLen = Math.floor(Math.min(maxSec, dataLenSec) * sampleRate)
+  const { windows, windowSec } = computeVocalProfile(channelData, sampleRate, 0, scanLen)
+  if (windows.length < 10) return -1
+  const vocalRatios = windows.map((w) => w.vocalRatio)
+  const rmsValues = windows.map((w) => w.rms)
+  const sustainCount = Math.max(1, Math.round(0.5 / windowSec))
+  const minContentRms = Math.max(ONSET_MIN_RMS * 0.6, SILENCE_THRESHOLD * 2)
+  return detectVocalRise(vocalRatios, rmsValues, windowSec, sustainCount, minContentRms)
+}
+
+/**
+ * 分块异步版本的"人声起点"分析：与 analyzeVocalStart 结果一致，但每批
+ * 窗口处理完让出主线程，避免长时间同步 FFT 阻塞 UI（播放卡死）。
+ */
+export async function analyzeVocalStartAsync(
+  channelData: Float32Array,
+  sampleRate: number,
+  maxSec: number = CONTENT_ANALYSIS_SEC
+): Promise<number> {
+  const dataLenSec = channelData.length / sampleRate
+  if (dataLenSec < 1) return -1
+  const scanLen = Math.floor(Math.min(maxSec, dataLenSec) * sampleRate)
+  const { windows, windowSec } = await computeVocalProfileAsync(channelData, sampleRate, 0, scanLen)
+  if (windows.length < 10) return -1
+  const vocalRatios = windows.map((w) => w.vocalRatio)
+  const rmsValues = windows.map((w) => w.rms)
+  const sustainCount = Math.max(1, Math.round(0.5 / windowSec))
+  const minContentRms = Math.max(ONSET_MIN_RMS * 0.6, SILENCE_THRESHOLD * 2)
+  return detectVocalRise(vocalRatios, rmsValues, windowSec, sustainCount, minContentRms)
 }
 
 /**
@@ -705,6 +860,8 @@ export interface SmartTriggerParams {
   durationMs: number
   /** 配置的过渡（淡化）时长（毫秒） */
   transitionMs: number
+  /** 结尾 30s 内无人声段触发点（毫秒，相对歌曲开头）；<= 0 表示未检测到合适的无人声段 */
+  vocalGapStartMs: number
   /** 人声结尾触发点（毫秒，相对歌曲开头）；<= 0 表示未检测到人声 */
   vocalEndTriggerMs: number
   /** 实时分析决策的过渡起点（毫秒）；<= 0 表示无决策 */
@@ -716,8 +873,12 @@ export interface SmartTriggerParams {
  *
  * 过渡必须限制在"歌曲结尾 30s 窗口"内开始（EARLY_DECIDE_SEC），窗口外提前
  * 过渡会让歌曲中途就被切走（如人声结束很早、后半段是长器乐尾声时，人声结尾
- * 分析点会落在歌曲中间）：
- * - 分析点（人声结尾 / 实时决策）在窗口内且早于最晚触发点 → 按分析点触发
+ * 分析点会落在歌曲中间）。
+ * 分析点优先级：结尾无人声段 > 人声结尾 > 实时决策——若结尾 30s 内检测到
+ * 时长 ≥ 10s 的无人声段（器乐尾奏 / 器乐间奏），过渡从该无人声段起点开始，
+ * 淡入淡出完全落在无人声段内，避免与歌声重叠产生突兀听感；无人声段不足 10s
+ * 或无任何人声（纯器乐曲）时回退到人声结尾 / 实时决策：
+ * - 分析点在窗口内且早于最晚触发点 → 按分析点触发
  *   （过渡从上一首"人声接近结尾处"开始，衔接最自然）
  * - 分析点早于窗口起点 → 钳制到窗口起点（结尾前 30s），歌曲结束前 30s 内才开始
  * - 分析点缺失或过晚（歌曲以人声/镲片收尾、人声几乎持续到结尾）→ 回退到最晚
@@ -732,11 +893,13 @@ export function computeSmartTriggerMs(params: SmartTriggerParams): number {
   // 最早触发点：过渡不得早于"结尾前 30s"窗口，避免歌曲中途被切走
   const earliestStartMs = Math.max(0, params.durationMs - EARLY_DECIDE_SEC * 1000)
   const analyticalMs =
-    params.vocalEndTriggerMs > 0
-      ? params.vocalEndTriggerMs
-      : params.decisionStartMs > 0
-        ? params.decisionStartMs
-        : -1
+    params.vocalGapStartMs > 0
+      ? params.vocalGapStartMs
+      : params.vocalEndTriggerMs > 0
+        ? params.vocalEndTriggerMs
+        : params.decisionStartMs > 0
+          ? params.decisionStartMs
+          : -1
   if (analyticalMs <= 0) return latestStartMs
   return Math.min(Math.max(analyticalMs, earliestStartMs), latestStartMs)
 }

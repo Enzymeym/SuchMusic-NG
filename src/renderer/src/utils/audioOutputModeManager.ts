@@ -17,6 +17,9 @@
 /// 音频输出模式类型
 export type AudioOutputMode = 'webaudio' | 'wasapi-shared' | 'wasapi-exclusive';
 
+// 延迟引用，仅运行时调用（与现有 settingsStore ↔ audio-engine 的循环引用模式一致）
+import { useSettingsStore } from '../stores/settingsStore';
+
 // ====== 平台检测 ======
 
 /** 是否运行在 Windows 平台 */
@@ -36,6 +39,18 @@ export function getAvailableOutputModes(): AudioOutputMode[] {
 /** 获取平台默认音频输出模式 */
 export function getDefaultOutputMode(): AudioOutputMode {
   return isWindowsPlatform() ? 'wasapi-shared' : 'webaudio';
+}
+
+/**
+ * 判断当前音频输出模式是否为 Web Audio（读取设置 store）
+ * @returns 是否为 Web Audio 模式；store 不可用时返回 false
+ */
+export function isWebAudioMode(): boolean {
+  try {
+    return useSettingsStore().playback.audioOutputMode === 'webaudio';
+  } catch {
+    return false;
+  }
 }
 
 /// 音频设备信息接口

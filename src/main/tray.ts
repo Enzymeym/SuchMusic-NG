@@ -18,7 +18,13 @@ export function createTray(): void {
   if (tray) return
 
   try {
-    const icon = nativeImage.createFromPath(getTrayIconPath())
+    const image = nativeImage.createFromPath(getTrayIconPath())
+    let icon = image
+    if (process.platform === 'darwin') {
+      // macOS 菜单栏图标标准尺寸为 16x16pt，且需为模板图像以适配菜单栏深浅色
+      icon = image.resize({ width: 16, height: 16 })
+      icon.setTemplateImage(true)
+    }
     tray = new Tray(icon)
   } catch (e) {
     console.error('创建托盘失败:', e)

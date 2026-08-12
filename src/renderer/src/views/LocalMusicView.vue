@@ -61,9 +61,8 @@
         :songs="filteredSongs" 
         :loading="loading"
         :current-playing-song-id="player.currentSong?.id ?? null"
-        :menu-options="contextMenuOptions"
+        :extra-menu-options="contextMenuOptions"
         @song-click="handleSongClick"
-        @preload="handlePreload"
         @context-menu-select="handleContextMenuSelect"
       />
       <TagEditDialog
@@ -307,33 +306,19 @@ const handleSongClick = (song: Song): void => {
   void playSong(song)
 }
 
-const handlePreload = (song: Song): void => {
-  message.info(`预加载: ${song.name}`)
-}
-
 const renderIcon = (iconClass: string) => {
   return () => h(NIcon, null, { default: () => h('i', { class: iconClass }) })
 }
 
+// 本地音乐专属菜单项，追加在 SongList 统一基础菜单之后
 const contextMenuOptions = [
-  { label: '播放', key: 'play', icon: renderIcon('mgc_play_circle_line') },
-  { label: '下一首播放', key: 'playNext', icon: renderIcon('mgc_playlist_add_line') },
-  { type: 'divider', key: 'd1' },
   { label: '音乐标签编辑', key: 'editTags', icon: renderIcon('mgc_edit_2_line') },
-  { type: 'divider', key: 'd2' },
-  { label: '打开文件位置', key: 'openFileLocation', icon: renderIcon('mgc_folder_open_line') },
-  { type: 'divider', key: 'd3' },
-  { label: '查看专辑', key: 'viewAlbum', icon: renderIcon('mgc_album_2_line') }
+  { type: 'divider', key: 'd1' },
+  { label: '打开文件位置', key: 'openFileLocation', icon: renderIcon('mgc_folder_open_line') }
 ]
 
-const handleContextMenuSelect = async (key: string, song: Song) => {
+const handleContextMenuSelect = (key: string, song: Song) => {
   switch (key) {
-    case 'play':
-      await playSong(song)
-      break
-    case 'playNext':
-      message.info('下一首播放功能待实现')
-      break
     case 'editTags':
       if (song.filePath) {
         currentEditingSongPath.value = song.filePath
@@ -347,9 +332,6 @@ const handleContextMenuSelect = async (key: string, song: Song) => {
         // window.electron.ipcRenderer.send('show-item-in-folder', song.filePath)
         message.info(`文件路径: ${song.filePath}`)
       }
-      break
-    case 'viewAlbum':
-      message.info(`查看专辑: ${song.al?.name}`)
       break
     default:
       console.warn('Unknown context menu key:', key)

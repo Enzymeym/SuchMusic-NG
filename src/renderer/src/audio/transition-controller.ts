@@ -47,27 +47,23 @@ const BEAT_HISTORY_MS = 8000
 const STRETCH_HEAD_SEC = 30
 /** 变速超时（毫秒）：Worker 在限定时间内未完成则放弃变速（保持原速），确保过渡不被阻塞 */
 const STRETCH_TIMEOUT_MS = 60000
+/** 读文件 IPC 超时（毫秒）：主进程读文件挂起时放弃预解码，避免解码流程卡死 */
+const PRELOAD_READ_TIMEOUT_MS = 10000
+/** 下一曲解码超时（毫秒）：浏览器解码超大文件过慢时放弃预解码，走常规切歌 */
+const PRELOAD_DECODE_TIMEOUT_MS = 15000
+/** 触发点时间预算（毫秒）：距触发点不足该值时下一曲仍未就绪则放弃预解码，走常规硬切 */
+const TRIGGER_GUARD_MS = 10000
 
-// #region debug-point helper:dbg-log
-const dbgLog = (hypothesisId: string, location: string, msg: string, data: Record<string, unknown> = {}): void => {
-  try {
-    fetch('http://127.0.0.1:7777/event', {
-      method: 'POST',
-      body: JSON.stringify({
-        sessionId: 'first-play-no-transition',
-        runId: 'pre',
-        hypothesisId,
-        location,
-        msg: `[DEBUG] ${msg}`,
-        data,
-        ts: Date.now()
-      })
-    }).catch(() => {})
-  } catch {
-    /* 忽略 */
-  }
+/** 为 Promise 加超时：超时 reject（调用方 catch 降级），避免挂起的异步调用阻塞过渡流程 */
+const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+  let timer: number | null = null
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = window.setTimeout(() => reject(new Error(`${label}超时(${timeoutMs}ms)`)), timeoutMs)
+  })
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer !== null) clearTimeout(timer)
+  })
 }
-// #endregion
 
 /**
  * 过渡调度控制器（单例使用）
@@ -97,6 +93,10 @@ export class TransitionController {
   private decoding = false
   /** 下一曲起始偏移（毫秒，跳过前奏），预解码后计算 */
   private nextStartOffsetMs = 0
+  /** 当前曲结尾 30s 内无人声段触发点（毫秒，相对歌曲开头）；-1 表示未检测到合适的无人声段 */
+  private vocalGapStartMs = -1
+  /** 当前曲结尾无人声段分析是否已完成（区分"未分析"与"无 gap"） */
+  private vocalGapAnalyzed = false
   /** 当前曲人声结尾触发点（毫秒，smart 优先据此触发）；-1 表示未分析/未检测到人声 */
   private vocalEndTriggerMs = -1
   /** 当前曲结尾 30s 的 BPM（BPM_A）；0 表示未分析/无法估计 */
@@ -191,22 +191,14 @@ export class TransitionController {
   onSongStarted(song: PlayerSong): void {
     this.active = this.player.transitionEnabled && this.isWebAudioMode() && this.isLocalFile(song)
     this.trackId = String(song.id ?? '')
-    // #region debug-point A:on-song-started
-    dbgLog('A', 'transition-controller.ts:onSongStarted', 'onSongStarted', {
-      transitionEnabled: this.player.transitionEnabled,
-      outputMode: this.settings.playback.audioOutputMode,
-      isLocal: this.isLocalFile(song),
-      active: this.active,
-      songId: this.trackId,
-      durationMs: song.durationMs || audioEngine.getDurationMs()
-    })
-    // #endregion
     this.decision = null
     this.executed = false
     this.pendingSong = null
     this.pendingIndex = -1
     this.nextUnavailable = false
     this.nextStartOffsetMs = 0
+    this.vocalGapStartMs = -1
+    this.vocalGapAnalyzed = false
     this.vocalEndTriggerMs = -1
     this.currentBpm = 0
     this.nextBpm = 0
@@ -216,8 +208,10 @@ export class TransitionController {
 
     if (!this.active) return
 
-    // 时长缺失时用引擎实际时长，保证分析器"临近结尾"窗口与触发逻辑正确
-    const durationMs = song.durationMs || audioEngine.getDurationMs()
+    // 时长优先用引擎实际缓冲时长：经交叉淡化进入的歌曲可能被 BPM 对齐变速，
+    // 缓冲时长与元数据不一致。分析点与播放位置均在缓冲时间轴上，用元数据时长
+    // 会让"临近结尾"窗口与决策起点偏移 → 过渡触发过早/过晚（听感为跳变）
+    const durationMs = audioEngine.getDurationMs() || song.durationMs || 0
     this.analyzer?.start(this.trackId, durationMs)
     // 异步分析当前曲"人声结尾"位置（smart 过渡优先在该处触发）
     this.scheduleVocalEndAnalysis()
@@ -261,28 +255,39 @@ export class TransitionController {
     const bpmStart = Math.max(0, channel.length - Math.floor(BPM_ANALYSIS_WINDOW_SEC * sampleRate))
     let bpm = 0
     let endSec = -1
+    let gapSec = -1
     try {
-      // 并行计算，均跑在 Worker 线程，不占主线程
-      const [b, e] = await Promise.all([
+      // 并行计算，均跑在 Worker 线程，不占主线程：
+      // - 人声结尾扫描（结尾 90s）
+      // - 结尾无人声段分析（结尾 30s，smart 过渡触发点最高优先级）
+      const [b, e, g] = await Promise.all([
         dsp.estimateBpm(channel.slice(bpmStart), sampleRate),
-        dsp.analyzeVocalEnd(channel.slice(tailStart), sampleRate)
+        dsp.analyzeVocalEnd(channel.slice(tailStart), sampleRate),
+        dsp.analyzeVocalGap(channel.slice(tailStart), sampleRate)
       ])
       bpm = b
       endSec = e
+      gapSec = g
     } catch {
       // Worker 不可用（如销毁时挂起请求被拒绝），跳过本次分析
       return
     }
     // 分析期间可能已切歌 / 中断过渡
     if (!this.active || this.trackId !== trackId) return
+    this.vocalGapAnalyzed = true
     if (bpm > 0) this.currentBpm = bpm
-    if (endSec < 0) return
-    this.vocalEndTriggerMs = Math.round(endSec * 1000)
+    // 偏移修正：分析结果相对 tail 切片开头，需换算为歌曲绝对位置
+    const tailStartSec = tailStart / sampleRate
+    if (gapSec > 0) this.vocalGapStartMs = Math.round((tailStartSec + gapSec) * 1000)
+    if (endSec >= 0) this.vocalEndTriggerMs = Math.round((tailStartSec + endSec) * 1000)
+    // 人声结尾与无人声段均未检测到（纯器乐 / 数据不足）：沿用老逻辑，不在此处武装
+    if (endSec < 0 && this.vocalGapStartMs <= 0) return
     // 短曲 / 播放已越过有效触发点时立即进入节拍等待，避免错过触发点
     if (this.active && !this.executed && this.pendingSong) {
       const triggerMs = computeSmartTriggerMs({
         durationMs: Math.round(buf.duration * 1000),
         transitionMs: this.player.transitionDuration,
+        vocalGapStartMs: this.vocalGapStartMs,
         vocalEndTriggerMs: this.vocalEndTriggerMs,
         decisionStartMs: this.decision?.startPositionMs ?? -1
       })
@@ -298,43 +303,27 @@ export class TransitionController {
    */
   onProgress(positionMs: number): void {
     this.lastPositionMs = positionMs
-    // #region debug-point C:on-progress
-    dbgLog('C', 'transition-controller.ts:onProgress', 'onProgress', {
-      positionMs,
-      active: this.active,
-      executed: this.executed,
-      hasPending: !!this.pendingSong,
-      nextUnavailable: this.nextUnavailable,
-      decoding: this.decoding
-    })
-    // #endregion
     if (!this.active || this.executed) return
 
-    // 预解码尚未就绪时保持尝试（歌曲较长时延迟解码可节省内存）
-    if (!this.pendingSong && !this.nextUnavailable) {
-      void this.prepareNext()
-      return
-    }
-    if (!this.pendingSong) return
-
-    // 时长缺失（元数据未解析）时用引擎实际时长兜底，避免触发点永远不可达
-    let durationMs = this.player.currentSong?.durationMs ?? 0
-    if (durationMs <= 0) {
-      durationMs = audioEngine.getDurationMs()
-    }
+    // 时长优先用引擎实际缓冲时长（变速对齐后时间轴与播放位置一致）；
+    // 元数据时长可能与实际缓冲不符（变速对齐 / 压缩编码误差），用错时间轴
+    // 会让触发点过早（上一首被截断骤停）或过晚（错过过渡走硬切），听感为跳变
+    const durationMs = audioEngine.getDurationMs() || this.player.currentSong?.durationMs || 0
     if (durationMs <= 0) return
 
     const transitionMs = this.player.transitionDuration
     let triggerMs: number
     if (this.player.transitionType === 'smart') {
-      // 智能：优先用当前曲"人声结尾"触发点（过渡从上一首人声接近结尾处开始，
-      // 下一曲从人声起点进入）；未检测到人声（器乐曲）时回退实时分析决策。
-      // 分析点缺失或过晚时，最晚不晚于"结尾前 过渡时长 + 节拍提前量"，
+      // 智能：优先用当前曲结尾 30s 内"无人声段"触发点（过渡在器乐尾奏/器乐间奏内进行，
+      // 避免与歌声重叠产生突兀听感）；未检测到合适无人声段时回退"人声结尾"触发点
+      // （过渡从上一首人声接近结尾处开始，下一曲从人声起点进入）；均未检测到（器乐曲）
+      // 时回退实时分析决策。分析点缺失或过晚时，最晚不晚于"结尾前 过渡时长 + 节拍提前量"，
       // 保证"节拍对齐等待 + 完整淡化"在歌曲自然结束前完成——避免触发点落在
       // 最后几秒、淡化被歌曲结束截断而失去丝滑感（甚至错过过渡走常规切歌）
       triggerMs = computeSmartTriggerMs({
         durationMs,
         transitionMs,
+        vocalGapStartMs: this.vocalGapStartMs,
         vocalEndTriggerMs: this.vocalEndTriggerMs,
         decisionStartMs: this.decision?.startPositionMs ?? -1
       })
@@ -343,16 +332,20 @@ export class TransitionController {
       triggerMs = Math.max(0, durationMs - transitionMs)
     }
 
-    // #region debug-point D:trigger-check
-    dbgLog('D', 'transition-controller.ts:onProgress', 'trigger-check', {
-      positionMs,
-      durationMs,
-      transitionMs,
-      triggerMs,
-      reached: positionMs >= triggerMs,
-      type: this.player.transitionType
-    })
-    // #endregion
+    // 预解码时间预算守卫：距触发点不足 TRIGGER_GUARD_MS 时若下一首仍未就绪，
+    // 主动放弃预解码（本曲走常规硬切），避免解码/分析卡住时过渡无限等待
+    // （听感为"过渡时突然截止 + 等待很久"）
+    if (!this.pendingSong && !this.nextUnavailable && positionMs >= triggerMs - TRIGGER_GUARD_MS) {
+      this.nextUnavailable = true
+      return
+    }
+    // 预解码尚未就绪时保持尝试（歌曲较长时延迟解码可节省内存）
+    if (!this.pendingSong && !this.nextUnavailable) {
+      void this.prepareNext()
+      return
+    }
+    if (!this.pendingSong) return
+
     if (positionMs >= triggerMs) {
       if (this.player.transitionType === 'smart') {
         // 智能过渡：节拍对齐——等待下一个拍点再过渡，而非固定时间点
@@ -437,6 +430,7 @@ export class TransitionController {
     this.pendingSong = null
     this.pendingIndex = -1
     this.nextStartOffsetMs = 0
+    this.vocalGapStartMs = -1
     this.vocalEndTriggerMs = -1
     this.recentOnsets = []
     this.clearBeatWait()
@@ -465,27 +459,10 @@ export class TransitionController {
    */
   private async prepareNext(): Promise<void> {
     if (!this.active || this.pendingSong || this.nextUnavailable || this.decoding) {
-      // #region debug-point B:prepare-skip
-      if (this.decoding) {
-        dbgLog('B', 'transition-controller.ts:prepareNext', 'prepareNext 卡住(decoding=true)', {
-          active: this.active,
-          hasPending: !!this.pendingSong,
-          nextUnavailable: this.nextUnavailable
-        })
-      }
-      // #endregion
       return
     }
 
     const next = this.player.getNextSong()
-    // #region debug-point B:prepare-entry
-    dbgLog('B', 'transition-controller.ts:prepareNext', 'prepareNext 入口', {
-      hasNext: !!next,
-      nextId: next ? String(next.id) : '',
-      currentIndex: this.player.currentIndex,
-      playlistLen: this.player.playlist.length
-    })
-    // #endregion
     if (!next) {
       this.nextUnavailable = true
       return
@@ -512,11 +489,15 @@ export class TransitionController {
     // onProgress 不会把 pendingSong 视为就绪（避免偏移为 0 的过渡）
     this.decoding = true
     try {
-      const readResult = await api.readAudioFile(filePath)
+      const readResult: any = await withTimeout(api.readAudioFile(filePath), PRELOAD_READ_TIMEOUT_MS, '读文件')
       if (!readResult?.success) return
 
       const buffer = readResult.data!.buffer as ArrayBuffer
-      const ok = await audioEngine.loadNextFromArrayBuffer(buffer)
+      const ok = await withTimeout(
+        audioEngine.loadNextFromArrayBuffer(buffer),
+        PRELOAD_DECODE_TIMEOUT_MS,
+        '下一曲解码'
+      )
       // 立即释放 IPC 返回的大数据引用，帮助 GC 及时回收
       ;(readResult as any).data = null
       if (!ok) return
@@ -551,6 +532,15 @@ export class TransitionController {
         .analyzeContentStart(headSlice, nextAudio.sampleRate)
         .catch(() => 0)
 
+      // 无人声段（gap）过渡：下一首直接落在其"人声起点"（跳过器乐前奏），
+      // 使衔接呈现"器乐 → 人声"的自然过渡；检测不到人声起点则沿用内容起点（不回归）
+      if (this.vocalGapStartMs > 0) {
+        const vocalStartSec = await dsp
+          .analyzeVocalStart(headSlice, nextAudio.sampleRate)
+          .catch(() => -1)
+        if (vocalStartSec >= 0) startOffsetSec = vocalStartSec
+      }
+
       // 头部特征分析：取下一首前 HEAD_ANALYSIS_SEC 秒的声道 0 数据（拷贝后投递，避免 detach 播放缓冲）
       // 用变速前的缓冲：变速不变调，头部能量特征不受影响
       if (this.analyzer) {
@@ -566,23 +556,12 @@ export class TransitionController {
       this.nextStartOffsetMs = Math.round(startOffsetSec * 1000)
       this.pendingSong = next
       this.pendingIndex = nextIndex
-      // #region debug-point B:pending-set
-      dbgLog('B', 'transition-controller.ts:prepareNext', 'pendingSong 就绪', {
-        nextId: String(next.id),
-        nextStartOffsetMs: this.nextStartOffsetMs,
-        nextBpm: this.nextBpm,
-        currentBpm: this.currentBpm
-      })
-      // #endregion
     } catch (e) {
-      // #region debug-point B:prepare-error
-      dbgLog('B', 'transition-controller.ts:prepareNext', 'prepareNext 异常', {
-        error: String(e),
-        active: this.active,
-        trackId: this.trackId,
-        targetTrackId
-      })
-      // #endregion
+      // 读文件/解码超时（IPC 或浏览器解码挂起）：放弃本曲预解码走常规切歌，
+      // 避免反复重试卡住 decoding 导致过渡永久失效（听感为"过渡时突然截止 + 等待"）
+      if (e instanceof Error && /超时/.test(e.message)) {
+        this.nextUnavailable = true
+      }
       console.warn('[TransitionController] 预解码下一首失败:', e)
     } finally {
       this.decoding = false
@@ -598,7 +577,9 @@ export class TransitionController {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       if (!this.active) return
-      if (this.currentBpm > 0) return
+      // 当前曲结尾无人声段分析就绪即返回：gap 过渡需要 vocalGapStartMs 判定下一曲落点，
+      // 而 BPM 可能因器乐曲/数据不足为 0，此时不能干等 BPM 导致错过过渡
+      if (this.currentBpm > 0 || this.vocalGapAnalyzed) return
       await new Promise((r) => setTimeout(r, 50))
     }
   }
@@ -697,15 +678,6 @@ export class TransitionController {
     this.clearBeatWait()
     this.executed = true
     this.player.setTransitioning(true)
-    // #region debug-point E:execute-entry
-    dbgLog('E', 'transition-controller.ts:executeTransition', 'executeTransition 入口', {
-      pendingId: String(this.pendingSong.id),
-      lastPositionMs: this.lastPositionMs,
-      transitionDuration: this.player.transitionDuration,
-      engDurationMs: audioEngine.getDurationMs(),
-      engCrossfading: audioEngine.isCrossfading
-    })
-    // #endregion
 
     // 淡化时长按剩余播放时间收敛：触发点 + 节拍等待已消耗部分时间，
     // 避免淡化时长超过实际剩余时间（否则 sourceA 提前结束、淡化被截断）
@@ -724,13 +696,6 @@ export class TransitionController {
 
     // crossfade / smart：双源交叉淡化，下一曲从跳过前奏的偏移处开始
     const ok = audioEngine.beginCrossfade(fadeMs, this.nextStartOffsetMs)
-    // #region debug-point E:crossfade-result
-    dbgLog('E', 'transition-controller.ts:executeTransition', 'beginCrossfade 结果', {
-      ok,
-      fadeMs,
-      nextStartOffsetMs: this.nextStartOffsetMs
-    })
-    // #endregion
     if (!ok) {
       // 预解码失败或引擎不可用：回退到常规切歌路径
       this.rollback()
@@ -758,21 +723,23 @@ export class TransitionController {
       this.rollback()
       return
     }
-    // #region debug-point E:finish
-    dbgLog('E', 'transition-controller.ts:finishTransition', 'finishTransition 完成', {
-      nextId: String(this.pendingSong.id)
-    })
-    // #endregion
     const next = this.pendingSong
     const nextIndex = this.pendingIndex
 
     this.player.finishTransition(next, nextIndex)
+    // finishTransition 用播放列表副本重建 currentSong，其 durationMs 是元数据时长；
+    // 经交叉淡化进入的歌曲可能被 BPM 对齐变速，实际缓冲时长需写回当前曲，
+    // 否则下一轮触发点计算（onProgress/analyzer）与进度条/总时长基于错误时间轴
+    // → 过渡触发过早/过晚（听感为跳变）
+    const realDurationMs = audioEngine.getDurationMs()
+    if (realDurationMs > 0) this.player.setDuration(realDurationMs)
     this.active = false
     this.executed = false
     this.decision = null
     this.pendingSong = null
     this.pendingIndex = -1
     this.nextStartOffsetMs = 0
+    this.vocalGapStartMs = -1
     this.vocalEndTriggerMs = -1
     this.recentOnsets = []
     this.clearBeatWait()
@@ -786,6 +753,7 @@ export class TransitionController {
     this.pendingSong = null
     this.pendingIndex = -1
     this.nextStartOffsetMs = 0
+    this.vocalGapStartMs = -1
     this.vocalEndTriggerMs = -1
     this.recentOnsets = []
     this.clearBeatWait()

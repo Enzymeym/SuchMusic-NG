@@ -31,12 +31,12 @@ export function createWindow(): void {
       webSecurity: false
     },
     frame: false,
-    titleBarStyle: 'hidden',
+    // Windows/Linux 隐藏系统标题栏并关闭系统按钮覆盖层（AppHeader 自绘控制按钮）
+    // macOS 不设置 titleBarStyle，保持纯无边框，避免出现系统红绿灯
+    ...(process.platform !== 'darwin' ? { titleBarStyle: 'hidden', titleBarOverlay: false } : {}),
     // 减小窗口的最小尺寸限制
     minWidth: 800,
-    minHeight: 600,
-    // expose window controls in Windows/Linux
-    ...(process.platform !== 'darwin' ? { titleBarOverlay: false } : {})
+    minHeight: 600
   })
 
   mainWindow.on('ready-to-show', () => {

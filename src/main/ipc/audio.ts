@@ -1,6 +1,35 @@
-import { ipcMain, type IpcMainEvent } from 'electron'
+import { ipcMain, app, type IpcMainEvent } from 'electron'
 import { promises as fs } from 'fs'
+import { join } from 'path'
 import { loadNativeDecoder } from '../services/nativeDecoder'
+
+/** 记录待清理的临时下载文件路径 */
+const tempDownloadPaths = new Set<string>()
+
+/** 根据 Content-Type / URL 后缀推断音频扩展名 */
+function inferAudioExt(contentType: string | null, url: string): string {
+  const mimeMap: Record<string, string> = {
+    'audio/mpeg': 'mp3',
+    'audio/mp3': 'mp3',
+    'audio/flac': 'flac',
+    'audio/x-flac': 'flac',
+    'audio/wav': 'wav',
+    'audio/x-wav': 'wav',
+    'audio/ogg': 'ogg',
+    'audio/opus': 'opus',
+    'audio/mp4': 'm4a',
+    'audio/x-m4a': 'm4a',
+    'audio/aac': 'aac'
+  }
+  if (contentType) {
+    const type = contentType.split(';')[0].trim().toLowerCase()
+    if (mimeMap[type]) return mimeMap[type]
+  }
+  const pathname = url.split('?')[0]
+  const match = /\.([a-z0-9]{2,4})$/i.exec(pathname)
+  if (match) return match[1].toLowerCase()
+  return 'mp3'
+}
 
 export function registerAudioHandlers(): void {
   // 初始化本地音频解码 IPC，调用 native/symphonia_napi_decoder.node
@@ -85,5 +114,36 @@ export function registerAudioHandlers(): void {
     const data = await fs.readFile(filePath)
     // 仅返回底层 ArrayBuffer，便于在渲染进程直接创建 Blob
     return data.buffer
+  })
+
+  // 下载远程音频到临时文件，返回本地路径（供渲染进程在线播放使用）
+  ipcMain.handle('audio:download-to-temp', async (_event, url: string) => {
+    if (!url || !/^https?:\/\//i.test(url)) {
+      throw new Error(`无效的音频地址: ${url}`)
+    }
+    const resp = await fetch(url)
+    if (!resp.ok) {
+      throw new Error(`下载音频失败: HTTP ${resp.status}`)
+    }
+    const contentType = resp.headers.get('content-type')
+    const ext = inferAudioExt(contentType, url)
+    const fileName = `ncm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`
+    const targetPath = join(app.getPath('temp'), fileName)
+
+    const buf = Buffer.from(await resp.arrayBuffer())
+    await fs.writeFile(targetPath, buf)
+    tempDownloadPaths.add(targetPath)
+    return targetPath
+  })
+
+  // 清理播放用临时文件
+  ipcMain.handle('audio:cleanup-temp', async (_event, filePath: string) => {
+    if (!filePath) return
+    tempDownloadPaths.delete(filePath)
+    try {
+      await fs.unlink(filePath)
+    } catch {
+      // 文件不存在或已删除时静默忽略
+    }
   })
 }

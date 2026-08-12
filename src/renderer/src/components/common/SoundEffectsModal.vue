@@ -1,28 +1,26 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import {
   NModal,
-  NCard,
-  NTabs,
-  NTabPane,
   NSwitch,
   NSlider,
-  NInputNumber,
-  NButton,
-  NSpace,
-  NText,
   NIcon,
   NTooltip,
-  NInput,
-  NSelect,
   NScrollbar,
-  NTag,
-  NPopconfirm,
-  useThemeVars
+  NSelect,
+  NButton,
+  NRadioGroup,
+  NRadioButton,
+  NCollapse,
+  NCollapseItem,
+  useThemeVars,
+  useMessage
 } from 'naive-ui'
 import { useAudioEngine } from '../../composables/useAudioEngine'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 const themeVars = useThemeVars()
+const message = useMessage()
 
 const props = defineProps<{
   show: boolean
@@ -33,145 +31,639 @@ const emit = defineEmits<{
 }>()
 
 const audioEngine = useAudioEngine() as any
+const settingsStore = useSettingsStore()
 
 const showModal = computed({
   get: () => props.show,
   set: (val) => emit('update:show', val)
 })
 
-const activeTab = ref('eq')
+/** 主题强调色（跟随应用主题主色） */
+const ACCENT = computed(() => themeVars.value.primaryColor)
+const ACCENT_DARK = computed(() => themeVars.value.primaryColorPressed)
 
-// EQ 频段标签
-const eqBandLabels = [
-  '31Hz',
-  '62Hz',
-  '125Hz',
-  '250Hz',
-  '500Hz',
-  '1kHz',
-  '2kHz',
-  '4kHz',
-  '8kHz',
-  '16kHz'
-]
-
-// 压缩器参数范围
-const compressorRanges = {
-  threshold: { min: -60, max: 0, step: 1 },
-  ratio: { min: 1, max: 20, step: 0.5 },
-  attack: { min: 0.1, max: 100, step: 0.1 },
-  release: { min: 10, max: 1000, step: 1 },
-  knee: { min: 0, max: 20, step: 0.5 }
+/** 将主题主色转为带透明度的 rgba 字符串（兼容 hex 与 rgb 两种格式） */
+const accentRgba = (alpha: number) => {
+  const color = themeVars.value.primaryColor.trim()
+  let r = 236
+  let g = 72
+  let b = 153
+  // hex: #rrggbb / #rgb
+  const hexMatch = color.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i)
+  if (hexMatch) {
+    const hex = hexMatch[1]
+    const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex
+    r = parseInt(full.slice(0, 2), 16)
+    g = parseInt(full.slice(2, 4), 16)
+    b = parseInt(full.slice(4, 6), 16)
+  } else {
+    // rgb(r, g, b) / rgba(r, g, b, a)
+    const nums = color.match(/[\d.]+/g)
+    if (nums && nums.length >= 3) {
+      r = Number(nums[0])
+      g = Number(nums[1])
+      b = Number(nums[2])
+    }
+  }
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
 }
 
-// 限制器参数范围
-const limiterRanges = {
-  ceiling: { min: -3, max: 0, step: 0.1 },
-  release: { min: 10, max: 500, step: 1 }
-}
+// ==================== 工具函数 ====================
+const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v))
+const fmtDb = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`
+const fmtDbCompact = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)}dB`
 
-// 等响度参数范围
-const loudnessRanges = {
-  compensation: { min: 0, max: 1, step: 0.01 },
-  referenceLoudness: { min: -40, max: -10, step: 1 }
-}
-
-/**
- * 等响度补偿方向选项
- */
-const loudnessDirectionOptions = [
-  { label: '双向补偿', value: 'both' },
-  { label: '补偿低频', value: 'low' },
-  { label: '补偿高频', value: 'high' }
-]
-
-/**
- * 虚拟低频参数范围
- */
-const virtualBassRanges = {
-  intensity: { min: 0, max: 100, step: 1 },
-  crossoverFreq: { min: 40, max: 300, step: 1 }
-}
-
-/**
- * 爆音抑制（软限幅器）参数范围
- */
-const softClipperRanges = {
-  threshold: { min: 0.5, max: 5.0, step: 0.1 },
-  makeupGain: { min: 0, max: 6, step: 0.1 }
-}
-
-// 预设选项
-const presetOptions = computed(() => {
-  return audioEngine.presets.value.map((p) => ({
-    label: p.name,
-    value: p.id
-  }))
-})
-
-// 预设下拉值
+// ==================== 顶部导航 & 预设 ====================
 const selectedPresetId = ref('flat')
 watch(
   () => audioEngine.currentPresetId.value,
   (val) => {
     selectedPresetId.value = val
+    // 切换预设后，整体强度回归 100%
+    eqStrength.value = 100
+    eqStrengthPrev = 100
   }
 )
 
-// 保存预设对话框
-const showSavePresetDialog = ref(false)
-const newPresetName = ref('')
+const presetOptions = computed(() =>
+  audioEngine.presets.value.map((p: any) => ({ label: p.name, value: p.id }))
+)
 
-// EQ 频段选择
-const selectedEqBand = ref(0)
+const deviceName = computed(
+  () => settingsStore.playback.audioOutputDeviceName || '默认输出设备'
+)
 
-// 增益减少量可视化
-const gainReductionStyle = (gr: number) => {
-  const absGr = Math.abs(gr)
-  const percentage = Math.min((absGr / 12) * 100, 100)
-  return {
-    width: `${percentage}%`,
-    backgroundColor: gr < -1 ? '#f0a0a0' : '#a0c0a0'
+const handlePresetChange = (presetId: string) => {
+  audioEngine.applyPreset(presetId)
+  eqStrength.value = 100
+  eqStrengthPrev = 100
+}
+
+/** 重置为默认（平坦）设置 */
+const handleReset = () => {
+  audioEngine.applyPreset('flat')
+  eqStrength.value = 100
+  eqStrengthPrev = 100
+  message.success('已重置为默认设置')
+}
+
+/** 复制文本（带降级方案） */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      const ok = document.execCommand('copy')
+      ta.remove()
+      return ok
+    } catch {
+      return false
+    }
   }
 }
 
-const formatDb = (val: number) => {
-  if (val === 0) return '0 dB'
-  return `${val > 0 ? '+' : ''}${val.toFixed(1)} dB`
+const handleCopyPreset = async () => {
+  const ok = await copyText(JSON.stringify(audioEngine.getCurrentSnapshot(), null, 2))
+  ok ? message.success('已复制当前预设数据') : message.error('复制失败')
 }
+
+const handleSharePreset = async () => {
+  const payload = JSON.stringify({
+    app: 'such-music',
+    presetId: audioEngine.currentPresetId.value,
+    data: audioEngine.getCurrentSnapshot()
+  })
+  const ok = await copyText(payload)
+  ok ? message.success('分享数据已复制到剪贴板') : message.error('复制失败')
+}
+
+const handleGoToSound = () => {
+  message.info('请在系统「声音」设置中查看更多输出选项')
+}
+
+// ==================== EQ 曲线图 ====================
+const eqTab = ref<'pre' | 'post'>('pre')
+const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+const EQ_MIN_DB = -10
+const EQ_MAX_DB = 10
+const GRAPH_H = 220
+const F_MIN = 20
+const F_MAX = 20000
+
+const graphCanvas = ref<HTMLCanvasElement | null>(null)
+const graphWrap = ref<HTMLDivElement | null>(null)
+const draggingBand = ref(-1)
+const activeDrags = new Map<number, number>()
+
+const eqEnabled = computed<boolean>({
+  get: () => audioEngine.eqEnabled.value,
+  set: (v) => {
+    audioEngine.setEqEnabled(v)
+  }
+})
+
+const eqGains = computed(() =>
+  audioEngine.eqBands.value.map((b: any) =>
+    eqTab.value === 'pre' ? (b.preGain ?? 0) : (b.postGain ?? 0)
+  )
+)
 
 /**
- * 处理预设变更
- * @param presetId - 预设 ID
+ * 归一化增益数组：默认「平坦」预设的 eqBands 为空，或频段数不足时，
+ * 统一按 0dB 兜底，保证曲线绘制、频点命中检测与拖拽始终一致可用
  */
-const handlePresetChange = async (presetId: string) => {
-  await audioEngine.applyPreset(presetId)
-  selectedPresetId.value = presetId
+const normalizedGains = () => EQ_FREQS.map((_, i) => eqGains.value[i] ?? 0)
+
+const fmtFreq = (f: number) => audioEngine.getBandLabel(f)
+
+function getPlotMetrics() {
+  // 使用布局宽度（clientWidth）而非 getBoundingClientRect：后者会包含模态框
+  // 入场 scale 动画的变换值，导致画布被按缩小后的宽度永久写死（每次打开都变小）
+  const cssW =
+    graphWrap.value?.clientWidth ||
+    graphCanvas.value?.clientWidth ||
+    300
+  const padL = 38
+  const padR = 12
+  const padT = 14
+  const padB = 26
+  const plotW = cssW - padL - padR
+  const plotH = GRAPH_H - padT - padB
+  return { cssW, padL, padR, padT, padB, plotW, plotH, centerY: padT + plotH / 2 }
 }
 
-const handleSavePreset = () => {
-  if (!newPresetName.value.trim()) return
-  audioEngine.saveCurrentAsPreset(newPresetName.value.trim())
-  newPresetName.value = ''
-  showSavePresetDialog.value = false
+const xFor = (f: number, m: ReturnType<typeof getPlotMetrics>) =>
+  m.padL + ((Math.log10(f) - Math.log10(F_MIN)) / (Math.log10(F_MAX) - Math.log10(F_MIN))) * m.plotW
+
+const yFor = (db: number, m: ReturnType<typeof getPlotMetrics>) =>
+  m.centerY - (db / EQ_MAX_DB) * (m.plotH / 2)
+
+function drawGraph() {
+  const canvas = graphCanvas.value
+  if (!canvas || !showModal.value) return
+  const m = getPlotMetrics()
+  const dpr = window.devicePixelRatio || 1
+  canvas.width = Math.max(1, Math.floor(m.cssW * dpr))
+  canvas.height = Math.floor(GRAPH_H * dpr)
+  canvas.style.width = `${m.cssW}px`
+  canvas.style.height = `${GRAPH_H}px`
+
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, m.cssW, GRAPH_H)
+
+  const grid = 'rgba(128,128,128,0.22)'
+  const gridStrong = 'rgba(128,128,128,0.45)'
+  const gridLight = 'rgba(128,128,128,0.10)'
+  const textColor = themeVars.value.textColor3
+
+  // 横向网格 + Y 轴刻度
+  ctx.font = '10px system-ui, sans-serif'
+  ctx.textAlign = 'right'
+  ctx.textBaseline = 'middle'
+  for (let db = EQ_MIN_DB; db <= EQ_MAX_DB + 0.01; db += 5) {
+    const y = yFor(db, m)
+    ctx.strokeStyle = db === 0 ? gridStrong : grid
+    ctx.beginPath()
+    ctx.moveTo(m.padL, y)
+    ctx.lineTo(m.cssW - m.padR, y)
+    ctx.stroke()
+    ctx.fillStyle = textColor
+    ctx.fillText((db > 0 ? '+' : '') + db, m.padL - 6, y)
+  }
+
+  // 纵向网格 + X 轴频点刻度
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'top'
+  EQ_FREQS.forEach((f) => {
+    const x = xFor(f, m)
+    ctx.strokeStyle = gridLight
+    ctx.beginPath()
+    ctx.moveTo(x, m.padT)
+    ctx.lineTo(x, m.padT + m.plotH)
+    ctx.stroke()
+    ctx.fillStyle = textColor
+    ctx.fillText(fmtFreq(f), x, m.padT + m.plotH + 7)
+  })
+
+  const gains = normalizedGains()
+  const pts = EQ_FREQS.map((f, i) => ({ x: xFor(f, m), y: yFor(clamp(gains[i], EQ_MIN_DB, EQ_MAX_DB), m) }))
+  const bottomY = m.padT + m.plotH
+
+  // 曲线填充
+  ctx.beginPath()
+  ctx.moveTo(pts[0].x, pts[0].y)
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)]
+    const p1 = pts[i]
+    const p2 = pts[i + 1]
+    const p3 = pts[Math.min(pts.length - 1, i + 2)]
+    const c1x = p1.x + (p2.x - p0.x) / 6
+    const c1y = p1.y + (p2.y - p0.y) / 6
+    const c2x = p2.x - (p3.x - p1.x) / 6
+    const c2y = p2.y - (p3.y - p1.y) / 6
+    ctx.bezierCurveTo(c1x, c1y, c2x, c2y, p2.x, p2.y)
+  }
+  ctx.strokeStyle = ACCENT.value
+  ctx.lineWidth = 2.2
+  ctx.stroke()
+  ctx.lineTo(pts[pts.length - 1].x, bottomY)
+  ctx.lineTo(pts[0].x, bottomY)
+  ctx.closePath()
+  const grad = ctx.createLinearGradient(0, m.padT, 0, bottomY)
+  grad.addColorStop(0, accentRgba(0.3))
+  grad.addColorStop(1, accentRgba(0.02))
+  ctx.fillStyle = grad
+  ctx.fill()
+
+  // 频点手柄
+  pts.forEach((p, i) => {
+    const active = i === draggingBand.value
+    ctx.beginPath()
+    ctx.arc(p.x, p.y, active ? 8 : 5.5, 0, Math.PI * 2)
+    ctx.fillStyle = ACCENT.value
+    ctx.fill()
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = 2
+    ctx.stroke()
+
+    if (active) {
+      const label = fmtDbCompact(clamp(gains[i], EQ_MIN_DB, EQ_MAX_DB))
+      ctx.font = '600 11px system-ui, sans-serif'
+      const tw = ctx.measureText(label).width
+      const bx = clamp(p.x - tw / 2 - 6, m.padL, m.cssW - m.padR - tw - 12)
+      const by = p.y - 30
+      ctx.fillStyle = ACCENT_DARK.value
+      ctx.strokeStyle = ACCENT_DARK.value
+      ctx.beginPath()
+      ctx.roundRect(bx, by, tw + 12, 20, 5)
+      ctx.fill()
+      ctx.fillStyle = '#fff'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(label, bx + (tw + 12) / 2, by + 11)
+    }
+  })
 }
 
-const handleDeletePreset = (presetId: string) => {
-  audioEngine.deletePreset(presetId)
+const redraw = () => {
+  if (showModal.value) drawGraph()
 }
 
-/**
- * 处理重置为默认设置
- */
-const handleReset = async () => {
-  await audioEngine.resetToDefault()
+// 频段增益变化 / Tab 切换 / 拖拽状态变化时重绘
+watch(
+  () => audioEngine.eqBands.value.map((b: any) => `${b.preGain},${b.postGain}`).join('|'),
+  redraw,
+  { flush: 'post' }
+)
+watch([eqTab, draggingBand], redraw, { flush: 'post' })
+watch(
+  () => props.show,
+  (v) => {
+    if (v) nextTick(() => requestAnimationFrame(drawGraph))
+  }
+)
+
+// ==================== EQ 曲线图交互 ====================
+function getPos(e: PointerEvent) {
+  const rect = graphCanvas.value!.getBoundingClientRect()
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+}
+
+function handleGraphDown(e: PointerEvent) {
+  if (!eqEnabled.value || !graphCanvas.value) return
+  const pos = getPos(e)
+  const m = getPlotMetrics()
+  const gains = normalizedGains()
+  let best = -1
+  let bestD = 32
+  EQ_FREQS.forEach((f, i) => {
+    const px = xFor(f, m)
+    const py = yFor(clamp(gains[i], EQ_MIN_DB, EQ_MAX_DB), m)
+    const d = Math.hypot(px - pos.x, py - pos.y)
+    if (d < bestD) {
+      bestD = d
+      best = i
+    }
+  })
+  if (best === -1) return
+  graphCanvas.value.setPointerCapture(e.pointerId)
+  activeDrags.set(e.pointerId, best)
+  draggingBand.value = best
+  applyDrag(best, pos.y)
+}
+
+function handleGraphMove(e: PointerEvent) {
+  const band = activeDrags.get(e.pointerId)
+  if (band === undefined) return
+  applyDrag(band, getPos(e).y)
+}
+
+function handleGraphUp(e: PointerEvent) {
+  activeDrags.delete(e.pointerId)
+  if (activeDrags.size === 0) draggingBand.value = -1
+}
+
+function applyDrag(band: number, offsetY: number) {
+  const canvas = graphCanvas.value
+  if (!canvas) return
+  const m = getPlotMetrics()
+  const db = clamp(
+    Math.round(((m.centerY - offsetY) / (m.plotH / 2)) * EQ_MAX_DB * 2) / 2,
+    EQ_MIN_DB,
+    EQ_MAX_DB
+  )
+  // 确保目标频段存在，否则 setEqBand 会因 eqBands 为空/不足而静默失败
+  ensureEqBands(band)
+  if (eqTab.value === 'pre') audioEngine.setEqBand(band, { preGain: db })
+  else audioEngine.setEqBand(band, { postGain: db })
+}
+
+/** 补齐缺失的默认 EQ 频段（默认「平坦」预设的频段列表为空） */
+function ensureEqBands(band: number) {
+  const bands: any[] = audioEngine.eqBands.value
+  if (bands[band]) return
+  const defaults = EQ_FREQS.map((f, i) => ({
+    frequency: f,
+    preGain: 0,
+    postGain: 0,
+    preQ: 1,
+    postQ: 1,
+    bandType: i === 0 ? 'lowShelf' : i === EQ_FREQS.length - 1 ? 'highShelf' : 'peaking'
+  }))
+  audioEngine.eqBands.value = EQ_FREQS.map((_, i) => bands[i] ?? defaults[i])
+}
+
+// ==================== EQ 强度 ====================
+const eqStrengthMode = ref<'overall' | 'segmented'>('overall')
+const eqStrength = ref(100)
+let eqStrengthPrev = 100
+
+function handleEqStrengthChange(v: number) {
+  const ratio = eqStrengthPrev === 0 ? v / 100 : v / eqStrengthPrev
+  eqStrengthPrev = v
+  eqStrength.value = v
+  const gains = audioEngine.eqBands.value.map((b: any) =>
+    clamp(Math.round((b.preGain ?? 0) * ratio * 2) / 2, EQ_MIN_DB, EQ_MAX_DB)
+  )
+  audioEngine.setEqGains(gains)
+}
+
+// ==================== 等响度 ====================
+const loudnessEnabled = computed<boolean>({
+  get: () => audioEngine.loudness.value.enabled,
+  set: (v) => {
+    audioEngine.setLoudnessEnabled(v)
+  }
+})
+const loudnessGain = ref(0)
+const loudnessStatus = computed(
+  () => `等响度${loudnessEnabled.value ? '开' : '关'}: ${fmtDbCompact(loudnessGain.value)}`
+)
+
+function handleLoudnessGain(v: number) {
+  const wasEnabled = audioEngine.loudness.value.enabled
+  loudnessGain.value = v
+  if (v !== 0 && wasEnabled) {
+    audioEngine.setLoudnessEnabled(false)
+    message.info('调节增益后等响度已自动关闭')
+  }
+}
+
+// ==================== 等响补偿（因逻辑冲突默认禁用） ====================
+const loudnessCompEnabled = ref(false)
+const loudnessCompDiff = computed(() =>
+  Math.max(0, Math.round((1 - (audioEngine.state.volume ?? 1)) * 100))
+)
+const loudnessCompStrength = computed(() =>
+  Math.round(audioEngine.loudness.value.compensation * 300) / 100
+)
+const loudnessCompThreshold = computed(() =>
+  clamp(audioEngine.loudness.value.referenceLoudness, -30, -1)
+)
+const loudnessCompStatus = computed(
+  () => `补偿中: +${loudnessCompDiff.value}% x ${loudnessCompStrength.value.toFixed(2)}`
+)
+const loudnessCompHint = computed(
+  () => `当前系统音量比基准低 ${loudnessCompDiff.value}%，正在增强高低频`
+)
+
+/** 设定基准：将当前系统音量换算为参考响度并写入补偿阈值 */
+const handleSetLoudnessBaseline = () => {
+  const vol = clamp(audioEngine.state.volume ?? 1, 0.01, 1)
+  // 音量 → dB 换算（20 * log10(vol)），并钳制到阈值范围 [-30, -1]
+  const refDb = Math.round(20 * Math.log10(vol))
+  const ref = clamp(refDb, -30, -1)
+  audioEngine.setLoudnessParams({ referenceLoudness: ref })
+  message.success(`已设定基准：补偿阈值为 ${Math.abs(ref)} dB`)
+}
+
+// ==================== 多频段压缩 MBC ====================
+const mbcEnabled = computed<boolean>({
+  get: () => audioEngine.compressorEnabled.value,
+  set: (v) => {
+    audioEngine.setCompressorEnabled(v)
+  }
+})
+const mbcBands = ref(2)
+const mbcExpanded = ref(false)
+const mbcStatus = computed(() => `${mbcBands.value}段: ${audioEngine.compressor.value.ratio.toFixed(1)}:1`)
+
+const mbcParams = computed(() => [
+  {
+    key: 'attack',
+    label: '启动时间',
+    min: 1,
+    max: 100,
+    step: 1,
+    value: audioEngine.compressor.value.attack,
+    fmt: (v: number) => `${v} ms`,
+    set: (v: number) => audioEngine.setCompressorParams({ attack: v })
+  },
+  {
+    key: 'release',
+    label: '释放时间',
+    min: 10,
+    max: 1000,
+    step: 1,
+    value: audioEngine.compressor.value.release,
+    fmt: (v: number) => `${v} ms`,
+    set: (v: number) => audioEngine.setCompressorParams({ release: v })
+  },
+  {
+    key: 'ratio',
+    label: '压缩比',
+    min: 1,
+    max: 20,
+    step: 0.5,
+    value: audioEngine.compressor.value.ratio,
+    fmt: (v: number) => `${v.toFixed(1)}:1`,
+    set: (v: number) => audioEngine.setCompressorParams({ ratio: v })
+  },
+  {
+    key: 'threshold',
+    label: '阈值',
+    min: -60,
+    max: 0,
+    step: 1,
+    value: audioEngine.compressor.value.threshold,
+    fmt: (v: number) => `${v} dB`,
+    set: (v: number) => audioEngine.setCompressorParams({ threshold: v })
+  }
+])
+
+// ==================== 限幅器 ====================
+const limiterEnabled = computed<boolean>({
+  get: () => audioEngine.limiterEnabled.value,
+  set: (v) => {
+    audioEngine.setLimiterEnabled(v)
+  }
+})
+const limiterExpanded = ref(false)
+// 引擎暂未提供的参数，作为界面参数保存
+const limiterAttack = ref(5)
+const limiterRatio = ref(10)
+const limiterThreshold = ref(-6)
+const limiterPostGain = ref(0)
+const limiterStatus = computed(() => `${limiterThreshold.value} dB : ${limiterRatio.value}:1`)
+
+const limiterParams = computed(() => [
+  {
+    key: 'attack',
+    label: '启动时间',
+    min: 1,
+    max: 100,
+    step: 1,
+    value: limiterAttack.value,
+    fmt: (v: number) => `${v} ms`,
+    set: (v: number) => (limiterAttack.value = v)
+  },
+  {
+    key: 'release',
+    label: '释放时间',
+    min: 10,
+    max: 500,
+    step: 1,
+    value: audioEngine.limiter.value.release,
+    fmt: (v: number) => `${v} ms`,
+    set: (v: number) => audioEngine.setLimiterParams({ release: v })
+  },
+  {
+    key: 'ratio',
+    label: '限幅比',
+    min: 1,
+    max: 20,
+    step: 1,
+    value: limiterRatio.value,
+    fmt: (v: number) => `${v}:1`,
+    set: (v: number) => (limiterRatio.value = v)
+  },
+  {
+    key: 'threshold',
+    label: '阈值',
+    min: -12,
+    max: 0,
+    step: 1,
+    value: limiterThreshold.value,
+    fmt: (v: number) => `${v} dB`,
+    set: (v: number) => (limiterThreshold.value = v)
+  },
+  {
+    key: 'postGain',
+    label: '后增益',
+    min: -6,
+    max: 6,
+    step: 0.5,
+    value: limiterPostGain.value,
+    fmt: (v: number) => fmtDb(v),
+    set: (v: number) => (limiterPostGain.value = v)
+  }
+])
+
+// ==================== 声道平衡 ====================
+const balanceEnabled = ref(false)
+const balanceExpanded = ref(false)
+const balanceL = ref(-0.1)
+const balanceR = ref(-0.1)
+const balanceStatus = computed(() => (balanceEnabled.value ? '已开启' : '已关闭'))
+
+// ==================== 音量记忆 ====================
+const volumeMemoryEnabled = ref(false)
+
+// ==================== 界面状态持久化 ====================
+const UI_STORAGE_KEY = 'sound-effects-ui'
+function loadUiState() {
+  try {
+    const raw = localStorage.getItem(UI_STORAGE_KEY)
+    if (!raw) return
+    const d = JSON.parse(raw)
+    if (typeof d.balanceEnabled === 'boolean') balanceEnabled.value = d.balanceEnabled
+    if (typeof d.balanceL === 'number') balanceL.value = d.balanceL
+    if (typeof d.balanceR === 'number') balanceR.value = d.balanceR
+    if (typeof d.volumeMemory === 'boolean') volumeMemoryEnabled.value = d.volumeMemory
+    if (typeof d.loudnessComp === 'boolean') loudnessCompEnabled.value = d.loudnessComp
+  } catch {
+    /* ignore */
+  }
+}
+let uiSaveTimer: ReturnType<typeof setTimeout> | null = null
+function saveUiState() {
+  if (uiSaveTimer) clearTimeout(uiSaveTimer)
+  uiSaveTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(
+        UI_STORAGE_KEY,
+        JSON.stringify({
+          balanceEnabled: balanceEnabled.value,
+          balanceL: balanceL.value,
+          balanceR: balanceR.value,
+          volumeMemory: volumeMemoryEnabled.value,
+          loudnessComp: loudnessCompEnabled.value
+        })
+      )
+    } catch {
+      /* ignore */
+    }
+  }, 300)
+}
+watch(
+  [balanceEnabled, balanceL, balanceR, volumeMemoryEnabled, loudnessCompEnabled],
+  saveUiState
+)
+
+// ==================== 底部控制栏 ====================
+const handleFooterSettings = () => {
+  message.info('更多输出设置请在系统「声音」中调整')
+}
+
+// ==================== 生命周期 ====================
+let resizeObserver: ResizeObserver | null = null
+const handleResize = () => {
+  if (showModal.value) drawGraph()
 }
 
 onMounted(() => {
+  loadUiState()
   audioEngine.initialize()
+  if (graphWrap.value) {
+    resizeObserver = new ResizeObserver(handleResize)
+    resizeObserver.observe(graphWrap.value)
+  }
+  window.addEventListener('resize', handleResize)
+  nextTick(() => requestAnimationFrame(drawGraph))
 })
 
 onUnmounted(() => {
+  resizeObserver?.disconnect()
+  window.removeEventListener('resize', handleResize)
   audioEngine.destroy()
 })
 </script>
@@ -183,920 +675,688 @@ export default {
 </script>
 
 <template>
-  <n-modal v-model:show="showModal" :mask-closable="true">
-    <n-card
-      class="sound-effects-modal"
-      :bordered="false"
-      role="dialog"
-      aria-modal="true"
-      :style="{
-        width: '820px',
-        maxWidth: '90vw',
-        backgroundColor: themeVars.modalColor
-      }"
-      content-style="padding: 0;"
-    >
-      <template #header>
-        <div class="modal-header">
-          <span class="modal-title">音效调节</span>
-          <div class="modal-close-btn" @click="showModal = false">
-            <n-icon size="18"><i class="mgc_close_line"></i></n-icon>
+  <n-modal
+    v-model:show="showModal"
+    :mask-closable="true"
+    :close-on-esc="true"
+    display-directive="show"
+  >
+    <div class="se-modal" :style="{ '--se-modal-bg': themeVars.modalColor }">
+      <!-- 顶部导航 -->
+      <header class="se-header">
+        <n-button quaternary circle title="返回" @click="showModal = false">
+          <template #icon>
+            <n-icon size="20"><i class="mgc_arrow_left_line"></i></n-icon>
+          </template>
+        </n-button>
+        <h1 class="se-title">Stack Sound</h1>
+        <n-button quaternary circle title="刷新/重置" @click="handleReset">
+          <template #icon>
+            <n-icon size="19"><i class="mgc_refresh_2_line"></i></n-icon>
+          </template>
+        </n-button>
+      </header>
+
+      <!-- 当前预设区 -->
+      <div class="se-preset">
+        <div class="se-preset-info">
+          <div class="se-preset-line">
+            <i class="mgc_speaker_line se-preset-speaker"></i>
+            <span class="se-preset-device">{{ deviceName }}</span>
           </div>
+          <n-select
+            v-model:value="selectedPresetId"
+            :options="presetOptions"
+            size="small"
+            class="se-preset-select"
+            @update:value="handlePresetChange"
+          />
         </div>
-      </template>
 
-      <n-scrollbar class="modal-scroll" style="max-height: 520px">
-        <div class="modal-content-inner">
-          <n-tabs v-model:value="activeTab" placement="left" type="line" animated>
-            <!-- EQ 均衡器 -->
-            <n-tab-pane name="eq" tab="均衡器">
-              <div class="tab-content">
-                <!-- EQ 总开关和预设 -->
-                <n-card class="control-card" size="small" :bordered="true">
-                  <div class="eq-header">
-                    <div class="switch-row">
-                      <span class="switch-label">启用均衡器</span>
-                      <n-switch
-                        v-model:value="audioEngine.eqEnabled.value"
-                        @update:value="audioEngine.setEqEnabled"
-                      />
-                    </div>
-                    <div class="preset-row">
+        <div class="se-preset-actions">
+          <n-tooltip trigger="hover">
+            <template #trigger>
+              <n-button quaternary circle @click="handleCopyPreset">
+                <template #icon>
+                  <n-icon size="18"><i class="mgc_copy_2_line"></i></n-icon>
+                </template>
+              </n-button>
+            </template>
+            复制当前预设
+          </n-tooltip>
+
+          <n-button type="primary" secondary @click="handleGoToSound">去 Sound 里寻觅</n-button>
+
+          <n-tooltip trigger="hover">
+            <template #trigger>
+              <n-button quaternary circle @click="handleSharePreset">
+                <template #icon>
+                  <n-icon size="18"><i class="mgc_share_2_line"></i></n-icon>
+                </template>
+              </n-button>
+            </template>
+            分享预设数据
+          </n-tooltip>
+        </div>
+      </div>
+
+      <!-- 内容区 -->
+      <n-scrollbar class="se-scroll">
+        <div class="se-body">
+          <!-- EQ 均衡器曲线图 -->
+          <section class="se-section">
+            <div class="se-eq-tabs">
+              <n-radio-group v-model:value="eqTab" size="small">
+                <n-radio-button value="post">原EQ</n-radio-button>
+                <n-radio-button value="pre">预EQ</n-radio-button>
+              </n-radio-group>
+            </div>
+            <div ref="graphWrap" class="se-graph-wrap">
+              <canvas
+                ref="graphCanvas"
+                class="se-graph"
+                :class="{ dimmed: !eqEnabled }"
+                @pointerdown="handleGraphDown"
+                @pointermove="handleGraphMove"
+                @pointerup="handleGraphUp"
+                @pointercancel="handleGraphUp"
+              ></canvas>
+              <div v-if="!eqEnabled" class="se-graph-mask">均衡器已关闭</div>
+            </div>
+          </section>
+
+          <!-- EQ 强度 -->
+          <section class="se-section" :class="{ disabled: !eqEnabled }">
+            <header class="se-sec-head">
+              <span class="se-sec-title">EQ 强度</span>
+              <span class="se-sec-status">{{ eqEnabled ? '已开启' : '已关闭' }}</span>
+              <n-switch v-model:value="eqEnabled" size="small" />
+            </header>
+
+            <div class="se-mode-toggle">
+              <n-radio-group v-model:value="eqStrengthMode" size="small">
+                <n-radio-button value="overall">整体控制</n-radio-button>
+                <n-radio-button value="segmented">分段控制</n-radio-button>
+              </n-radio-group>
+            </div>
+
+            <div v-if="eqStrengthMode === 'overall'" class="se-slider-row">
+              <span class="se-slider-label">整体强度</span>
+              <n-slider
+                :value="eqStrength"
+                :min="0"
+                :max="100"
+                :step="1"
+                :tooltip="false"
+                :disabled="!eqEnabled"
+                @update:value="handleEqStrengthChange"
+              />
+              <span class="se-slider-val">{{ eqStrength }}%</span>
+            </div>
+            <p v-else class="se-hint">在曲线上直接拖动频点，可单独调节每个频段。</p>
+          </section>
+
+          <!-- 等响度 -->
+          <section class="se-section">
+            <header class="se-sec-head">
+              <span class="se-sec-title">等响度</span>
+              <span class="se-sec-status">{{ loudnessStatus }}</span>
+              <n-switch v-model:value="loudnessEnabled" size="small" />
+            </header>
+            <div class="se-slider-row">
+              <span class="se-slider-label">整体增益</span>
+              <n-slider
+                :value="loudnessGain"
+                :min="-12"
+                :max="12"
+                :step="0.5"
+                :tooltip="false"
+                @update:value="handleLoudnessGain"
+              />
+              <span class="se-slider-val">{{ fmtDb(loudnessGain) }}</span>
+            </div>
+            <p class="se-note">调节此滑条会自动关闭等响度。</p>
+          </section>
+
+          <!-- 等响补偿 -->
+          <section class="se-section">
+            <header class="se-sec-head">
+              <span class="se-sec-title">等响补偿</span>
+              <span class="se-sec-status">{{ loudnessCompStatus }}</span>
+              <n-switch v-model:value="loudnessCompEnabled" size="small" />
+            </header>
+
+            <div class="se-comp-body" :class="{ 'is-disabled': loudnessCompEnabled }">
+              <div class="se-slider-row">
+                <span class="se-slider-label">补偿强度</span>
+                <n-slider
+                  :value="loudnessCompStrength"
+                  :min="0"
+                  :max="3"
+                  :step="0.05"
+                  :tooltip="false"
+                  @update:value="
+                    (v: any) => audioEngine.setLoudnessParams({ compensation: Math.round(v / 3 * 100) / 100 })
+                  "
+                />
+                <span class="se-slider-val">{{ loudnessCompStrength.toFixed(2) }}</span>
+              </div>
+
+              <div class="se-slider-row">
+                <span class="se-slider-label">补偿阈值</span>
+                <n-slider
+                  :value="loudnessCompThreshold"
+                  :min="-30"
+                  :max="-1"
+                  :step="1"
+                  :tooltip="false"
+                  @update:value="
+                    (v: any) => audioEngine.setLoudnessParams({ referenceLoudness: v })
+                  "
+                />
+                <span class="se-slider-val">{{ Math.abs(loudnessCompThreshold).toFixed(1) }} dB</span>
+              </div>
+              <div class="se-comp-actions">
+                <n-button
+                  size="small"
+                  secondary
+                  @click="handleSetLoudnessBaseline"
+                >
+                  <template #icon>
+                    <n-icon size="16"><i class="mgc_target_line"></i></n-icon>
+                  </template>
+                  设定基准（按当前音量）
+                </n-button>
+              </div>
+              <p class="se-note">音量低于该阈值时才开始增强高低频，数值越大（越接近 -1 dB）越早介入。</p>
+
+              <div v-if="loudnessCompEnabled" class="se-comp-mask">
+                <span>关闭等响补偿后才能设定基准</span>
+              </div>
+            </div>
+
+            <p v-if="loudnessCompEnabled" class="se-hint">{{ loudnessCompHint }}</p>
+          </section>
+
+          <!-- 多频段压缩 MBC -->
+          <section class="se-section">
+            <header class="se-sec-head">
+              <span class="se-sec-title">多频段压缩 <em>(MBC)</em></span>
+              <span class="se-sec-status">{{ mbcStatus }}</span>
+              <n-switch v-model:value="mbcEnabled" size="small" />
+            </header>
+            <p class="se-desc">对不同频段应用独立的动态压缩。</p>
+
+            <n-collapse
+              v-if="mbcEnabled"
+              class="se-collapse"
+              :expanded-names="mbcExpanded ? ['mbc'] : []"
+              @update:expanded-names="(names: any) => (mbcExpanded = (names || []).includes('mbc'))"
+            >
+              <n-collapse-item title="折叠选项" name="mbc">
+                <div class="se-params">
+                  <div class="se-param">
+                    <div class="se-param-head">
+                      <span class="se-slider-label">频段数量</span>
                       <n-select
-                        v-model:value="selectedPresetId"
-                        :options="presetOptions"
-                        placeholder="选择预设"
-                        style="width: 140px"
+                        :value="mbcBands"
+                        :options="[
+                          { label: '2 段', value: 2 },
+                          { label: '3 段', value: 3 },
+                          { label: '4 段', value: 4 }
+                        ]"
                         size="small"
-                        @update:value="handlePresetChange"
-                      />
-                      <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button size="small" quaternary circle @click="showSavePresetDialog = true">
-                            <template #icon>
-                              <n-icon><i class="mgc_save_2_line"></i></n-icon>
-                            </template>
-                          </n-button>
-                        </template>
-                        保存当前设置为预设
-                      </n-tooltip>
-                      <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button size="small" quaternary circle @click="handleReset">
-                            <template #icon>
-                              <n-icon><i class="mgc_refresh_2_line"></i></n-icon>
-                            </template>
-                          </n-button>
-                        </template>
-                        重置为默认设置
-                      </n-tooltip>
-                    </div>
-                  </div>
-                </n-card>
-
-                <!-- EQ 频段滑块 -->
-                <n-card
-                  v-if="audioEngine.eqEnabled.value"
-                  class="control-card"
-                  size="small"
-                  :bordered="true"
-                  title="频段调节"
-                >
-                  <div class="eq-bands-container">
-                    <div class="eq-band-selector">
-                      <span class="band-label">频段</span>
-                      <n-select
-                        v-model:value="selectedEqBand"
-                        :options="eqBandLabels.map((l, i) => ({ label: l, value: i }))"
-                        style="width: 100px"
-                      />
-                    </div>
-
-                    <div class="eq-band-controls" v-if="audioEngine.eqBands.value[selectedEqBand]">
-                      <div class="band-detail">
-                        <span class="band-freq">{{ eqBandLabels[selectedEqBand] }}</span>
-                      </div>
-                      <div class="eq-slider-group">
-                        <div class="eq-slider-item">
-                          <span class="slider-label">Pre Gain</span>
-                          <n-slider
-                            :value="audioEngine.eqBands.value[selectedEqBand]?.preGain ?? 0"
-                            :min="-12"
-                            :max="12"
-                            :step="0.5"
-                            :tooltip="false"
-                            @update:value="(v) => audioEngine.setEqBand(selectedEqBand, { preGain: v })"
-                          />
-                          <span class="slider-value"
-                            >{{
-                              (audioEngine.eqBands.value[selectedEqBand]?.preGain ?? 0).toFixed(1)
-                            }}
-                            dB</span
-                          >
-                        </div>
-                        <div class="eq-slider-item">
-                          <span class="slider-label">Post Gain</span>
-                          <n-slider
-                            :value="audioEngine.eqBands.value[selectedEqBand]?.postGain ?? 0"
-                            :min="-12"
-                            :max="12"
-                            :step="0.5"
-                            :tooltip="false"
-                            @update:value="
-                              (v) => audioEngine.setEqBand(selectedEqBand, { postGain: v })
-                            "
-                          />
-                          <span class="slider-value"
-                            >{{
-                              (audioEngine.eqBands.value[selectedEqBand]?.postGain ?? 0).toFixed(1)
-                            }}
-                            dB</span
-                          >
-                        </div>
-                        <div class="eq-slider-item">
-                          <span class="slider-label">Pre Q</span>
-                          <n-slider
-                            :value="audioEngine.eqBands.value[selectedEqBand]?.preQ ?? 1"
-                            :min="0.5"
-                            :max="12"
-                            :step="0.1"
-                            :tooltip="false"
-                            @update:value="(v) => audioEngine.setEqBand(selectedEqBand, { preQ: v })"
-                          />
-                          <span class="slider-value">{{
-                            (audioEngine.eqBands.value[selectedEqBand]?.preQ ?? 1).toFixed(1)
-                          }}</span>
-                        </div>
-                        <div class="eq-slider-item">
-                          <span class="slider-label">Post Q</span>
-                          <n-slider
-                            :value="audioEngine.eqBands.value[selectedEqBand]?.postQ ?? 1"
-                            :min="0.5"
-                            :max="12"
-                            :step="0.1"
-                            :tooltip="false"
-                            @update:value="(v) => audioEngine.setEqBand(selectedEqBand, { postQ: v })"
-                          />
-                          <span class="slider-value">{{
-                            (audioEngine.eqBands.value[selectedEqBand]?.postQ ?? 1).toFixed(1)
-                          }}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </n-card>
-
-                <!-- 快速增益预设 -->
-                <n-card
-                  v-if="audioEngine.eqEnabled.value"
-                  class="control-card"
-                  size="small"
-                  :bordered="true"
-                  title="快速增益调节"
-                >
-                  <div class="quick-gains">
-                    <div class="quick-gains-grid">
-                      <div v-for="(label, idx) in eqBandLabels" :key="idx" class="quick-gain-item">
-                        <span class="quick-gain-label">{{ label }}</span>
-                        <n-slider
-                          :value="audioEngine.eqBands.value[idx]?.preGain ?? 0"
-                          :min="-12"
-                          :max="12"
-                          :step="1"
-                          :tooltip="false"
-                          vertical
-                          :reverse="true"
-                          style="height: 80px"
-                          @update:value="(v) => audioEngine.setEqBand(idx, { preGain: v })"
-                        />
-                        <span class="quick-gain-value">{{
-                          (audioEngine.eqBands.value[idx]?.preGain ?? 0).toFixed(0)
-                        }}</span>
-                      </div>
-                    </div>
-                  </div>
-                </n-card>
-
-                <div v-else class="disabled-hint">
-                  <n-text depth="3">均衡器已关闭</n-text>
-                </div>
-              </div>
-            </n-tab-pane>
-
-            <!-- 压缩器 -->
-            <n-tab-pane name="compressor" tab="压缩器">
-              <div class="tab-content">
-                <!-- 压缩器总开关 -->
-                <n-card class="control-card" size="small" :bordered="true">
-                  <div class="eq-header">
-                    <div class="switch-row">
-                      <span class="switch-label">启用压缩器</span>
-                      <n-switch
-                        v-model:value="audioEngine.compressorEnabled.value"
-                        @update:value="audioEngine.setCompressorEnabled"
-                      />
-                    </div>
-                    <div class="gain-reduction">
-                      <span class="gain-label">增益减少</span>
-                      <div class="gain-bar">
-                        <div
-                          class="gain-fill"
-                          :style="gainReductionStyle(audioEngine.compressorGR.value)"
-                        ></div>
-                      </div>
-                      <span class="gain-value">{{ formatDb(audioEngine.compressorGR.value) }}</span>
-                    </div>
-                  </div>
-                </n-card>
-
-                <n-card
-                  v-if="audioEngine.compressorEnabled.value"
-                  class="control-card"
-                  size="small"
-                  :bordered="true"
-                  title="参数调节"
-                >
-                  <div class="param-grid">
-                    <!-- 阈值 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">阈值 (Threshold)</span>
-                        <n-input-number
-                          :value="audioEngine.compressor.value.threshold"
-                          :min="compressorRanges.threshold.min"
-                          :max="compressorRanges.threshold.max"
-                          :step="compressorRanges.threshold.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setCompressorParams({ threshold: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.compressor.value.threshold"
-                        :min="compressorRanges.threshold.min"
-                        :max="compressorRanges.threshold.max"
-                        :step="compressorRanges.threshold.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setCompressorParams({ threshold: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ compressorRanges.threshold.min }} dB</span>
-                        <span>{{ compressorRanges.threshold.max }} dB</span>
-                      </div>
-                    </div>
-
-                    <!-- 压缩比 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">压缩比 (Ratio)</span>
-                        <n-input-number
-                          :value="audioEngine.compressor.value.ratio"
-                          :min="compressorRanges.ratio.min"
-                          :max="compressorRanges.ratio.max"
-                          :step="compressorRanges.ratio.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setCompressorParams({ ratio: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.compressor.value.ratio"
-                        :min="compressorRanges.ratio.min"
-                        :max="compressorRanges.ratio.max"
-                        :step="compressorRanges.ratio.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setCompressorParams({ ratio: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ compressorRanges.ratio.min }}:1</span>
-                        <span>{{ compressorRanges.ratio.max }}:1</span>
-                      </div>
-                    </div>
-
-                    <!-- 攻击时间 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">攻击时间 (Attack)</span>
-                        <n-input-number
-                          :value="audioEngine.compressor.value.attack"
-                          :min="compressorRanges.attack.min"
-                          :max="compressorRanges.attack.max"
-                          :step="compressorRanges.attack.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setCompressorParams({ attack: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.compressor.value.attack"
-                        :min="compressorRanges.attack.min"
-                        :max="compressorRanges.attack.max"
-                        :step="compressorRanges.attack.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setCompressorParams({ attack: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ compressorRanges.attack.min }} ms</span>
-                        <span>{{ compressorRanges.attack.max }} ms</span>
-                      </div>
-                    </div>
-
-                    <!-- 释放时间 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">释放时间 (Release)</span>
-                        <n-input-number
-                          :value="audioEngine.compressor.value.release"
-                          :min="compressorRanges.release.min"
-                          :max="compressorRanges.release.max"
-                          :step="compressorRanges.release.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setCompressorParams({ release: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.compressor.value.release"
-                        :min="compressorRanges.release.min"
-                        :max="compressorRanges.release.max"
-                        :step="compressorRanges.release.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setCompressorParams({ release: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ compressorRanges.release.min }} ms</span>
-                        <span>{{ compressorRanges.release.max }} ms</span>
-                      </div>
-                    </div>
-
-                    <!-- 拐点软度 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">拐点软度 (Knee)</span>
-                        <n-input-number
-                          :value="audioEngine.compressor.value.knee"
-                          :min="compressorRanges.knee.min"
-                          :max="compressorRanges.knee.max"
-                          :step="compressorRanges.knee.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setCompressorParams({ knee: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.compressor.value.knee"
-                        :min="compressorRanges.knee.min"
-                        :max="compressorRanges.knee.max"
-                        :step="compressorRanges.knee.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setCompressorParams({ knee: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ compressorRanges.knee.min }} dB</span>
-                        <span>{{ compressorRanges.knee.max }} dB</span>
-                      </div>
-                    </div>
-                  </div>
-                </n-card>
-
-                <div v-else class="disabled-hint">
-                  <n-text depth="3">压缩器已关闭</n-text>
-                </div>
-              </div>
-            </n-tab-pane>
-
-            <!-- 限制器 -->
-            <n-tab-pane name="limiter" tab="限制器">
-              <div class="tab-content">
-                <!-- 限制器总开关 -->
-                <n-card class="control-card" size="small" :bordered="true">
-                  <div class="eq-header">
-                    <div class="switch-row">
-                      <span class="switch-label">启用限制器</span>
-                      <n-switch
-                        v-model:value="audioEngine.limiterEnabled.value"
-                        @update:value="audioEngine.setLimiterEnabled"
-                      />
-                    </div>
-                    <div class="gain-reduction">
-                      <span class="gain-label">增益减少</span>
-                      <div class="gain-bar">
-                        <div
-                          class="gain-fill"
-                          :style="gainReductionStyle(audioEngine.limiterGR.value)"
-                        ></div>
-                      </div>
-                      <span class="gain-value">{{ formatDb(audioEngine.limiterGR.value) }}</span>
-                    </div>
-                  </div>
-                </n-card>
-
-                <n-card
-                  v-if="audioEngine.limiterEnabled.value"
-                  class="control-card"
-                  size="small"
-                  :bordered="true"
-                  title="参数调节"
-                >
-                  <div class="param-grid">
-                    <!-- 天花板 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">天花板 (Ceiling)</span>
-                        <n-input-number
-                          :value="audioEngine.limiter.value.ceiling"
-                          :min="limiterRanges.ceiling.min"
-                          :max="limiterRanges.ceiling.max"
-                          :step="limiterRanges.ceiling.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setLimiterParams({ ceiling: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.limiter.value.ceiling"
-                        :min="limiterRanges.ceiling.min"
-                        :max="limiterRanges.ceiling.max"
-                        :step="limiterRanges.ceiling.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setLimiterParams({ ceiling: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ limiterRanges.ceiling.min }} dB</span>
-                        <span>{{ limiterRanges.ceiling.max }} dB</span>
-                      </div>
-                    </div>
-
-                    <!-- 释放时间 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">释放时间 (Release)</span>
-                        <n-input-number
-                          :value="audioEngine.limiter.value.release"
-                          :min="limiterRanges.release.min"
-                          :max="limiterRanges.release.max"
-                          :step="limiterRanges.release.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setLimiterParams({ release: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.limiter.value.release"
-                        :min="limiterRanges.release.min"
-                        :max="limiterRanges.release.max"
-                        :step="limiterRanges.release.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setLimiterParams({ release: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ limiterRanges.release.min }} ms</span>
-                        <span>{{ limiterRanges.release.max }} ms</span>
-                      </div>
-                    </div>
-                  </div>
-                </n-card>
-
-                <div v-else class="disabled-hint">
-                  <n-text depth="3">限制器已关闭</n-text>
-                </div>
-              </div>
-            </n-tab-pane>
-
-            <!-- 等响度 -->
-            <n-tab-pane name="loudness" tab="等响度">
-              <div class="tab-content">
-                <!-- 等响度总开关 -->
-                <n-card class="control-card" size="small" :bordered="true">
-                  <div class="eq-header">
-                    <div class="switch-row">
-                      <span class="switch-label">启用等响度补偿</span>
-                      <n-switch
-                        :value="audioEngine.loudness.value.enabled"
-                        @update:value="(v: any) => audioEngine.setLoudnessParams({ enabled: v })"
+                        style="width: 110px"
+                        @update:value="(v: any) => (mbcBands = v)"
                       />
                     </div>
                   </div>
-                </n-card>
-
-                <n-card
-                  v-if="audioEngine.loudness.value.enabled"
-                  class="control-card"
-                  size="small"
-                  :bordered="true"
-                  title="参数调节"
-                >
-                  <div class="loudness-info">
-                    <n-text depth="3" style="font-size: 12px">
-                      等响度补偿基于弗莱彻-曼森曲线，在不同音量下保持听感一致。
-                    </n-text>
-                  </div>
-
-                  <div class="param-grid">
-                    <!-- 补偿强度 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">补偿强度 (Compensation)</span>
-                        <n-input-number
-                          :value="audioEngine.loudness.value.compensation"
-                          :min="loudnessRanges.compensation.min"
-                          :max="loudnessRanges.compensation.max"
-                          :step="loudnessRanges.compensation.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setLoudnessParams({ compensation: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.loudness.value.compensation"
-                        :min="loudnessRanges.compensation.min"
-                        :max="loudnessRanges.compensation.max"
-                        :step="loudnessRanges.compensation.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setLoudnessParams({ compensation: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ (loudnessRanges.compensation.min * 100).toFixed(0) }}%</span>
-                        <span>{{ (loudnessRanges.compensation.max * 100).toFixed(0) }}%</span>
-                      </div>
+                  <div v-for="p in mbcParams" :key="p.key" class="se-param">
+                    <div class="se-param-head">
+                      <span class="se-slider-label">{{ p.label }}</span>
+                      <span class="se-param-value">{{ p.fmt(p.value) }}</span>
                     </div>
-
-                    <!-- 参考响度 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">参考响度 (Reference Loudness)</span>
-                        <n-input-number
-                          :value="audioEngine.loudness.value.referenceLoudness"
-                          :min="loudnessRanges.referenceLoudness.min"
-                          :max="loudnessRanges.referenceLoudness.max"
-                          :step="loudnessRanges.referenceLoudness.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setLoudnessParams({ referenceLoudness: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.loudness.value.referenceLoudness"
-                        :min="loudnessRanges.referenceLoudness.min"
-                        :max="loudnessRanges.referenceLoudness.max"
-                        :step="loudnessRanges.referenceLoudness.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setLoudnessParams({ referenceLoudness: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ loudnessRanges.referenceLoudness.min }} LUFS</span>
-                        <span>{{ loudnessRanges.referenceLoudness.max }} LUFS</span>
-                      </div>
-                    </div>
-
-                    <!-- 补偿方向 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">补偿方向</span>
-                      </div>
-                      <n-select
-                        :value="audioEngine.loudness.value.direction"
-                        :options="loudnessDirectionOptions"
-                        size="small"
-                        style="width: 100%"
-                        @update:value="(v: any) => audioEngine.setLoudnessParams({ direction: v })"
-                      />
-                      <div class="param-range">
-                        <span>双向补偿同时提升低频和高频</span>
-                      </div>
-                    </div>
-                  </div>
-                </n-card>
-
-                <div v-else class="disabled-hint">
-                  <n-text depth="3">等响度补偿已关闭</n-text>
-                </div>
-              </div>
-            </n-tab-pane>
-
-            <!-- 虚拟低频 -->
-            <n-tab-pane name="virtualBass" tab="虚拟低频">
-              <div class="tab-content">
-                <!-- 虚拟低频总开关 -->
-                <n-card class="control-card" size="small" :bordered="true">
-                  <div class="eq-header">
-                    <div class="switch-row">
-                      <span class="switch-label">启用虚拟低频</span>
-                      <n-switch
-                        :value="audioEngine.virtualBass.value.enabled"
-                        @update:value="(v: any) => audioEngine.setVirtualBassParams({ enabled: v })"
-                      />
-                    </div>
-                  </div>
-                </n-card>
-
-                <n-card
-                  v-if="audioEngine.virtualBass.value.enabled"
-                  class="control-card"
-                  size="small"
-                  :bordered="true"
-                  title="参数调节"
-                >
-                  <div class="loudness-info">
-                    <n-text depth="3" style="font-size: 12px">
-                      基于心理声学「基音缺失」原理，通过生成谐波让小型扬声器也能感知到低频，适合笔记本、手机等设备。
-                    </n-text>
-                  </div>
-
-                  <div class="param-grid">
-                    <!-- 力度 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">力度 (Intensity)</span>
-                        <n-input-number
-                          :value="audioEngine.virtualBass.value.intensity"
-                          :min="virtualBassRanges.intensity.min"
-                          :max="virtualBassRanges.intensity.max"
-                          :step="virtualBassRanges.intensity.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setVirtualBassParams({ intensity: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.virtualBass.value.intensity"
-                        :min="virtualBassRanges.intensity.min"
-                        :max="virtualBassRanges.intensity.max"
-                        :step="virtualBassRanges.intensity.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setVirtualBassParams({ intensity: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ virtualBassRanges.intensity.min }}</span>
-                        <span>{{ virtualBassRanges.intensity.max }}</span>
-                      </div>
-                    </div>
-
-                    <!-- 分频点 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">分频点 (Crossover)</span>
-                        <n-input-number
-                          :value="audioEngine.virtualBass.value.crossoverFreq"
-                          :min="virtualBassRanges.crossoverFreq.min"
-                          :max="virtualBassRanges.crossoverFreq.max"
-                          :step="virtualBassRanges.crossoverFreq.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setVirtualBassParams({ crossoverFreq: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.virtualBass.value.crossoverFreq"
-                        :min="virtualBassRanges.crossoverFreq.min"
-                        :max="virtualBassRanges.crossoverFreq.max"
-                        :step="virtualBassRanges.crossoverFreq.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setVirtualBassParams({ crossoverFreq: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ virtualBassRanges.crossoverFreq.min }} Hz</span>
-                        <span>{{ virtualBassRanges.crossoverFreq.max }} Hz</span>
-                      </div>
-                    </div>
-                  </div>
-                </n-card>
-
-                <div v-else class="disabled-hint">
-                  <n-text depth="3">虚拟低频已关闭</n-text>
-                </div>
-              </div>
-            </n-tab-pane>
-
-            <!-- 爆音抑制 -->
-            <n-tab-pane name="softClipper" tab="爆音抑制">
-              <div class="tab-content">
-                <!-- 爆音抑制总开关 -->
-                <n-card class="control-card" size="small" :bordered="true">
-                  <div class="eq-header">
-                    <div class="switch-row">
-                      <span class="switch-label">启用爆音抑制</span>
-                      <n-switch
-                        :value="audioEngine.softClipper.value.enabled"
-                        @update:value="(v: any) => audioEngine.setSoftClipperParams({ enabled: v })"
-                      />
-                    </div>
-                  </div>
-                </n-card>
-
-                <n-card
-                  v-if="audioEngine.softClipper.value.enabled"
-                  class="control-card"
-                  size="small"
-                  :bordered="true"
-                  title="参数调节"
-                >
-                  <div class="loudness-info">
-                    <n-text depth="3" style="font-size: 12px">
-                      使用 tanh 软限幅曲线防止数字削波（Clipping），在保持动态范围的同时减少大音量下的爆音和破音。
-                    </n-text>
-                  </div>
-
-                  <div class="param-grid">
-                    <!-- 阈值强度 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">阈值强度 (Threshold)</span>
-                        <n-input-number
-                          :value="audioEngine.softClipper.value.threshold"
-                          :min="softClipperRanges.threshold.min"
-                          :max="softClipperRanges.threshold.max"
-                          :step="softClipperRanges.threshold.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setSoftClipperParams({ threshold: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.softClipper.value.threshold"
-                        :min="softClipperRanges.threshold.min"
-                        :max="softClipperRanges.threshold.max"
-                        :step="softClipperRanges.threshold.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setSoftClipperParams({ threshold: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ softClipperRanges.threshold.min }}（硬限幅）</span>
-                        <span>{{ softClipperRanges.threshold.max }}（软限幅）</span>
-                      </div>
-                    </div>
-
-                    <!-- 补偿增益 -->
-                    <div class="param-item">
-                      <div class="param-header">
-                        <span class="param-label">补偿增益 (Makeup Gain)</span>
-                        <n-input-number
-                          :value="audioEngine.softClipper.value.makeupGain"
-                          :min="softClipperRanges.makeupGain.min"
-                          :max="softClipperRanges.makeupGain.max"
-                          :step="softClipperRanges.makeupGain.step"
-                          size="small"
-                          style="width: 90px"
-                          @update:value="(v: any) => audioEngine.setSoftClipperParams({ makeupGain: v })"
-                        />
-                      </div>
-                      <n-slider
-                        :value="audioEngine.softClipper.value.makeupGain"
-                        :min="softClipperRanges.makeupGain.min"
-                        :max="softClipperRanges.makeupGain.max"
-                        :step="softClipperRanges.makeupGain.step"
-                        :tooltip="false"
-                        @update:value="(v: any) => audioEngine.setSoftClipperParams({ makeupGain: v })"
-                      />
-                      <div class="param-range">
-                        <span>{{ softClipperRanges.makeupGain.min }} dB</span>
-                        <span>{{ softClipperRanges.makeupGain.max }} dB</span>
-                      </div>
-                    </div>
-                  </div>
-                </n-card>
-
-                <div v-else class="disabled-hint">
-                  <n-text depth="3">爆音抑制已关闭</n-text>
-                </div>
-              </div>
-            </n-tab-pane>
-
-            <!-- 预设管理 -->
-            <n-tab-pane name="presets" tab="预设">
-              <div class="tab-content">
-                <n-card class="control-card" size="small" :bordered="true">
-                  <div class="presets-header">
-                    <div class="presets-title">
-                      <n-icon size="16"><i class="mgc_list_check_line"></i></n-icon>
-                      <n-text strong>预设列表</n-text>
-                    </div>
-                    <n-button size="small" type="primary" @click="showSavePresetDialog = true">
-                      <template #icon>
-                        <n-icon><i class="mgc_add_line"></i></n-icon>
-                      </template>
-                      新建预设
-                    </n-button>
-                  </div>
-                </n-card>
-
-                <div class="presets-grid">
-                  <div
-                    v-for="preset in audioEngine.presets.value"
-                    :key="preset.id"
-                    class="preset-card"
-                    :class="{
-                      'preset-card--active': preset.id === audioEngine.currentPresetId.value
-                    }"
-                    @click="handlePresetChange(preset.id)"
-                  >
-                    <div class="preset-card-content">
-                      <div class="preset-icon">
-                        <n-icon size="20">
-                          <i
-                            :class="
-                              preset.id === audioEngine.currentPresetId.value
-                                ? 'mgc_check_circle_line'
-                                : 'mgc_music_2_line'
-                            "
-                          ></i>
-                        </n-icon>
-                      </div>
-                      <div class="preset-info">
-                        <span class="preset-name">{{ preset.name }}</span>
-                        <n-tag
-                          size="tiny"
-                          :type="audioEngine.isBuiltinPreset(preset.id) ? 'success' : 'default'"
-                          :bordered="false"
-                        >
-                          {{ audioEngine.isBuiltinPreset(preset.id) ? '内置' : '自定义' }}
-                        </n-tag>
-                      </div>
-                    </div>
-                    <div
-                      class="preset-actions"
-                      v-if="!audioEngine.isBuiltinPreset(preset.id)"
-                      @click.stop
-                    >
-                      <n-popconfirm
-                        positive-text="删除"
-                        negative-text="取消"
-                        @positive-click="handleDeletePreset(preset.id)"
-                      >
-                        <template #trigger>
-                          <n-button size="tiny" quaternary circle>
-                            <template #icon>
-                              <n-icon><i class="mgc_delete_line"></i></n-icon>
-                            </template>
-                          </n-button>
-                        </template>
-                        确定要删除预设 "{{ preset.name }}" 吗？
-                      </n-popconfirm>
-                    </div>
+                    <n-slider
+                      :value="p.value"
+                      :min="p.min"
+                      :max="p.max"
+                      :step="p.step"
+                      :tooltip="false"
+                      @update:value="p.set"
+                    />
                   </div>
                 </div>
-              </div>
-            </n-tab-pane>
-          </n-tabs>
+              </n-collapse-item>
+            </n-collapse>
+
+            <p class="se-note se-note-warn">注意: 调整此项需要完全重载音效，会产生噪音。</p>
+          </section>
+
+          <!-- 限幅器 -->
+          <section class="se-section">
+            <header class="se-sec-head">
+              <span class="se-sec-title">限幅器 <em>(Limiter)</em></span>
+              <span class="se-sec-status">{{ limiterStatus }}</span>
+              <n-switch v-model:value="limiterEnabled" size="small" />
+            </header>
+
+            <n-collapse
+              v-if="limiterEnabled"
+              class="se-collapse"
+              :expanded-names="limiterExpanded ? ['limiter'] : []"
+              @update:expanded-names="(names: any) => (limiterExpanded = (names || []).includes('limiter'))"
+            >
+              <n-collapse-item title="折叠选项" name="limiter">
+                <div class="se-params">
+                  <div v-for="p in limiterParams" :key="p.key" class="se-param">
+                    <div class="se-param-head">
+                      <span class="se-slider-label">{{ p.label }}</span>
+                      <span class="se-param-value">{{ p.fmt(p.value) }}</span>
+                    </div>
+                    <n-slider
+                      :value="p.value"
+                      :min="p.min"
+                      :max="p.max"
+                      :step="p.step"
+                      :tooltip="false"
+                      @update:value="p.set"
+                    />
+                  </div>
+                </div>
+              </n-collapse-item>
+            </n-collapse>
+          </section>
+
+          <!-- 声道平衡 -->
+          <section class="se-section">
+            <header class="se-sec-head">
+              <span class="se-sec-title">声道平衡</span>
+              <span class="se-sec-status">{{ balanceStatus }}</span>
+              <n-switch v-model:value="balanceEnabled" size="small" />
+            </header>
+
+            <n-collapse
+              class="se-collapse"
+              :class="{ 'is-disabled': !balanceEnabled }"
+              :expanded-names="balanceExpanded ? ['balance'] : []"
+              @update:expanded-names="(names: any) => (balanceExpanded = (names || []).includes('balance'))"
+            >
+              <n-collapse-item title="折叠选项" name="balance">
+                <div class="se-params">
+                  <div class="se-param">
+                    <div class="se-param-head">
+                      <span class="se-slider-label">左声道 (L)</span>
+                      <span class="se-param-value">{{ fmtDb(balanceL) }}</span>
+                    </div>
+                    <n-slider
+                      :value="balanceL"
+                      :min="-6"
+                      :max="6"
+                      :step="0.1"
+                      :tooltip="false"
+                      @update:value="(v: any) => (balanceL = v)"
+                    />
+                  </div>
+                  <div class="se-param">
+                    <div class="se-param-head">
+                      <span class="se-slider-label">右声道 (R)</span>
+                      <span class="se-param-value">{{ fmtDb(balanceR) }}</span>
+                    </div>
+                    <n-slider
+                      :value="balanceR"
+                      :min="-6"
+                      :max="6"
+                      :step="0.1"
+                      :tooltip="false"
+                      @update:value="(v: any) => (balanceR = v)"
+                    />
+                  </div>
+                </div>
+              </n-collapse-item>
+            </n-collapse>
+          </section>
+
+          <!-- 音量记忆 -->
+          <section class="se-section">
+            <header class="se-sec-head">
+              <span class="se-sec-title">音量记忆</span>
+              <span class="se-sec-status">{{ volumeMemoryEnabled ? '已启用' : '已禁用' }}</span>
+              <n-switch v-model:value="volumeMemoryEnabled" size="small" />
+            </header>
+            <p class="se-desc">自动记忆/关闭 Such Music 时的系统音量。</p>
+          </section>
         </div>
       </n-scrollbar>
 
-    </n-card>
-  </n-modal>
-
-  <!-- 保存预设对话框 -->
-  <n-modal v-model:show="showSavePresetDialog">
-    <n-card style="width: 400px" title="保存预设" :bordered="false" role="dialog" aria-modal="true">
-      <n-input
-        v-model:value="newPresetName"
-        placeholder="输入预设名称"
-        @keyup.enter="handleSavePreset"
-      />
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="showSavePresetDialog = false">取消</n-button>
-          <n-button type="primary" @click="handleSavePreset" :disabled="!newPresetName.trim()">
-            保存
+      <!-- 底部操作栏 -->
+      <footer class="se-footer">
+        <div class="se-footer-group">
+          <n-button quaternary circle title="设置" @click="handleFooterSettings">
+            <template #icon>
+              <n-icon size="20"><i class="mgc_settings_3_line"></i></n-icon>
+            </template>
           </n-button>
-        </n-space>
-      </template>
-    </n-card>
+          <n-button quaternary circle title="刷新/重置" @click="handleReset">
+            <template #icon>
+              <n-icon size="20"><i class="mgc_refresh_2_line"></i></n-icon>
+            </template>
+          </n-button>
+        </div>
+      </footer>
+    </div>
   </n-modal>
 </template>
 
 <style lang="scss" scoped>
-.sound-effects-modal {
-  .modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+.se-modal {
+  display: flex;
+  flex-direction: column;
+  width: 880px;
+  max-width: calc(100vw - 96px);
+  height: 80vh;
+  border-radius: 12px;
+  overflow: hidden;
+  --se-modal-bg: #1e1e24;
+  background: var(--se-modal-bg);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--n-border-color, rgba(128, 128, 128, 0.15));
+  color: var(--n-text-color);
 
-    .modal-title {
-      font-size: 16px;
-      font-weight: 600;
-      color: var(--n-text-color);
+  // ===== 顶部导航 =====
+  .se-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+    padding: 14px 18px 10px;
+
+    .se-title {
+      margin: 0;
+      font-size: 19px;
+      font-weight: 700;
+      letter-spacing: 0.4px;
+      background: linear-gradient(135deg, v-bind('themeVars.primaryColor'), v-bind('themeVars.primaryColorPressed'));
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+  }
+
+  // ===== 预设区 =====
+  .se-preset {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-shrink: 0;
+    padding: 6px 18px 14px;
+    border-bottom: 1px solid var(--n-divider-color, rgba(128, 128, 128, 0.12));
+
+    .se-preset-info {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      flex: 1;
+      min-width: 240px;
+      max-width: 320px;
+
+      .se-preset-line {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+
+        .se-preset-speaker {
+          font-size: 15px;
+          color: v-bind('themeVars.primaryColor');
+        }
+
+        .se-preset-device {
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--n-text-color);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+      }
+
+      .se-preset-select {
+        width: 100%;
+      }
     }
 
-    .modal-close-btn {
+    .se-preset-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+  }
+
+  // ===== 内容区 =====
+  .se-scroll {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .se-body {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 16px 18px 20px;
+  }
+
+  .se-section {
+    padding: 14px 16px;
+    border-radius: 14px;
+    background: var(--n-card-color, rgba(128, 128, 128, 0.05));
+    border: 1px solid var(--n-border-color, rgba(128, 128, 128, 0.12));
+    transition: opacity 0.2s;
+
+    &.disabled {
+      opacity: 0.6;
+    }
+
+    .se-sec-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+
+      .se-sec-title {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--n-text-color);
+
+        em {
+          font-style: normal;
+          font-size: 12px;
+          color: var(--n-text-color-3);
+          font-weight: 400;
+        }
+      }
+
+      .se-sec-status {
+        margin-left: auto;
+        font-size: 12px;
+        color: var(--n-text-color-3);
+      }
+    }
+
+    .se-desc {
+      margin: 0 0 6px;
+      font-size: 13px;
+      color: var(--n-text-color-2);
+    }
+
+    .se-hint {
+      margin: 8px 0 0;
+      font-size: 12px;
+      color: var(--n-text-color-3);
+    }
+
+    .se-note {
+      margin: 8px 0 0;
+      font-size: 12px;
+      color: var(--n-text-color-3);
+
+      &.se-note-warn {
+        color: #f59e0b;
+      }
+    }
+  }
+
+  // EQ Tab + 曲线图
+  .se-eq-tabs {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+
+  .se-graph-wrap {
+    position: relative;
+    border-radius: 10px;
+    overflow: hidden;
+
+    .se-graph {
+      display: block;
+      width: 100%;
+      height: 220px;
+      cursor: grab;
+      touch-action: none;
+
+      &.dimmed {
+        opacity: 0.4;
+        pointer-events: none;
+      }
+    }
+
+    .se-graph-mask {
+      position: absolute;
+      inset: 0;
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 28px;
-      height: 28px;
-      border-radius: 6px;
-      cursor: pointer;
-      color: var(--n-text-color-2);
-      transition: all 0.2s;
+      font-size: 13px;
+      color: var(--n-text-color-3);
+      background: color-mix(in srgb, var(--se-modal-bg) 76%, transparent);
+    }
+  }
 
-      &:hover {
-        background: var(--n-close-color-hover, rgba(128, 128, 128, 0.15));
+  // 模式切换
+  .se-mode-toggle {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+
+  // 滑块行
+  .se-slider-row {
+    display: grid;
+    grid-template-columns: 76px 1fr 92px;
+    align-items: center;
+    gap: 12px;
+
+    .se-slider-label {
+      font-size: 13px;
+      color: var(--n-text-color-2);
+    }
+
+    .se-slider-val {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--n-text-color);
+      text-align: right;
+    }
+
+    & + .se-slider-row {
+      margin-top: 14px;
+    }
+  }
+
+  // 等响补偿
+  .se-comp-body {
+    position: relative;
+
+    &.is-disabled {
+      .se-slider-row {
+        opacity: 0.4;
+      }
+    }
+
+    .se-comp-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 12px;
+    }
+
+    .se-comp-mask {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 8px;
+      font-size: 13px;
+      color: var(--n-text-color-3);
+      background: var(--n-fill-color, rgba(128, 128, 128, 0.28));
+      z-index: 2;
+    }
+  }
+
+  // 折叠区
+  .se-collapse {
+    &.is-disabled {
+      opacity: 0.4;
+      pointer-events: none;
+    }
+
+    .se-params {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      padding: 2px 4px 6px;
+    }
+  }
+
+  .se-param {
+    .se-param-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+
+      .se-slider-label {
+        font-size: 13px;
+        color: var(--n-text-color-2);
+      }
+
+      .se-param-value {
+        font-size: 13px;
+        font-weight: 600;
         color: var(--n-text-color);
       }
     }
   }
+
+  // ===== 底部控制栏 =====
+  .se-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    padding: 10px 18px;
+    border-top: 1px solid var(--n-divider-color, rgba(128, 128, 128, 0.12));
+
+    .se-footer-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+  }
 }
 
-.modal-scroll {
+// 滚动条美化
+.se-scroll {
   :deep(.n-scrollbar-rail) {
     right: 2px;
     width: 4px;
@@ -1106,335 +1366,6 @@ export default {
     width: 4px;
     border-radius: 2px;
     background-color: rgba(128, 128, 128, 0.25);
-  }
-}
-
-.modal-content-inner {
-  padding: 8px 16px 16px;
-
-  // 侧边 Tab 布局
-  :deep(.n-tabs) {
-    min-height: 420px;
-
-    .n-tabs-nav {
-      width: 110px;
-      min-width: 110px;
-      padding-top: 8px;
-
-      .n-tabs-nav--left & {
-        margin-right: 0;
-      }
-
-      .n-tabs-tab {
-        padding: 10px 14px;
-        margin: 2px 4px;
-        border-radius: 8px;
-        font-size: 13px;
-        justify-content: flex-start;
-        transition: all 0.2s;
-
-        &:hover {
-          background: var(--n-tab-color, rgba(128, 128, 128, 0.08));
-        }
-
-        &.n-tabs-tab--active {
-          background: var(--primary-color-opacity-1, rgba(24, 160, 88, 0.08));
-          color: var(--primary-color);
-          font-weight: 500;
-        }
-      }
-
-      .n-tabs-bar {
-        display: none;
-      }
-    }
-
-    .n-tabs-pane-wrapper {
-      padding-left: 8px;
-    }
-  }
-}
-
-.tab-content {
-  padding: 4px 0;
-  min-height: 380px;
-}
-
-.control-card {
-  margin-bottom: 12px;
-  border-radius: 10px;
-
-  &:last-child {
-    margin-bottom: 0;
-  }
-
-  :deep(.n-card-header) {
-    padding-bottom: 8px;
-  }
-
-  :deep(.n-card__content) {
-    padding-top: 8px;
-  }
-}
-
-.eq-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-
-  .switch-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-
-    .switch-label {
-      font-size: 14px;
-      color: var(--n-text-color);
-    }
-  }
-
-  .preset-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .gain-reduction {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-
-    .gain-label {
-      font-size: 12px;
-      color: var(--n-text-color-3);
-    }
-
-    .gain-bar {
-      width: 100px;
-      height: 8px;
-      background: var(--n-border-color);
-      border-radius: 4px;
-      overflow: hidden;
-
-      .gain-fill {
-        height: 100%;
-        transition:
-          width 0.1s,
-          background-color 0.1s;
-      }
-    }
-
-    .gain-value {
-      font-size: 12px;
-      color: var(--n-text-color-2);
-      min-width: 60px;
-    }
-  }
-}
-
-.disabled-hint {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 200px;
-}
-
-.eq-band-selector {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-
-  .band-label {
-    font-size: 14px;
-    color: var(--n-text-color);
-  }
-}
-
-.eq-band-controls {
-  margin-bottom: 16px;
-
-  .band-detail {
-    margin-bottom: 12px;
-
-    .band-freq {
-      font-size: 16px;
-      font-weight: 600;
-      color: var(--primary-color);
-    }
-  }
-
-  .eq-slider-group {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 16px;
-  }
-
-  .eq-slider-item {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-
-    .slider-label {
-      font-size: 12px;
-      color: var(--n-text-color-2);
-    }
-
-    .slider-value {
-      font-size: 12px;
-      color: var(--n-text-color-3);
-      text-align: right;
-    }
-  }
-}
-
-.quick-gains {
-  .quick-gains-grid {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .quick-gain-item {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-
-    .quick-gain-label {
-      font-size: 10px;
-      color: var(--n-text-color-3);
-    }
-
-    .quick-gain-value {
-      font-size: 11px;
-      color: var(--n-text-color-2);
-    }
-  }
-}
-
-.param-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-.param-item {
-  .param-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 8px;
-
-    .param-label {
-      font-size: 13px;
-      color: var(--n-text-color);
-    }
-  }
-
-  .param-range {
-    display: flex;
-    justify-content: space-between;
-    font-size: 11px;
-    color: var(--n-text-color-3);
-    margin-top: 4px;
-  }
-}
-
-.loudness-info {
-  margin-bottom: 16px;
-  padding: 12px;
-  background: var(--n-border-color);
-  border-radius: 6px;
-}
-
-.presets-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-
-  .presets-title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--n-text-color);
-  }
-}
-
-.presets-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}
-
-.preset-card {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 14px;
-  background: var(--n-card-color);
-  border: 1px solid var(--n-border-color);
-  border-radius: 10px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-
-  &:hover {
-    background: var(--n-hover-color);
-    transform: translateY(-1px);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-  }
-
-  &--active {
-    background: var(--primary-color-opacity-1, rgba(24, 160, 88, 0.08));
-    border-color: var(--primary-color);
-    box-shadow: 0 2px 8px var(--primary-color-opacity-2, rgba(24, 160, 88, 0.15));
-
-    .preset-icon {
-      color: var(--primary-color);
-      background: var(--primary-color-opacity-1, rgba(24, 160, 88, 0.12));
-    }
-  }
-
-  .preset-card-content {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .preset-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    border-radius: 8px;
-    background: var(--n-border-color);
-    color: var(--n-text-color-3);
-    transition: all 0.2s;
-  }
-
-  .preset-info {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-
-    .preset-name {
-      font-size: 14px;
-      font-weight: 500;
-      line-height: 1.2;
-      color: var(--n-text-color);
-    }
-  }
-
-  .preset-actions {
-    opacity: 0;
-    transition: opacity 0.2s;
-  }
-
-  &:hover .preset-actions {
-    opacity: 1;
   }
 }
 </style>

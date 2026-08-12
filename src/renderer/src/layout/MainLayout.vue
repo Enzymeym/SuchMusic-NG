@@ -37,6 +37,9 @@ const handleResize = () => {
   wasSmall = isSmall
 }
 
+// 持有 throttle 包装引用，确保 add/removeEventListener 使用同一函数（避免监听器泄漏）
+const onWindowResize = throttle(handleResize, 200)
+
 // 监听播放页状态变化
 watch(() => player.isPlayerPageShown, (isShown) => {
   if (isShown) {
@@ -89,7 +92,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  window.removeEventListener('resize', handleResize)
+  window.removeEventListener('resize', onWindowResize)
 })
 </script>
 

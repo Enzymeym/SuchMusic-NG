@@ -1,5 +1,32 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 
+/** 网易云归一化歌曲结构（渲染层可直接喂给 SongList） */
+export interface NeteaseSong {
+  id: number
+  name: string
+  ar: { id: number; name: string }[]
+  al: { id: number; name: string; picUrl: string }
+  dt: number
+  mv: number
+  fee: number
+  source: 'netease'
+}
+
+/** 网易云登录用户信息（含 VIP 与等级） */
+export interface NeteaseLoginProfile {
+  nickname: string
+  userId: string
+  avatarUrl?: string
+  /** VIP 类型：0=无 VIP，>0 为黑胶 VIP */
+  vipType?: number
+  /** 黑胶 VIP 等级 */
+  vipLevel?: number
+  /** 账号等级 */
+  level?: number
+  /** 个性签名 */
+  signature?: string
+}
+
 declare global {
   interface Window {
     electron: ElectronAPI
@@ -7,6 +34,25 @@ declare global {
       rustAudio: any
       analyzer: {
         getWasmBinary: () => Promise<Uint8Array | null>
+      }
+      memory: {
+        getReport: () => Promise<{
+          current: {
+            t: number
+            rss: number
+            heapTotal: number
+            heapUsed: number
+            external: number
+            arrayBuffers: number
+            processes: Array<{ pid: number; type: string; rss: number; cpu: number }>
+            totalProcesses: number
+          } | null
+          min: number
+          max: number
+          avg: number
+          count: number
+          durationMs: number
+        }>
       }
       audioEngine: any
       wasapi: {
@@ -24,6 +70,33 @@ declare global {
           mode?: string; deviceName?: string; position?: number; error?: string
         }>
         getVersion: () => Promise<{ success: boolean; version?: string; error?: string }>
+      }
+      netease: {
+        search: (keywords: string, offset?: number, limit?: number) => Promise<{
+          songs: NeteaseSong[]
+          hasMore: boolean
+          total: number
+        }>
+        songUrl: (ids: number[], quality?: string) => Promise<Record<number, string>>
+        hotSearch: () => Promise<{ searchWord: string; iconUrl?: string }[]>
+        loginQr: () => Promise<{ unikey: string; qrimg: string }>
+        loginQrCheck: (unikey: string) => Promise<{
+          code: number
+          profile?: NeteaseLoginProfile
+        }>
+        loginStatus: () => Promise<{
+          loggedIn: boolean
+          profile?: NeteaseLoginProfile
+          accounts: NeteaseLoginProfile[]
+          activeUserId: string
+        }>
+        switchAccount: (userId: string) => Promise<{
+          loggedIn: boolean
+          profile?: NeteaseLoginProfile
+          accounts: NeteaseLoginProfile[]
+          activeUserId: string
+        }>
+        logout: (userId?: string) => Promise<void>
       }
       updater: {
         check: (channel: 'stable' | 'beta') => Promise<any>

@@ -40,10 +40,11 @@ export function useTaskbarLyric() {
     }
   )
 
-  // Sync track info
+  // Sync track info（仅监听标题/歌手，避免对 currentSong 整体深监听；歌词变化已由上方 watcher 覆盖）
   watch(
-    () => playerStore.currentSong,
-    (song) => {
+    () => [playerStore.currentSong?.id, playerStore.currentSong?.title, playerStore.currentSong?.artist],
+    () => {
+      const song = playerStore.currentSong
       if (song) {
         window.electron.ipcRenderer.send('taskbar-lyric:set-info', {
           title: song.title,
@@ -51,7 +52,7 @@ export function useTaskbarLyric() {
         })
       }
     },
-    { deep: true, immediate: true }
+    { immediate: true }
   )
 
   // Sync time with throttle to reduce IPC overhead

@@ -2,6 +2,7 @@ import { ref, computed } from 'vue'
 import { usePlayerStore } from '../../../stores/playerStore'
 import { audioEngine } from '../../../audio/audio-engine'
 import { getTransitionController } from '../../../audio/transition-controller'
+import { formatTime } from '../../../utils/format'
 
 /**
  * 进度条相关的组合式函数
@@ -16,18 +17,6 @@ export function usePlayerProgress() {
 
   // 防止 endDrag 后立即触发 handleProgressUpdate 造成 double-seek
   let _lastSeekTime = 0
-
-  /**
-   * 格式化时间为 mm:ss 格式
-   * @param seconds 秒数
-   * @returns 格式化后的时间字符串
-   */
-  const formatTime = (seconds: number): string => {
-    if (!seconds || isNaN(seconds)) return '00:00'
-    const m = Math.floor(seconds / 60)
-    const s = Math.floor(seconds % 60)
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
-  }
 
   /**
    * 进度百分比
@@ -45,9 +34,9 @@ export function usePlayerProgress() {
     if (isDraggingProgress.value) {
       if (!player.currentSong || player.currentSong.durationMs <= 0) return '00:00'
       const ms = (dragValue.value / 100) * player.currentSong.durationMs
-      return formatTime(ms / 1000)
+      return formatTime(ms / 1000, { padMinutes: true, fallback: '00:00' })
     }
-    return formatTime(player.positionMs / 1000)
+    return formatTime(player.positionMs / 1000, { padMinutes: true, fallback: '00:00' })
   })
 
   /**

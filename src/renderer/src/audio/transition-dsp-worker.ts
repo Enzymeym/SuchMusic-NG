@@ -18,10 +18,26 @@
 import {
   analyzeContentStartAsync,
   analyzeVocalEndAsync,
+  analyzeVocalGapAsync,
+  analyzeVocalStartAsync,
   estimateBpm,
   timeStretchPcmAsync
 } from './transition-dsp'
 import type { DspWorkerCommand, DspWorkerEvent } from './transition-dsp.worker'
+
+/** 单个 Worker 请求的超时（毫秒）：计算挂起（死循环/极慢）时 Promise 不悬挂，调用方可降级继续 */
+const DSP_REQUEST_TIMEOUT_MS = 15000
+
+/** 为 Promise 加超时：超时 reject，防止 Worker 计算挂起导致 await 永挂 */
+const withTimeout = <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`DspWorker 请求超时(${timeoutMs}ms)`)), timeoutMs)
+  })
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer !== null) clearTimeout(timer)
+  })
+}
 
 /** 挂起的请求记录 */
 interface DspPendingRequest {
@@ -85,6 +101,31 @@ export class DspWorkerClient {
     return this.send<number>({ type: 'vocal-end', requestId: 0, channelData, sampleRate, maxSec })
   }
 
+  /** 结尾无人声段分析：返回无人声段起点（秒，相对传入数据开头）；未检测到返回 -1 */
+  async analyzeVocalGap(
+    channelData: Float32Array,
+    sampleRate: number,
+    windowSec?: number
+  ): Promise<number> {
+    if (!this.worker) {
+      const g = await analyzeVocalGapAsync(channelData, sampleRate, windowSec)
+      return g ? g.startSec : -1
+    }
+    return this.send<number>({ type: 'vocal-gap', requestId: 0, channelData, sampleRate, windowSec })
+  }
+
+  /** 下一首人声起点分析：返回人声起点（秒，相对传入数据开头）；未检测到返回 -1 */
+  async analyzeVocalStart(
+    channelData: Float32Array,
+    sampleRate: number,
+    maxSec?: number
+  ): Promise<number> {
+    if (!this.worker) {
+      return analyzeVocalStartAsync(channelData, sampleRate, maxSec)
+    }
+    return this.send<number>({ type: 'vocal-start', requestId: 0, channelData, sampleRate, maxSec })
+  }
+
   /** 内容起点分析：返回应跳过的前奏长度（秒）；无前奏返回 0 */
   async analyzeContentStart(
     channelData: Float32Array,
@@ -143,13 +184,19 @@ export class DspWorkerClient {
     // 拷贝后再转移：AudioBuffer 的 getChannelData 返回底层缓冲，直接转移会 detach 播放缓冲
     const payload = command.channelData.slice()
     const requestId = this.nextRequestId++
-    return new Promise<T>((resolve, reject) => {
+    const promise = new Promise<T>((resolve, reject) => {
       this.pending.set(requestId, {
         resolve: resolve as (value: number | Float32Array) => void,
         reject
       })
       const cmd = { ...command, requestId, channelData: payload } as DspWorkerCommand
       worker.postMessage(cmd, [payload.buffer as ArrayBuffer])
+    })
+    // 超时兜底：Worker 计算挂起（死循环/极慢）时 Promise 不悬挂，
+    // 调用方（prepareNext 的 catch 降级）可继续流程，避免过渡永久失效
+    return withTimeout(promise, DSP_REQUEST_TIMEOUT_MS).catch((err) => {
+      this.pending.delete(requestId)
+      throw err
     })
   }
 

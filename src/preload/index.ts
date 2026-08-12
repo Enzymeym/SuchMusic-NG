@@ -95,6 +95,11 @@ class AudioEngineManager {
   }
 
   private ensureEngineId(): string {
+    // #region debug-point B:engine-id
+    if (!this.currentEngineId) {
+      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"sound-effects-ineffective",runId:"pre-fix",hypothesisId:"B",location:"preload/index.ts:ensureEngineId",msg:"[DEBUG] currentEngineId is NULL (engine never created)",data:{},ts:Date.now()})}).catch(()=>{})
+    }
+    // #endregion
     if (!this.currentEngineId) {
       throw new Error('音频引擎未初始化，请先调用 create()')
     }
@@ -370,6 +375,11 @@ const api = {
     getWasmBinary: () => ipcRenderer.invoke('analyzer:get-wasm-binary')
   },
 
+  /** 内存监控：获取主进程内存统计报告 */
+  memory: {
+    getReport: () => ipcRenderer.invoke('memory:get-report')
+  },
+
   audioEngine: {
     create: (config?: AudioEngineConfig) => audioEngineManager.create(config),
     destroy: () => audioEngineManager.destroy(),
@@ -485,6 +495,20 @@ const api = {
     flush: (engineId: string) => ipcRenderer.invoke('wasapi:flush', engineId),
     getState: (engineId: string) => ipcRenderer.invoke('wasapi:get-state', engineId),
     getVersion: () => ipcRenderer.invoke('wasapi:get-version')
+  },
+
+  // 网易云音乐（搜索 / 播放地址 / 热搜 / 账号登录）
+  netease: {
+    search: (keywords: string, offset = 0, limit = 30) =>
+      ipcRenderer.invoke('netease:search', keywords, offset, limit),
+    songUrl: (ids: number[], quality?: string) =>
+      ipcRenderer.invoke('netease:song-url', ids, quality),
+    hotSearch: () => ipcRenderer.invoke('netease:hot-search'),
+    loginQr: () => ipcRenderer.invoke('netease:login-qr'),
+    loginQrCheck: (unikey: string) => ipcRenderer.invoke('netease:login-qr-check', unikey),
+    loginStatus: () => ipcRenderer.invoke('netease:login-status'),
+    switchAccount: (userId: string) => ipcRenderer.invoke('netease:switch-account', userId),
+    logout: (userId?: string) => ipcRenderer.invoke('netease:logout', userId)
   },
 
   updater: {

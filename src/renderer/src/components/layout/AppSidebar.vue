@@ -3,6 +3,7 @@ import { h, ref, watch, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { MenuOption, NTooltip, useThemeVars } from 'naive-ui'
 import SidebarNavigation from '../common/SidebarNavigation.vue'
+import { hexToRgba } from '../../utils/color'
 
 const props = defineProps<{ collapsed: boolean }>()
 const emit = defineEmits<{ (e: 'update:collapsed', value: boolean): void }>()
@@ -12,35 +13,9 @@ const route = useRoute()
 const themeVars = useThemeVars()
 
 // 将十六进制主色转换为带透明度的 rgba，用于选中态背景
-const activeBgColor = computed(() => {
-  let hex = themeVars.value.primaryColor || '#2C8EFD'
-  hex = hex.replace('#', '')
-  if (hex.length === 3) {
-    hex = hex
-      .split('')
-      .map((c) => c + c)
-      .join('')
-  }
-  const r = parseInt(hex.substring(0, 2), 16)
-  const g = parseInt(hex.substring(2, 4), 16)
-  const b = parseInt(hex.substring(4, 6), 16)
-  return `rgba(${r}, ${g}, ${b}, 0.15)`
-})
-
-const activeBgColorDark = computed(() => {
-  let hex = themeVars.value.primaryColor || '#2C8EFD'
-  hex = hex.replace('#', '')
-  if (hex.length === 3) {
-    hex = hex
-      .split('')
-      .map((c) => c + c)
-      .join('')
-  }
-  const r = parseInt(hex.substring(0, 2), 16)
-  const g = parseInt(hex.substring(2, 4), 16)
-  const b = parseInt(hex.substring(4, 6), 16)
-  return `rgba(${r}, ${g}, ${b}, 0.25)`
-})
+const primaryColorHex = computed(() => themeVars.value.primaryColor || '#2C8EFD')
+const activeBgColor = computed(() => hexToRgba(primaryColorHex.value, 0.15))
+const activeBgColorDark = computed(() => hexToRgba(primaryColorHex.value, 0.25))
 
 const toggleCollapse = () => {
   emit('update:collapsed', !props.collapsed)

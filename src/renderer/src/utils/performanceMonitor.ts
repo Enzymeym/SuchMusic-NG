@@ -6,6 +6,9 @@ class PerformanceMonitor {
   /** 存储自定义 mark 名称集合 */
   private marks: Set<string> = new Set()
 
+  /** 最大 mark 数量，防止长期运行后 Set 无限增长 */
+  private readonly MAX_MARKS = 100
+
   /** 存储所有 measure 和 event 记录 */
   private records: Array<{ name: string; duration: number; timestamp: number }> = []
 
@@ -30,6 +33,10 @@ class PerformanceMonitor {
     try {
       performance.mark(name)
       this.marks.add(name)
+      // 超限时清空旧标记，防止集合无限增长
+      if (this.marks.size > this.MAX_MARKS) {
+        this.marks.clear()
+      }
     } catch {
       // performance.mark 在非标准环境下可能不可用
     }

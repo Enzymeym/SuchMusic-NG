@@ -2,6 +2,7 @@ import { ipcMain, app, dialog } from 'electron'
 import { promises as fs } from 'fs'
 import { join, extname, basename, dirname } from 'path'
 import { writeAudioMeta } from '../utils/musicMetaWriter'
+import { readMetaManually } from '../utils/musicMetaReader'
 
 // 本地音乐扫描结果的数据结构
 interface LocalMusicTrack {
@@ -43,11 +44,17 @@ export function registerLocalMusicHandlers(): void {
       } catch (error) {
         console.warn('parseFile duration=true 失败，尝试降级解析:', filePath, error)
         // 解析失败时降级为默认解析，尽量拿到封面等信息
-        metadata = await parseFile(filePath)
+        try {
+          metadata = await parseFile(filePath)
+        } catch (error2) {
+          console.warn('music-metadata 解析失败，尝试手动解析:', filePath, error2)
+        }
       }
 
-      const m = metadata as {
-        format: {
+      // music-metadata 两次解析均失败时 metadata 为 undefined，后续按空对象处理，
+      // 由下方的手动解析兜底提取封面/标签/时长
+      const m = (metadata ?? {}) as {
+        format?: {
           duration?: number
           numberOfSamples?: number
           sampleRate?: number
@@ -63,15 +70,15 @@ export function registerLocalMusicHandlers(): void {
         }
       }
 
-      const seconds = m.format.duration
-      const bitrate = m.format.bitrate
-      let sampleRate = m.format.sampleRate
+      const seconds = m.format?.duration
+      let bitrate = m.format?.bitrate
+      let sampleRate = m.format?.sampleRate
       let durationMs: number | undefined
       if (seconds && Number.isFinite(seconds)) {
         durationMs = Math.round(seconds * 1000)
       } else if (
-        typeof m.format.numberOfSamples === 'number' &&
-        typeof m.format.sampleRate === 'number' &&
+        typeof m.format?.numberOfSamples === 'number' &&
+        typeof m.format?.sampleRate === 'number' &&
         m.format.numberOfSamples > 0 &&
         m.format.sampleRate > 0
       ) {
@@ -87,7 +94,7 @@ export function registerLocalMusicHandlers(): void {
       }
 
       const picture = m.common.picture?.[0]
-      const title =
+      let title =
         typeof (m.common as { title?: unknown }).title === 'string'
           ? ((m.common as { title?: string }).title || '').trim() || undefined
           : undefined
@@ -104,7 +111,7 @@ export function registerLocalMusicHandlers(): void {
         const s = artistField.trim()
         if (s) artists.push(s)
       }
-      const album =
+      let album =
         typeof (m.common as { album?: unknown }).album === 'string'
           ? ((m.common as { album?: string }).album || '').trim() || undefined
           : undefined
@@ -124,21 +131,44 @@ export function registerLocalMusicHandlers(): void {
         // Ignore if lrc file doesn't exist or read error
       }
 
+      let cover = (picture && picture.data)
+        ? {
+            mimeType: picture.format || 'image/jpeg',
+            base64: Buffer.from(picture.data).toString('base64')
+          }
+        : undefined
+      let year = m.common.year
+
+      // 兜底：music-metadata 未取到封面（或整体解析失败）时，按文件内容
+      // 嗅探真实格式并手动提取封面/标签/时长（应对误标扩展名、损坏 ID3 头等文件）
+      if (!cover) {
+        try {
+          const manual = await readMetaManually(filePath)
+          if (manual) {
+            cover = cover || manual.cover
+            durationMs = durationMs ?? manual.durationMs
+            bitrate = bitrate ?? manual.bitrate
+            sampleRate = sampleRate ?? manual.sampleRate
+            title = title ?? manual.title
+            if (!artists.length && manual.artists) artists.push(...manual.artists)
+            album = album ?? manual.album
+            year = year ?? manual.year
+          }
+        } catch (error) {
+          console.warn('手动解析元数据失败:', filePath, error)
+        }
+      }
+
       return {
         durationMs,
         bitrate,
         sampleRate,
-        cover: (picture && picture.data)
-          ? {
-              mimeType: picture.format || 'image/jpeg',
-              base64: Buffer.from(picture.data).toString('base64')
-            }
-          : undefined,
+        cover,
         title,
         artists,
         album,
         lyrics,
-        year: m.common.year
+        year
       }
     } catch (error) {
       console.error('get-meta failed:', filePath, error)

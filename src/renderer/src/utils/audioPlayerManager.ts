@@ -1,22 +1,12 @@
 import { usePlayerStore } from '../stores/playerStore'
-import { useSettingsStore } from '../stores/settingsStore'
 import { webAudioOutputEngine } from '../audio/web-audio-engine'
 import { audioEngine } from '../audio/audio-engine'
+import { isWebAudioMode } from './audioOutputModeManager'
 
 interface PlayAudioOptions {
   url?: string
   filePath?: string
   volume?: number
-}
-
-/** 检测当前是否为 Web Audio 输出模式 */
-function isWebAudioMode(): boolean {
-  try {
-    const settingsStore = useSettingsStore()
-    return settingsStore.playback.audioOutputMode === 'webaudio'
-  } catch {
-    return false
-  }
 }
 
 /**

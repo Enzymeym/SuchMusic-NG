@@ -1,15 +1,6 @@
 import { ref, reactive, watch, watchEffect } from 'vue'
 import { audioEngine } from '../audio/audio-engine'
-import { useSettingsStore } from '../stores/settingsStore'
-
-/** 检测当前是否为 Web Audio 输出模式 */
-function isWebAudioMode(): boolean {
-  try {
-    return useSettingsStore().playback.audioOutputMode === 'webaudio'
-  } catch {
-    return false
-  }
-}
+import { isWebAudioMode } from '../utils/audioOutputModeManager'
 
 /**
  * EQ 频段设置

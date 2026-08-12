@@ -95,7 +95,18 @@ export const usePlaylistStore = defineStore('playlist', {
     },
     saveToStorage(): void {
       try {
-        const json = JSON.stringify(this.playlists)
+        // 本地音乐封面使用 blob URL，进程重启后即失效，持久化时剥离，
+        // 避免 localStorage 中残留指向已失效 URL 的封面（与 playerStore 持久化策略一致）。
+        // 相关封面会在本地音乐扫描补全后由 restoreCoversFromLocalSongs 重新恢复。
+        const persisted = this.playlists.map((pl) => ({
+          ...pl,
+          cover: pl.cover?.startsWith('blob:') ? undefined : pl.cover,
+          tracks: pl.tracks.map((t) => ({
+            ...t,
+            cover: t.cover?.startsWith('blob:') ? undefined : t.cover
+          }))
+        }))
+        const json = JSON.stringify(persisted)
         const sizeBytes = new Blob([json]).size
 
         if (sizeBytes > STORAGE_SAFE_LIMIT_BYTES) {
@@ -118,7 +129,10 @@ export const usePlaylistStore = defineStore('playlist', {
     },
     /**
      * 根据本地歌曲已加载的封面恢复用户歌单中缺失的封面
-     * 仅补充空封面的曲目，并持久化到 storage
+     * 仅补充空封面或指向已失效 blob URL 的曲目，并持久化到 storage
+     *
+     * 本地封面使用 blob URL，重新扫描时会 revoke 旧 URL 并生成新 URL，
+     * 若歌单仍持有旧 blob URL 且封面非空，则不会被补全，导致封面消失。
      */
     restoreCoversFromLocalSongs(localSongs: { id: string | number; picUrl?: string }[]): void {
       const coverMap = new Map<string | number, string>()
@@ -131,7 +145,7 @@ export const usePlaylistStore = defineStore('playlist', {
       let updated = false
       this.playlists.forEach((pl) => {
         pl.tracks.forEach((t) => {
-          if (t.id != null && !t.cover && coverMap.has(t.id)) {
+          if (t.id != null && coverMap.has(t.id) && (!t.cover || t.cover.startsWith('blob:'))) {
             t.cover = coverMap.get(t.id)!
             updated = true
           }

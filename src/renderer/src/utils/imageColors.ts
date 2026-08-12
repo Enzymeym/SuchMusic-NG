@@ -1,4 +1,5 @@
 // 提取图片主色与中性色的工具函数（纯前端实现）
+import { hexToRgb, rgbToHex } from './color'
 
 /**
  * 图片颜色调色板接口
@@ -130,37 +131,6 @@ const colorDistance = (a: { r: number; g: number; b: number }, b: { r: number; g
   const dg = a.g - b.g
   const db = a.b - b.b
   return Math.sqrt(dr * dr + dg * dg + db * db)
-}
-
-/**
- * 将 RGB 转为 #rrggbb
- * @param r - 红色通道值（0-255）
- * @param g - 绿色通道值（0-255）
- * @param b - 蓝色通道值（0-255）
- * @returns 返回 hex 颜色字符串
- */
-const rgbToHex = (r: number, g: number, b: number) => {
-  const toHex = (v: number) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`
-}
-
-/**
- * 将 hex 颜色转为 RGB
- * @param hex - hex 颜色字符串（支持 #rgb 或 #rrggbb 格式）
- * @returns 返回包含 r、g、b 的对象，转换失败返回 null
- */
-const hexToRgb = (hex: string): { r: number; g: number; b: number } | null => {
-  let s = hex.trim()
-  if (s.startsWith('#')) s = s.slice(1)
-  if (s.length === 3) {
-    s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2]
-  }
-  if (s.length !== 6) return null
-  const r = parseInt(s.slice(0, 2), 16)
-  const g = parseInt(s.slice(2, 4), 16)
-  const b = parseInt(s.slice(4, 6), 16)
-  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return null
-  return { r, g, b }
 }
 
 /**

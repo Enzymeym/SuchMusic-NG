@@ -260,7 +260,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, h } from 'vue'
 import {
   NDropdown,
   NTag,
@@ -274,11 +274,16 @@ import {
   NIcon,
   NScrollbar,
   NCheckbox,
-  useMessage
+  useMessage,
+  type DropdownOption
 } from 'naive-ui'
+import { useRouter } from 'vue-router'
 import { usePlaylistStore } from '../../stores/playlistStore'
+import { usePlayerStore, type PlayerSong } from '../../stores/playerStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { useDownloadMusic } from '../../composables/useDownloadMusic'
 import defaultCover from '../../assets/default-cover.png'
+import { formatDuration } from '../../utils/format'
 
 // Define interfaces
 interface Artist {
@@ -323,7 +328,8 @@ interface Props {
   itemHeight?: number
   hideDuration?: boolean
   itemVariant?: 'card' | 'plain'
-  menuOptions?: any[]
+  extraMenuOptions?: any[]
+  getPlayableSong?: (song: Song) => Promise<PlayerSong | null>
   transparentHeader?: boolean
   draggable?: boolean
   selectable?: boolean
@@ -340,7 +346,8 @@ const props = withDefaults(defineProps<Props>(), {
   themeColor: '#3d889b',
   itemHeight: 82,
   hideDuration: false,
-  menuOptions: undefined,
+  extraMenuOptions: undefined,
+  getPlayableSong: undefined,
   transparentHeader: false,
   draggable: false,
   selectable: false,
@@ -352,16 +359,18 @@ const emit = defineEmits<{
   (e: 'album-click', song: Song): void
   (e: 'context-menu-select', key: string, song: Song): void
   (e: 'sort-change', key: string): void
-  (e: 'preload', song: Song): void
   (e: 'scroll', event: Event): void
   (e: 'reorder', fromIndex: number, toIndex: number): void
   (e: 'update:selected-ids', ids: Array<string | number>): void
 }>()
 
 const themeVars = useThemeVars()
+const router = useRouter()
 const playlistStore = usePlaylistStore()
+const playerStore = usePlayerStore()
 const settingsStore = useSettingsStore()
 const message = useMessage()
+const { downloadMusic } = useDownloadMusic()
 const isDarkMode = ref(document.documentElement.getAttribute('data-theme') === 'dark')
 const itemVariantClass = computed(() => {
   const variant = props.itemVariant ?? settingsStore.appearance.songListStyle ?? 'card'
@@ -453,31 +462,72 @@ const dropdownY = ref(0)
 const contextMenuSong = ref<Song | null>(null)
 const draggingIndex = ref<number | null>(null)
 
-// 默认菜单项（带“添加到歌单”子菜单）
-const defaultDropdownOptions = computed(() => [
-  { label: '播放', key: 'play' },
-  { label: '下一首播放', key: 'playNext' },
-  { type: 'divider', key: 'd1' },
-  {
-    label: '添加到歌单',
-    key: 'addToPlaylist',
-    children: playlistStore.playlists.map((pl) => ({
-      label: pl.name,
-      key: `addToPlaylist:${pl.id}`
-    }))
-  },
-  { type: 'divider', key: 'd2' },
-  { label: '预加载到缓存', key: 'preload' },
-  { type: 'divider', key: 'd3' },
-  { label: '复制歌曲ID', key: 'copyId' },
-  { label: '查看专辑', key: 'viewAlbum' },
-  { type: 'divider', key: 'd4' },
-  { label: '下载歌曲', key: 'download' }
-])
+// 菜单项图标（mgc 图标字体）
+const renderIcon = (iconClass: string) => {
+  return () => h(NIcon, null, { default: () => h('i', { class: iconClass }) })
+}
 
-// 使用 props 传入的菜单项，如果没有则使用默认菜单项
+/** 判断歌曲是否为本地文件（有本地路径且非 http 在线地址） */
+function isLocalSong(song: Song): boolean {
+  const filePath = song.filePath || song.mp3Url
+  return !!filePath && !/^https?:\/\//.test(filePath)
+}
+
+// 默认菜单项（带“添加到歌单”子菜单），基础操作由组件内部统一处理
+const defaultDropdownOptions = computed(() => {
+  const song = contextMenuSong.value
+  // 本地歌曲无需下载，隐藏“下载歌曲”
+  const showDownload = !song || !isLocalSong(song)
+  const options: DropdownOption[] = [
+    { label: '播放', key: 'play', icon: renderIcon('mgc_play_circle_line') },
+    { label: '下一首播放', key: 'playNext', icon: renderIcon('mgc_playlist_add_line') },
+    { type: 'divider', key: 'd1' },
+    {
+      label: '添加到歌单',
+      key: 'addToPlaylist',
+      icon: renderIcon('mgc_playlist_2_line'),
+      children: playlistStore.playlists.map((pl) => ({
+        label: pl.name,
+        key: `addToPlaylist:${pl.id}`
+      }))
+    },
+    { type: 'divider', key: 'd2' },
+    { label: '复制歌曲ID', key: 'copyId', icon: renderIcon('mgc_copy_2_line') },
+    { label: '查看专辑', key: 'viewAlbum', icon: renderIcon('mgc_album_2_line') }
+  ]
+  if (showDownload) {
+    options.push(
+      { type: 'divider', key: 'd3' },
+      {
+        label: '下载歌曲',
+        key: 'downloadMenu',
+        icon: renderIcon('mgc_download_3_line'),
+        children: [
+          { label: '标准音质 (128kbps)', key: 'download:128k' },
+          { label: '较高音质 (192kbps)', key: 'download:192k' },
+          { label: '高品音质 (320kbps)', key: 'download:320k' },
+          { label: '无损音质 (FLAC)', key: 'download:flac' },
+          { type: 'divider', key: 'd-dl-divider' },
+          {
+            label: '音质受平台版权与会员限制，实际以平台返回为准',
+            key: 'download-disclaimer',
+            disabled: true
+          }
+        ]
+      }
+    )
+  }
+  return options
+})
+
+// 统一默认菜单 + 页面追加的专属菜单项
 const dropdownOptions = computed(() => {
-  return props.menuOptions || defaultDropdownOptions.value
+  const base = [...defaultDropdownOptions.value]
+  if (props.extraMenuOptions && props.extraMenuOptions.length > 0) {
+    base.push({ type: 'divider', key: 'extra-divider' })
+    base.push(...props.extraMenuOptions)
+  }
+  return base
 })
 
 function showContextMenu(song: Song, e: MouseEvent) {
@@ -512,12 +562,16 @@ function handleDrop(index: number, e: DragEvent) {
   draggingIndex.value = null
 }
 
-function handleContextMenuSelect(key: string | number) {
+async function handleContextMenuSelect(key: string | number): Promise<void> {
   if (!contextMenuSong.value) return
   const keyStr = String(key)
+  const song = contextMenuSong.value
 
-  if (keyStr === 'preload') {
-    emit('preload', contextMenuSong.value)
+  if (keyStr === 'play') {
+    // 与单击歌曲行行为完全一致，交由页面统一处理播放
+    emit('song-click', song)
+  } else if (keyStr === 'playNext') {
+    await handlePlayNext(song)
   } else if (keyStr.startsWith('addToPlaylist:')) {
     const playlistId = keyStr.slice('addToPlaylist:'.length)
     if (!playlistId) {
@@ -525,10 +579,108 @@ function handleContextMenuSelect(key: string | number) {
       return
     }
     addSongToPlaylistById(playlistId)
+  } else if (keyStr === 'copyId') {
+    await handleCopyId(song)
+  } else if (keyStr === 'viewAlbum') {
+    handleViewAlbum(song)
+  } else if (keyStr.startsWith('download:')) {
+    // 下载歌曲：从菜单 key 中解析音质标识
+    const quality = keyStr.slice('download:'.length)
+    await handleDownload(song, quality)
   } else {
-    emit('context-menu-select', keyStr, contextMenuSong.value)
+    // 页面专属菜单项
+    emit('context-menu-select', keyStr, song)
   }
   showDropdown.value = false
+}
+
+/** 将组件内歌曲结构转换为播放器歌曲结构 */
+function toPlayerSong(song: Song): PlayerSong {
+  return {
+    id: song.id ?? song.sourceSongId ?? null,
+    title: song.name,
+    artist: getArtistsFormatted(song),
+    album: getAlbumName(song),
+    cover: song.picUrl || song.al?.picUrl || '',
+    durationMs: song.dt || 0,
+    filePath: song.filePath || song.mp3Url,
+    source: song.source,
+    sourceSongId: song.sourceSongId ?? song.id
+  }
+}
+
+/** 解析无 filePath 的在线歌曲为可播放对象（由页面提供解析器） */
+async function resolvePlayable(song: Song): Promise<PlayerSong | null> {
+  if (!props.getPlayableSong) return null
+  try {
+    const resolved = await props.getPlayableSong(song)
+    if (resolved) return resolved
+  } catch (e) {
+    console.error('[SongList] 解析歌曲播放地址失败:', e)
+  }
+  return null
+}
+
+/** 下一首播放：仅插入到当前歌曲之后，不打断当前播放；无当前播放时立即播放 */
+async function handlePlayNext(song: Song): Promise<void> {
+  let target = toPlayerSong(song)
+  if (!target.filePath) {
+    const resolved = await resolvePlayable(song)
+    if (!resolved) {
+      message.warning('该歌曲暂无播放地址，无法加入下一首播放')
+      return
+    }
+    target = resolved
+  }
+
+  if (playerStore.currentIndex >= 0 && playerStore.playlist.length > 0) {
+    playerStore.insertNextToPlaylist(target)
+    message.success('已加入下一首播放')
+  } else {
+    const list = props.songs.map((s) =>
+      String(s.id) === String(song.id) ? target : toPlayerSong(s)
+    )
+    playerStore.setPlaylist(list)
+    const idx = list.findIndex(
+      (s) => s.id != null && target.id != null && String(s.id) === String(target.id)
+    )
+    playerStore.playSongAtIndex(idx >= 0 ? idx : 0)
+  }
+}
+
+/** 复制歌曲 ID 到剪贴板 */
+async function handleCopyId(song: Song): Promise<void> {
+  const id = song.sourceSongId ?? song.id
+  if (id == null) {
+    message.warning('该歌曲没有可复制的 ID')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(String(id))
+    message.success('歌曲ID已复制')
+  } catch (e) {
+    console.error('[SongList] 复制歌曲ID失败:', e)
+    message.error('复制失败')
+  }
+}
+
+/** 查看专辑：跳转到专辑详情页 */
+function handleViewAlbum(song: Song): void {
+  const name = getAlbumName(song)
+  if (!name || name === '未知专辑') {
+    message.warning('未找到专辑信息')
+    return
+  }
+  router.push('/album/' + encodeURIComponent(name))
+}
+
+/** 下载歌曲：本地文件无需下载，在线歌曲走统一下载流程（quality 可选音质标识） */
+async function handleDownload(song: Song, quality?: string): Promise<void> {
+  if (isLocalSong(song)) {
+    message.info('本地歌曲无需下载')
+    return
+  }
+  await downloadMusic(toPlayerSong(song), quality)
 }
 
 function addSongToPlaylistById(playlistId: string) {
@@ -541,22 +693,12 @@ function addSongToPlaylistById(playlistId: string) {
     message.error('歌单不存在，请刷新页面后重试')
     return
   }
-  const exists = target.tracks.some((t) => t.id === contextMenuSong.value?.id)
+  const song = contextMenuSong.value
+  const track = toPlayerSong(song)
+  const exists = target.tracks.some((t) => t.id === track.id)
   if (exists) {
     message.info('歌单中已存在该歌曲')
     return
-  }
-  const song = contextMenuSong.value
-  const track = {
-    id: song.id,
-    title: song.name,
-    artist: getArtistsFormatted(song),
-    album: getAlbumName(song),
-    cover: song.picUrl || song.al?.picUrl || '',
-    filePath: (song as any).filePath || song.mp3Url,
-    durationMs: song.dt,
-    source: (song as any).source,
-    sourceSongId: (song as any).sourceSongId
   }
   const updated = {
     ...target,
@@ -690,14 +832,6 @@ function getSourceLabel(source?: string) {
 
 function getDisplayIndex(idx: number): number {
   return Number(props.startIndex ?? 0) + Number(idx) + 1
-}
-
-function formatDuration(dt?: number): string {
-  if (!dt) return '--:--'
-  const totalSeconds = Math.floor(dt / 1000)
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
 }
 
 function processSongTitle(title: string): { mainTitle: string; subTitle: string } {

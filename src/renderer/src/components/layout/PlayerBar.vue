@@ -31,36 +31,13 @@ import SoundEffectsModal from '../common/SoundEffectsModal.vue'
 import ShinyText from '../common/ShinyText.vue'
 import { useRouter } from 'vue-router'
 import { getTransitionController } from '../../audio/transition-controller'
+import { mixHexColor } from '../../utils/color'
+import { formatTime } from '../../utils/format'
 
 const themeVars = useThemeVars()
 const message = useMessage()
 const dialog = useDialog()
 const router = useRouter()
-
-// 简单混合两个十六进制颜色，用于活跃列表项背景过渡
-const mixHexColor = (color1: string, color2: string, weight: number): string => {
-  const clamp = (v: number) => Math.max(0, Math.min(255, v))
-  const parse = (color: string) => {
-    let c = color.replace('#', '')
-    if (c.length === 3) {
-      c = c[0] + c[0] + c[1] + c[1] + c[2] + c[2]
-    }
-    if (c.length !== 6) return { r: 255, g: 255, b: 255 }
-    return {
-      r: parseInt(c.slice(0, 2), 16),
-      g: parseInt(c.slice(2, 4), 16),
-      b: parseInt(c.slice(4, 6), 16)
-    }
-  }
-  const a = parse(color1)
-  const b = parse(color2)
-  const t = Math.max(0, Math.min(1, weight))
-  const r = clamp(a.r * t + b.r * (1 - t))
-  const g = clamp(a.g * t + b.g * (1 - t))
-  const bVal = clamp(a.b * t + b.b * (1 - t))
-  const toHex = (n: number) => Math.round(n).toString(16).padStart(2, '0')
-  return `#${toHex(r)}${toHex(g)}${toHex(bVal)}`
-}
 
 // 获取全局播放器 store
 const player = usePlayerStore()
@@ -93,13 +70,14 @@ const showSoundEffectsModal = ref(false)
 const transitionController = getTransitionController()
 
 // 初始化任务栏歌词、音频引擎和 SMTC 控制
-onMounted(() => {
+onMounted(async () => {
   // 恢复音量平衡设置并对当前歌曲应用一次补偿增益（应用启动恢复场景）
   volumeBalanceStore.load()
   applyTrackGain(player.currentSong)
   initTaskbarLyric()
-  // 提前初始化音频引擎，避免拖动滑块时的初始化开销
-  audioEngine.ensureContext()
+  // 提前初始化音频引擎，避免拖动滑块时的初始化开销；
+  // WASAPI 模式下必须先 await 完成引擎创建，否则后续恢复歌曲的 load 会失败
+  await audioEngine.ensureContext()
   // 初始化智能过渡调度（时域帧采集 + 决策回调 + 交叉淡化完成回调）
   transitionController.init()
 
@@ -116,6 +94,14 @@ onMounted(() => {
 
   // 注册 SMTC 多媒体控制（Windows 任务栏媒体按钮 / 系统媒体键）
   registerMediaSessionHandlers()
+
+  // 恢复上次播放的歌曲（仅加载并定位到保存的进度，不自动播放）。
+  // 原因：loadPlayerState() 在 App.vue setup 中执行，早于本组件 currentSong
+  // watch 的注册，恢复的歌曲不会触发 watch 加载；这里显式加载一次，
+  // 配合 shouldAutoPlay=false（恢复流程已置 false）完成"点击播放继续"的恢复。
+  if (player.currentSong) {
+    loadAndPlaySong(player.currentSong)
+  }
 })
 
 // 清理音频播放结束回调和 SMTC 控制
@@ -150,28 +136,6 @@ const startProgressPolling = () => {
     if (isDraggingProgress.value) return // 拖拽时不更新
     try {
       const pos = await audioEngine.getCurrentPosition()
-      // #region debug-point C:poll-pos
-      if (pos <= 0 || !player.isPlaying) {
-        ;(() => {
-          try {
-            fetch('http://127.0.0.1:7777/event', {
-              method: 'POST',
-              body: JSON.stringify({
-                sessionId: 'first-play-no-transition',
-                runId: 'pre',
-                hypothesisId: 'C',
-                location: 'PlayerBar.vue:poll',
-                msg: '[DEBUG] poll-pos 异常',
-                data: { pos, isPlaying: player.isPlaying },
-                ts: Date.now()
-              })
-            }).catch(() => {})
-          } catch {
-            /* 忽略 */
-          }
-        })()
-      }
-      // #endregion
       if (pos > 0) {
         player.setPosition(pos)
         // Automix：将进度喂给过渡调度，到达触发点执行过渡
@@ -219,12 +183,8 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
     player.shouldAutoPlay = true
   }
 
-  // 优化切歌体验：
-  // 1. 立即重置进度条显示，给用户“已切换”的反馈
-  // 如果是不自动播放（恢复状态），则保留进度
-  if (shouldPlay) {
-    player.setPosition(0)
-  }
+  // 切歌时进度已在 playSongAtIndex/setCurrentSong 中重置为 0，
+  // 这里不再无条件清零，避免覆盖恢复状态/播放重试时保存的进度
 
   const currentProcessId = song.id
   const filePath = (song as any).filePath as string | undefined
@@ -236,6 +196,10 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
       try {
         if (shouldPlay) {
           await AudioPlayerManager.play({ url: filePath, volume: player.volume })
+          // 播放重试（如重启后首次播放失败）：加载后跳回保存的进度继续播放
+          if (player.positionMs > 0 && player.currentSong?.id === currentProcessId) {
+            audioEngine.seek(player.positionMs)
+          }
         } else {
           await AudioPlayerManager.load({ url: filePath, volume: player.volume })
           if (player.positionMs > 0) {
@@ -286,6 +250,10 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
             filePath,
             volume: player.volume
           })
+          // 播放重试（如重启后首次播放失败）：加载后跳回保存的进度继续播放
+          if (player.positionMs > 0 && player.currentSong?.id === currentProcessId) {
+            audioEngine.seek(player.positionMs)
+          }
         } else {
           await AudioPlayerManager.load({
             filePath,
@@ -835,15 +803,6 @@ const totalSeconds = computed(() => {
   return Math.floor(player.currentSong.durationMs / 1000)
 })
 
-// 将秒格式化为 mm:ss
-const formatTime = (seconds: number) => {
-  const m = Math.floor(seconds / 60)
-  const s = seconds % 60
-  const mm = m.toString().padStart(2, '0')
-  const ss = s.toString().padStart(2, '0')
-  return `${mm}:${ss}`
-}
-
 // 判断当前环境是否支持 Media Session（用于 SMTC）
 const supportsMediaSession =
   typeof navigator !== 'undefined' && (navigator as any).mediaSession !== undefined
@@ -1370,7 +1329,7 @@ watch(
     <!-- Right Actions -->
     <div class="player-actions">
       <span class="time-text">
-        {{ formatTime(playedSeconds) }} / {{ formatTime(totalSeconds) }}
+        {{ formatTime(playedSeconds, { padMinutes: true }) }} / {{ formatTime(totalSeconds, { padMinutes: true }) }}
       </span>
       <n-button
         quaternary

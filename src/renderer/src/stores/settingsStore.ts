@@ -5,6 +5,7 @@ import { audioEngine } from '../audio/audio-engine'
 import { setPrimaryColor, setGlobalFontFamily } from '../themes'
 import { usePlayerStore } from './playerStore'
 import { extractImageColors } from '../utils/imageColors'
+import { mixWithBlack, mixWithWhite, getBrightness } from '../utils/color'
 import { getDefaultOutputMode, type AudioOutputMode } from '../utils/audioOutputModeManager'
 
 export interface GeneralSettings {
@@ -255,60 +256,6 @@ export const useSettingsStore = defineStore('settings', () => {
   // 记录最后一次提取的主色，防止切歌太快导致的异步覆盖
   let lastCoverUrl = ''
 
-  /**
-   * 将颜色与黑色混合，调暗颜色
-   * @param hex 十六进制颜色字符串
-   * @param weight 混合权重（0-1），值越大颜色越暗
-   * @returns 混合后的颜色
-   */
-  const mixWithBlack = (hex: string, weight: number) => {
-    const s = hex.trim().replace('#', '')
-    const r = parseInt(s.slice(0, 2), 16)
-    const g = parseInt(s.slice(2, 4), 16)
-    const b = parseInt(s.slice(4, 6), 16)
-    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return hex
-    const w = Math.min(Math.max(weight, 0), 1)
-    const nr = Math.round(r * (1 - w))
-    const ng = Math.round(g * (1 - w))
-    const nb = Math.round(b * (1 - w))
-    const toHex = (v: number) => v.toString(16).padStart(2, '0')
-    return `#${toHex(nr)}${toHex(ng)}${toHex(nb)}`
-  }
-
-  /**
-   * 将颜色与白色混合，提亮颜色
-   * @param hex 十六进制颜色字符串
-   * @param weight 混合权重（0-1），值越大颜色越亮
-   * @returns 混合后的颜色
-   */
-  const mixWithWhite = (hex: string, weight: number) => {
-    const s = hex.trim().replace('#', '')
-    const r = parseInt(s.slice(0, 2), 16)
-    const g = parseInt(s.slice(2, 4), 16)
-    const b = parseInt(s.slice(4, 6), 16)
-    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return hex
-    const w = Math.min(Math.max(weight, 0), 1)
-    const nr = Math.round(r + (255 - r) * w)
-    const ng = Math.round(g + (255 - g) * w)
-    const nb = Math.round(b + (255 - b) * w)
-    const toHex = (v: number) => v.toString(16).padStart(2, '0')
-    return `#${toHex(nr)}${toHex(ng)}${toHex(nb)}`
-  }
-
-  /**
-   * 计算颜色亮度（0-1），使用感知亮度公式
-   * @param hex 十六进制颜色字符串
-   * @returns 亮度值（0-1），越大越亮
-   */
-  const getBrightness = (hex: string) => {
-    const s = hex.trim().replace('#', '')
-    const r = parseInt(s.slice(0, 2), 16)
-    const g = parseInt(s.slice(2, 4), 16)
-    const b = parseInt(s.slice(4, 6), 16)
-    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return 0.5
-    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
-  }
-
   watch(
     () => {
       const ps = getPlayerStore()
@@ -332,7 +279,7 @@ export const useSettingsStore = defineStore('settings', () => {
                 setPrimaryColor(mixWithBlack(colors.main, 0.3))
               } else {
                 // 深色模式：较亮的颜色保持不变，较暗的颜色提亮80%
-                const brightness = getBrightness(colors.main)
+                const brightness = getBrightness(colors.main) ?? 0.5
                 if (brightness < 0.5) {
                   setPrimaryColor(mixWithWhite(colors.main, 0.8))
                 } else {

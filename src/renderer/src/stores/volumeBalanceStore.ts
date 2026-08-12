@@ -70,7 +70,8 @@ export const useVolumeBalanceStore = defineStore('volumeBalance', () => {
     }, 500)
   }
 
-  watch([enabled, targetLufs, maxGainDb, results], () => save(), { deep: true })
+  // 配置项变化时自动保存；results 由分析完成/清空时的显式 save() 覆盖，避免深监听大对象
+  watch([enabled, targetLufs, maxGainDb], () => save())
 
   // --- Actions ---
   const setEnabled = (v: boolean) => {

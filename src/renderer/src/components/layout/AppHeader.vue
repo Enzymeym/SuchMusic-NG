@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { NInput, NIcon, NButton, NDivider, useDialog, NPopover, NScrollbar, useThemeVars } from 'naive-ui'
+import { NInput, NIcon, NButton, NDivider, useDialog, NPopover, NScrollbar, useThemeVars, NImage, NSpin, useMessage } from 'naive-ui'
 
 const props = defineProps<{
   collapsed?: boolean
@@ -20,11 +20,153 @@ const playerStore = usePlayerStore()
 const playlistStore = usePlaylistStore()
 const localMusicStore = useLocalMusicStore()
 const dialog = useDialog()
+const message = useMessage()
 const searchText = ref('')
 const sizeType = ref<'max' | 'min'>('min')
 const showSettings = ref(false)
 const settingsSection = ref('general')
 const settingsHighlightKey = ref<string | null>(null)
+
+// ===== 网易云账号登录 =====
+interface NeteaseProfile {
+  nickname: string
+  userId: string
+  avatarUrl?: string
+  vipType?: number
+  vipLevel?: number
+  level?: number
+  signature?: string
+}
+
+const neteaseUser = ref<NeteaseProfile | null>(null)
+const neteaseAccounts = ref<NeteaseProfile[]>([])
+const showUserPanel = ref(false)
+const qrImg = ref('')
+const qrUnikey = ref('')
+const qrStatusText = ref('')
+const qrLoading = ref(false)
+let qrPollTimer: ReturnType<typeof setInterval> | null = null
+
+/** 当前账号是否为黑胶 VIP */
+const isVip = computed(() => {
+  const u = neteaseUser.value
+  return !!u && typeof u.vipType === 'number' && u.vipType > 0
+})
+
+/** VIP 文案（黑胶VIP Lv.X） */
+const vipLabel = computed(() => {
+  if (!isVip.value) return ''
+  const u = neteaseUser.value
+  return u?.vipLevel ? `黑胶VIP Lv.${u.vipLevel}` : '黑胶VIP'
+})
+
+const stopQrPolling = () => {
+  if (qrPollTimer) {
+    clearInterval(qrPollTimer)
+    qrPollTimer = null
+  }
+}
+
+const loadLoginStatus = async () => {
+  try {
+    const status = await window.api.netease.loginStatus()
+    neteaseUser.value = status.loggedIn ? status.profile || null : null
+    neteaseAccounts.value = status.accounts || []
+  } catch (e) {
+    console.error('[AppHeader] 获取网易云登录状态失败:', e)
+  }
+}
+
+const loadLoginQr = async () => {
+  stopQrPolling()
+  qrLoading.value = true
+  qrStatusText.value = '正在生成二维码...'
+  try {
+    const { unikey, qrimg } = await window.api.netease.loginQr()
+    qrUnikey.value = unikey
+    qrImg.value = qrimg
+    qrStatusText.value = '请使用网易云音乐 APP 扫码'
+    startQrPolling()
+  } catch (e: any) {
+    qrStatusText.value = '二维码生成失败: ' + (e?.message || '未知错误')
+    console.error('[AppHeader] 生成网易云登录二维码失败:', e)
+  } finally {
+    qrLoading.value = false
+  }
+}
+
+const startQrPolling = () => {
+  stopQrPolling()
+  qrPollTimer = setInterval(async () => {
+    try {
+      const res = await window.api.netease.loginQrCheck(qrUnikey.value)
+      if (res.code === 801) {
+        qrStatusText.value = '等待扫码...'
+      } else if (res.code === 802) {
+        qrStatusText.value = '已扫码，请在手机上确认登录'
+      } else if (res.code === 800) {
+        stopQrPolling()
+        qrStatusText.value = '二维码已过期，请点击刷新'
+      } else if (res.code === 803) {
+        stopQrPolling()
+        if (res.profile) {
+          neteaseUser.value = res.profile
+          await loadLoginStatus()
+          message.success(`登录成功，欢迎 ${res.profile.nickname}`)
+        } else {
+          neteaseUser.value = { nickname: '网易云用户', userId: '' }
+          message.success('登录成功')
+        }
+        showUserPanel.value = false
+      }
+    } catch (e) {
+      console.error('[AppHeader] 检测网易云扫码状态失败:', e)
+    }
+  }, 3000)
+}
+
+const handleUserButtonClick = () => {
+  showUserPanel.value = !showUserPanel.value
+  if (showUserPanel.value) {
+    if (neteaseUser.value) {
+      // 打开面板时刷新账号状态（VIP / 等级等）
+      loadLoginStatus()
+    } else if (!qrImg.value) {
+      loadLoginQr()
+    }
+  }
+}
+
+const handleRefreshQr = () => {
+  loadLoginQr()
+}
+
+const handleLogout = async (userId?: string) => {
+  try {
+    await window.api.netease.logout(userId)
+  } catch (e) {
+    console.error('[AppHeader] 退出网易云登录失败:', e)
+  }
+  await loadLoginStatus()
+  qrImg.value = ''
+  qrUnikey.value = ''
+  qrStatusText.value = ''
+  stopQrPolling()
+  message.success('已退出登录')
+}
+
+const handleSwitchAccount = async (userId: string) => {
+  if (userId === neteaseUser.value?.userId) return
+  try {
+    const status = await window.api.netease.switchAccount(userId)
+    neteaseUser.value = status.loggedIn ? status.profile || null : null
+    neteaseAccounts.value = status.accounts || []
+    showUserPanel.value = false
+    message.success('已切换账号')
+  } catch (e) {
+    console.error('[AppHeader] 切换网易云账号失败:', e)
+  }
+}
 
 // Search Suggestion State
 const showSuggestions = ref(false)
@@ -171,9 +313,12 @@ onMounted(() => {
 
   window.addEventListener('close-settings', handleCloseSettings)
 
+  loadLoginStatus()
+
   onBeforeUnmount(() => {
     window.removeEventListener('open-settings', handleOpenSettings as EventListener)
     window.removeEventListener('close-settings', handleCloseSettings)
+    stopQrPolling()
   })
 })
 
@@ -359,6 +504,122 @@ const headerPaddingStyle = computed(() => {
     </div>
 
     <div class="right-controls">
+      <n-popover
+        trigger="manual"
+        :show="showUserPanel"
+        placement="bottom-end"
+        :show-arrow="false"
+        style="width: 280px; border-radius: 12px;"
+      >
+        <template #trigger>
+          <n-button
+            circle
+            strong
+            secondary
+            size="large"
+            class="action-btn"
+            style="margin-right: 8px;"
+            title="网易云账号"
+            @click="handleUserButtonClick"
+          >
+            <template #icon>
+              <img
+                v-if="neteaseUser?.avatarUrl"
+                :src="neteaseUser.avatarUrl"
+                alt=""
+                referrerpolicy="no-referrer"
+                class="user-avatar-img"
+              />
+              <n-icon v-else><i class="mgc_user_fill"></i></n-icon>
+            </template>
+          </n-button>
+        </template>
+
+        <div v-if="neteaseUser" class="user-panel-logged">
+          <div class="user-panel-current">
+            <img
+              v-if="neteaseUser.avatarUrl"
+              :src="neteaseUser.avatarUrl"
+              class="user-panel-avatar"
+              referrerpolicy="no-referrer"
+              alt=""
+            />
+            <div v-else class="user-panel-avatar user-panel-avatar-placeholder">
+              <n-icon size="22"><i class="mgc_user_fill"></i></n-icon>
+            </div>
+            <div class="user-panel-info">
+              <div class="user-panel-name-line">
+                <span class="user-panel-name">{{ neteaseUser.nickname }}</span>
+                <span v-if="isVip" class="vip-badge">VIP</span>
+                <span v-if="neteaseUser.level" class="level-badge">Lv.{{ neteaseUser.level }}</span>
+              </div>
+              <div v-if="vipLabel" class="vip-level-text">{{ vipLabel }}</div>
+              <div class="user-panel-id">用户ID: {{ neteaseUser.userId || '-' }}</div>
+            </div>
+          </div>
+
+          <template v-if="neteaseAccounts.length > 1">
+            <n-divider style="margin: 6px 0" />
+            <div class="user-panel-section-title">已登录账号（点击切换）</div>
+            <div class="user-account-list">
+              <div
+                v-for="acc in neteaseAccounts"
+                :key="acc.userId"
+                class="user-account-item"
+                :class="{ active: acc.userId === neteaseUser.userId }"
+                @click="handleSwitchAccount(acc.userId)"
+              >
+                <img
+                  v-if="acc.avatarUrl"
+                  :src="acc.avatarUrl"
+                  class="user-account-avatar"
+                  referrerpolicy="no-referrer"
+                  alt=""
+                />
+                <div v-else class="user-account-avatar user-account-avatar-placeholder">
+                  <n-icon size="16"><i class="mgc_user_fill"></i></n-icon>
+                </div>
+                <div class="user-account-info">
+                  <div class="user-account-name">{{ acc.nickname }}</div>
+                  <div class="user-account-meta">
+                    <span v-if="acc.vipType && acc.vipType > 0" class="vip-badge mini">VIP</span>
+                    <span v-if="acc.level" class="level-badge mini">Lv.{{ acc.level }}</span>
+                  </div>
+                </div>
+                <n-icon
+                  v-if="acc.userId === neteaseUser.userId"
+                  size="16"
+                  class="user-account-check"
+                  ><i class="mgc_check_line"></i
+                ></n-icon>
+              </div>
+            </div>
+          </template>
+
+          <div class="user-panel-actions">
+            <n-button size="small" secondary @click="() => handleLogout()">退出登录</n-button>
+          </div>
+        </div>
+
+        <div v-else class="user-panel-login">
+          <div class="user-panel-qr-status">{{ qrStatusText || '正在准备二维码...' }}</div>
+          <n-image
+            v-if="qrImg"
+            :src="qrImg"
+            width="200"
+            style="border-radius: 8px;"
+          />
+          <div v-else-if="qrLoading" class="user-panel-qr-loading">
+            <n-spin size="medium" />
+          </div>
+          <div class="user-panel-actions">
+            <n-button size="small" secondary :disabled="qrLoading" @click="handleRefreshQr">
+              刷新二维码
+            </n-button>
+          </div>
+        </div>
+      </n-popover>
+
       <n-button
         circle
         strong
@@ -592,11 +853,35 @@ html[data-theme='dark'] .app-header:not(.is-transparent) .search-bar :deep(.n-in
 }
 
 .vip-badge {
+  flex-shrink: 0;
   font-size: 10px;
-  background-color: #333;
+  font-weight: 600;
+  line-height: 1.4;
+  background: linear-gradient(135deg, #f6c945, #d9911f);
   color: #fff;
-  padding: 1px 4px;
+  padding: 1px 5px;
   border-radius: 4px;
+}
+
+.vip-badge.mini {
+  font-size: 9px;
+  padding: 0 4px;
+}
+
+.level-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--n-text-color);
+  border: 1px solid var(--n-border-color);
+  padding: 0 5px;
+  border-radius: 4px;
+}
+
+.level-badge.mini {
+  font-size: 9px;
+  padding: 0 4px;
 }
 
 .window-controls {
@@ -762,6 +1047,183 @@ html[data-theme='dark'] .suggestion-item:hover {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+/* ===== 网易云账号登录 ===== */
+
+.user-avatar-img {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.user-panel-logged {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 0;
+}
+
+.user-panel-current {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.user-panel-avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.user-panel-avatar-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(128, 128, 128, 0.15);
+  color: var(--n-text-color-3);
+}
+
+.user-panel-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.user-panel-name-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.user-panel-name {
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-panel-id {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+}
+
+.vip-level-text {
+  font-size: 11px;
+  font-weight: 500;
+  color: #c9962e;
+}
+
+.user-panel-section-title {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+  margin-bottom: 6px;
+}
+
+.user-account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.user-account-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.user-account-item:hover {
+  background-color: rgba(128, 128, 128, 0.1);
+}
+
+.user-account-item.active {
+  background-color: rgba(128, 128, 128, 0.12);
+}
+
+.user-account-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.user-account-avatar-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(128, 128, 128, 0.15);
+  color: var(--n-text-color-3);
+}
+
+.user-account-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.user-account-name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-account-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.user-account-check {
+  color: var(--n-primary-color);
+  flex-shrink: 0;
+}
+
+.user-panel-login {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.user-panel-qr-status {
+  font-size: 13px;
+  color: var(--n-text-color-3);
+  text-align: center;
+  min-height: 18px;
+}
+
+.user-panel-qr-loading {
+  width: 200px;
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.user-panel-actions {
+  display: flex;
+  justify-content: center;
   margin-top: 2px;
 }
 </style>

@@ -21,7 +21,7 @@ const NETEASE_PIC_KEY = '3go8&$8*3*3h0k(2)2'
  * 网易云图片 ID 加密
  * 用于将 album.picId / song.picId 转换为封面直链路径
  */
-function neteaseEncryptPicId(picId: string): string {
+export function neteaseEncryptPicId(picId: string): string {
   const keyChars = NETEASE_PIC_KEY.split('')
   const xored = picId
     .split('')
@@ -42,7 +42,7 @@ function neteaseEncryptPicId(picId: string): string {
  * @param picId 图片 ID
  * @param size 图片尺寸，默认 300
  */
-function getNeteaseCoverUrl(picId: number | string, size = 300): string {
+export function getNeteaseCoverUrl(picId: number | string, size = 300): string {
   const id = String(picId)
   const hash = neteaseEncryptPicId(id)
   return `https://p1.music.126.net/${hash}/${id}.jpg?param=${size}y${size}`

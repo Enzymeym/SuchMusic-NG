@@ -11,6 +11,7 @@
 import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { usePlayerStore } from '../../stores/playerStore'
 import { onFftData } from '../../audio/audio-engine'
+import { hexToRgb } from '../../utils/color'
 
 const props = defineProps<{
   size: number
@@ -49,10 +50,11 @@ let renderActive = false
 
 function updateAccentColor(): void {
   const hex = getComputedStyle(document.documentElement).getPropertyValue('--player-accent-color').trim()
-  if (hex.startsWith('#')) {
-    cachedAccentR = parseInt(hex.slice(1, 3), 16)
-    cachedAccentG = parseInt(hex.slice(3, 5), 16)
-    cachedAccentB = parseInt(hex.slice(5, 7), 16)
+  const rgb = hexToRgb(hex)
+  if (rgb) {
+    cachedAccentR = rgb.r
+    cachedAccentG = rgb.g
+    cachedAccentB = rgb.b
   }
 }
 

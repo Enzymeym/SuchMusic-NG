@@ -5,6 +5,7 @@ import App from './App.vue'
 import router from './router'
 import { createPinia } from 'pinia'
 import { performanceMonitor } from './utils/performanceMonitor'
+import { rendererMemoryMonitor } from './utils/memoryMonitor'
 import PageTransition from './components/common/PageTransition.vue'
 import { webAudioOutputEngine } from './audio/web-audio-engine'
 
@@ -26,6 +27,22 @@ const pinia = createPinia()
 
 app.component('PageTransition', PageTransition)
 app.use(pinia).use(router).mount('#app')
+
+// 启动渲染进程内存监控（用于验证内存优化效果）
+rendererMemoryMonitor.start()
+if (import.meta.env.DEV) {
+  setInterval(() => {
+    const report = rendererMemoryMonitor.getReport()
+    if (report.count === 0) return
+    console.log(
+      `[内存监控] 渲染进程 JS堆 used=${rendererMemoryMonitor.toMB(
+        report.current
+      )} (min=${rendererMemoryMonitor.toMB(report.min)}, max=${rendererMemoryMonitor.toMB(
+        report.max
+      )}, avg=${rendererMemoryMonitor.toMB(report.avg)}, 样本=${report.count})`
+    )
+  }, 60000)
+}
 
 // 记录挂载完成时间
 performanceMonitor.mark('app-mounted')

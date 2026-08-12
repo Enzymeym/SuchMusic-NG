@@ -17,7 +17,14 @@
  * 每个请求携带自增 requestId，主线程据此匹配 Promise。
  */
 
-import { analyzeContentStart, analyzeVocalEnd, estimateBpm, timeStretchPcm } from './transition-dsp'
+import {
+  analyzeContentStart,
+  analyzeVocalEnd,
+  analyzeVocalGap,
+  analyzeVocalStart,
+  estimateBpm,
+  timeStretchPcm
+} from './transition-dsp'
 
 // ====== 消息协议类型 ======
 
@@ -58,8 +65,33 @@ export interface DspStretchCommand {
   ratio: number
 }
 
+export interface DspVocalGapCommand {
+  type: 'vocal-gap'
+  requestId: number
+  /** 单声道 PCM 数据（建议转移所有权） */
+  channelData: Float32Array
+  sampleRate: number
+  /** 从结尾向前分析无人声段的范围（秒），缺省由 transition-dsp 默认值决定 */
+  windowSec?: number
+}
+
+export interface DspVocalStartCommand {
+  type: 'vocal-start'
+  requestId: number
+  /** 单声道 PCM 数据（建议转移所有权） */
+  channelData: Float32Array
+  sampleRate: number
+  /** 从数据开头向后扫描人声起点的范围（秒），缺省由 transition-dsp 默认值决定 */
+  maxSec?: number
+}
+
 export type DspWorkerCommand =
-  DspVocalEndCommand | DspContentStartCommand | DspEstimateBpmCommand | DspStretchCommand
+  | DspVocalEndCommand
+  | DspContentStartCommand
+  | DspEstimateBpmCommand
+  | DspStretchCommand
+  | DspVocalGapCommand
+  | DspVocalStartCommand
 
 export interface DspReadyEvent {
   type: 'ready'
@@ -96,6 +128,16 @@ self.onmessage = (event: MessageEvent<DspWorkerCommand>) => {
     case 'vocal-end': {
       const value = analyzeVocalEnd(msg.channelData, msg.sampleRate, msg.maxSec)
       postMessage({ type: 'result', requestId: msg.requestId, value } satisfies DspResultEvent)
+      break
+    }
+    case 'vocal-gap': {
+      const g = analyzeVocalGap(msg.channelData, msg.sampleRate, msg.windowSec)
+      postMessage({ type: 'result', requestId: msg.requestId, value: g ? g.startSec : -1 } satisfies DspResultEvent)
+      break
+    }
+    case 'vocal-start': {
+      const startSec = analyzeVocalStart(msg.channelData, msg.sampleRate, msg.maxSec)
+      postMessage({ type: 'result', requestId: msg.requestId, value: startSec } satisfies DspResultEvent)
       break
     }
     case 'content-start': {

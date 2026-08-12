@@ -22,6 +22,8 @@ import { sendAutoUpdateResult } from './ipc/update'
 import { registerPluginHandlers } from './ipc/pluginManager'
 import { loadAllSavedPlugins } from './ipc/pluginManager'
 import { registerLyricHandlers } from './services/lyricService'
+import { registerNeteaseHandlers } from './services/neteaseService'
+import { mainMemoryMonitor } from './utils/memoryMonitor'
 
 // 修复 PowerShell 中中文显示错误的问题
 if (process.platform === 'win32') {
@@ -40,12 +42,17 @@ if (process.platform === 'win32') {
 
 // 启用 WebNN（Web Machine Learning）实验特性
 // 用于在支持的环境中通过 NPU/GPU 加速音频特征推理；不支持的平台会自动降级为 CPU，不影响正常使用
-app.commandLine.appendSwitch('enable-features', 'WebMachineLearningNeuralNetwork')
+// WebNNOnnxRuntime 启用 ONNX Runtime 后端（GPU/NPU 推理依赖 DirectML）
+app.commandLine.appendSwitch(
+  'enable-features',
+  'WebMachineLearningNeuralNetwork,WebNNOnnxRuntime'
+)
 
-// 强制启用 WebNN 的 DirectML NPU 后端（Chromium 默认对部分 NPU 设备启用了硬件黑名单）
+// 关闭 WebNN 的 DirectML NPU 硬件黑名单（Chromium 默认对部分 NPU 设备启用）
 // --disable_webnn_for_npu=0 是微软官方文档提供的关闭该黑名单的方式（Edge/Chromium 通用）。
+// 使用 appendArgument 替代 appendSwitch，确保下划线格式的 flag 被正确传递。
 // 注意：若本机 NPU 驱动不稳定，DirectML 可能异常；届时移除本行即可恢复默认行为。
-app.commandLine.appendSwitch('disable-webnn-for-npu', '0')
+app.commandLine.appendArgument('--disable_webnn_for_npu=0')
 
 // 设置应用名称，解决 SMTC（系统媒体传输控制）中显示未知应用或 electron 的问题
 app.name = 'Such Music'
@@ -161,10 +168,28 @@ app.whenReady().then(() => {
   registerWasapiHandlers()
   registerUpdateHandlers()
   registerLyricHandlers()
+  registerNeteaseHandlers()
 
   createWindow()
   createTray()
   monitorEvent()
+
+  // 启动主进程内存监控（用于验证内存优化效果）
+  mainMemoryMonitor.start(10000)
+  if (!app.isPackaged) {
+    setInterval(() => {
+      const report = mainMemoryMonitor.getReport()
+      const s = report.current
+      if (!s) return
+      console.log(
+        `[内存监控] 主进程 rss=${mainMemoryMonitor.toMB(s.rss)} heapUsed=${mainMemoryMonitor.toMB(
+          s.heapUsed
+        )} 进程数=${s.totalProcesses} (min=${mainMemoryMonitor.toMB(report.min)}, max=${mainMemoryMonitor.toMB(
+          report.max
+        )})`
+      )
+    }, 30000)
+  }
 
   // 注册插件系统处理器（需在窗口创建后）
   registerPluginHandlers(getMainWindow() || null)

@@ -20,6 +20,8 @@ import SetupWizard from './components/common/SetupWizard.vue'
 import SplashScreen from './components/common/SplashScreen.vue'
 import { useSetupWizardStore } from './stores/setupWizardStore'
 import { audioEngine } from './audio/audio-engine'
+import { getTransitionController } from './audio/transition-controller'
+import { debounce } from './utils/performance'
 
 const UpdateNotification = defineAsyncComponent(
   () => import('./components/common/UpdateNotification.vue')
@@ -61,21 +63,7 @@ function handleSplashFadeOutComplete() {
   splashHidden.value = true
 }
 
-// 监听关键状态变化并保存，使用自定义防抖函数
-
-// 自定义防抖函数
-function debounce<T extends (...args: any[]) => any>(
-  func: T,
-  wait: number
-): (...args: Parameters<T>) => void {
-  let timeout: ReturnType<typeof setTimeout> | null = null
-  return (...args: Parameters<T>) => {
-    if (timeout) clearTimeout(timeout)
-    timeout = setTimeout(() => {
-      func(...args)
-    }, wait)
-  }
-}
+// 监听关键状态变化并保存，使用统一的防抖工具函数
 
 // 使用防抖函数优化保存操作，避免频繁触发
 const debouncedSavePlayerState = debounce(() => {
@@ -151,8 +139,8 @@ onMounted(() => {
         case 'play':
           if (!playerStore.isPlaying) {
             if (playerStore.currentSong) {
-              audioEngine.play().then(() => {
-                playerStore.setPlaying(true)
+              audioEngine.play().then((success) => {
+                if (success) playerStore.setPlaying(true)
               })
             }
           }
@@ -170,15 +158,21 @@ onMounted(() => {
               playerStore.setPlaying(false)
             })
           } else if (playerStore.currentSong) {
-            audioEngine.play().then(() => {
-              playerStore.setPlaying(true)
+            audioEngine.play().then((success) => {
+              if (success) playerStore.setPlaying(true)
             })
           }
           break
         case 'next':
+          // 中断智能过渡流程，走现有快速切换路径（与 PlayerBar.handleNext 对齐）
+          getTransitionController().abort()
+          playerStore.setTransitioning(false)
           playerStore.playNext()
           break
         case 'prev':
+          // 中断智能过渡流程，走现有快速切换路径（与 PlayerBar.handlePrev 对齐）
+          getTransitionController().abort()
+          playerStore.setTransitioning(false)
           playerStore.playPrev()
           break
         case 'toggle-lock':

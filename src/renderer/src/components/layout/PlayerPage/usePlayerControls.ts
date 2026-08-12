@@ -4,6 +4,7 @@ import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePlaylistStore } from '../../../stores/playlistStore'
 import { useAutoNaiveTheme } from '../../../themes/autoNaiveTheme'
 import { audioEngine } from '../../../audio/audio-engine'
+import { getTransitionController } from '../../../audio/transition-controller'
 import { useDownloadMusic } from '../../../composables/useDownloadMusic'
 import { useMessage } from 'naive-ui'
 
@@ -161,12 +162,22 @@ export function usePlayerControls() {
   /**
    * 播放上一曲
    */
-  const handlePrev = (): void => player.playPrev()
+  const handlePrev = (): void => {
+    // 中断智能过渡流程，走现有快速切换路径（与 PlayerBar.handlePrev 对齐）
+    getTransitionController().abort()
+    player.setTransitioning(false)
+    player.playPrev()
+  }
 
   /**
    * 播放下一曲
    */
-  const handleNext = (): void => player.playNext()
+  const handleNext = (): void => {
+    // 中断智能过渡流程，走现有快速切换路径（与 PlayerBar.handleNext 对齐）
+    getTransitionController().abort()
+    player.setTransitioning(false)
+    player.playNext()
+  }
 
   /**
    * 当前歌曲是否已收藏

@@ -2,8 +2,12 @@ import { ipcMain, app, dialog } from 'electron'
 import { promises as fs, createWriteStream } from 'fs'
 import path from 'path'
 import axios from 'axios'
+import { mainMemoryMonitor } from '../utils/memoryMonitor'
 
 export function registerSystemHandlers(): void {
+  // 获取主进程内存统计报告（用于验证内存优化效果）
+  ipcMain.handle('memory:get-report', () => mainMemoryMonitor.getReport())
+
   // 检查文件是否存在
   ipcMain.handle('system:fs-exists', async (_event, filePath: string) => {
     try {

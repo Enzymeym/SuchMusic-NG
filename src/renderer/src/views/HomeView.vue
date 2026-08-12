@@ -8,6 +8,7 @@ import { useLocalMusicStore } from '../stores/localMusicStore'
 import { usePlaylistTheme } from '../composables/usePlaylistTheme'
 import { albumCache } from '../stores/albumCache'
 import { throttle } from '../utils/performance'
+import { formatTime } from '../utils/format'
 
 const playerStore = usePlayerStore()
 const localMusicStore = useLocalMusicStore()
@@ -31,7 +32,7 @@ const stopProgressTimer = () => {
 
 onMounted(() => {
   updateDisplayLimit()
-  window.addEventListener('resize', throttle(updateDisplayLimit, 200))
+  window.addEventListener('resize', onWindowResize)
   playerStore.loadHistory()
   startProgressTimer()
 })
@@ -45,7 +46,7 @@ onActivated(() => {
 })
 
 onUnmounted(() => {
-  window.removeEventListener('resize', updateDisplayLimit)
+  window.removeEventListener('resize', onWindowResize)
   stopProgressTimer()
 })
 
@@ -61,16 +62,12 @@ const updateDisplayLimit = () => {
   else { displayLimit.value = 4 }
 }
 
+// 持有 throttle 包装引用，确保 add/removeEventListener 使用同一函数（避免监听器泄漏）
+const onWindowResize = throttle(updateDisplayLimit, 200)
+
 const nowPlayingCover = computed(() => playerStore.currentSong?.cover || defaultCover)
 
 const { accentColor: _accentColor, textColor } = usePlaylistTheme(() => nowPlayingCover.value)
-
-const formatTime = (seconds: number): string => {
-  if (!isFinite(seconds)) return '0:00'
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m}:${s.toString().padStart(2, '0')}`
-}
 
 const UNKNOWN_ARTIST = '\u672a\u77e5\u6b4c\u624b'
 
@@ -95,9 +92,17 @@ const recommendedSongs = computed(() => {
   }
 
   if (songs.length < 12 && localSongs.length > 0) {
-    const shuffled = [...localSongs].sort(() => Math.random() - 0.5)
-    for (const song of shuffled) {
-      if (seenIds.has(song.id)) continue
+    // 随机不重复抽样：从尚未出现的本地歌曲中随机抽取（部分 Fisher-Yates，只洗前 need 个），
+    // 避免 `[...list].sort(() => Math.random() - 0.5)` 的整表复制 + 全量洗牌开销
+    const candidates = localSongs.filter(s => !seenIds.has(s.id))
+    const need = 12 - songs.length
+    const take = Math.min(candidates.length, need)
+    for (let i = 0; i < take; i++) {
+      const j = i + Math.floor(Math.random() * (candidates.length - i))
+      const tmp = candidates[i]
+      candidates[i] = candidates[j]
+      candidates[j] = tmp
+      const song = candidates[i]
       seenIds.add(song.id)
       songs.push({
         id: song.id,
@@ -105,7 +110,6 @@ const recommendedSongs = computed(() => {
         artist: song.ar?.[0]?.name || UNKNOWN_ARTIST,
         cover: song.picUrl || song.al?.picUrl || defaultCover
       })
-      if (songs.length >= 12) break
     }
   }
 

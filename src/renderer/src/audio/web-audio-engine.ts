@@ -558,29 +558,59 @@ export class WebAudioOutputEngine {
     this.sourceB = srcB
 
     // 精确时间调度：gainA → 0，gainB: 0 → 1
-    if (this.gainA) {
-      this.gainA.gain.cancelScheduledValues(now)
-      this.gainA.gain.setValueAtTime(this.gainA.gain.value, now)
-      this.gainA.gain.linearRampToValueAtTime(0, now + dur)
+    try {
+      if (this.gainA) {
+        this.gainA.gain.cancelScheduledValues(now)
+        this.gainA.gain.setValueAtTime(this.gainA.gain.value, now)
+        this.gainA.gain.linearRampToValueAtTime(0, now + dur)
+      }
+      this.gainB.gain.cancelScheduledValues(now)
+      this.gainB.gain.setValueAtTime(0, now)
+      this.gainB.gain.linearRampToValueAtTime(1, now + dur)
+
+      // 记录 sourceB 的起始时间：减去起始偏移，收尾后 position getter 返回源B 的真实曲内位置
+      this._startTime = now - offsetSec
+
+      this._isCrossfading = true
+
+      // 兜底：sourceA 异常未触发 onended 时强制收尾（finalizeCrossfade 幂等，可防重入）
+      this.crossfadeFallbackTimer = window.setTimeout(
+        () => {
+          this.finalizeCrossfade()
+        },
+        dur * 1000 + 200
+      )
+
+      srcB.start(now, offsetSec)
+    } catch (err) {
+      // 调度或启动失败：清理本次交叉淡化产生的状态，避免"UI 已切换但音频无过渡"的半损坏状态
+      this._isCrossfading = false
+      if (this.crossfadeFallbackTimer !== null) {
+        clearTimeout(this.crossfadeFallbackTimer)
+        this.crossfadeFallbackTimer = null
+      }
+      try {
+        if (this.gainA) {
+          this.gainA.gain.cancelScheduledValues(now)
+          this.gainA.gain.value = 1.0
+        }
+        if (this.gainB) {
+          this.gainB.gain.cancelScheduledValues(now)
+          this.gainB.gain.value = 1.0
+        }
+      } catch {
+        /* 忽略清理异常 */
+      }
+      try {
+        srcB.onended = null
+        srcB.stop()
+      } catch {
+        /* 可能未启动 */
+      }
+      srcB.disconnect()
+      if (this.sourceB === srcB) this.sourceB = null
+      return false
     }
-    this.gainB.gain.cancelScheduledValues(now)
-    this.gainB.gain.setValueAtTime(0, now)
-    this.gainB.gain.linearRampToValueAtTime(1, now + dur)
-
-    // 记录 sourceB 的起始时间：减去起始偏移，收尾后 position getter 返回源B 的真实曲内位置
-    this._startTime = now - offsetSec
-
-    this._isCrossfading = true
-
-    // 兜底：sourceA 异常未触发 onended 时强制收尾（finalizeCrossfade 幂等，可防重入）
-    this.crossfadeFallbackTimer = window.setTimeout(
-      () => {
-        this.finalizeCrossfade()
-      },
-      dur * 1000 + 200
-    )
-
-    srcB.start(now, offsetSec)
     return true
   }
 

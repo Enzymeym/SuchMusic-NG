@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, h, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, h, onMounted, watch, nextTick, defineAsyncComponent } from 'vue'
 import {
   NModal,
   NLayout,
@@ -18,7 +18,8 @@ import SettingsPlaybackSection from './Settings/SettingsPlaybackSection.vue'
 import SettingsLyricsSection from './Settings/SettingsLyricsSection.vue'
 import SettingsLocalSection from './Settings/SettingsLocalSection.vue'
 import SettingsPluginSection from './Settings/SettingsPluginSection.vue'
-import SettingsAboutSection from './Settings/SettingsAboutSection.vue'
+// 关于页包含 markdown-it / axios 等较重依赖，懒加载以减小主包体积
+const SettingsAboutSection = defineAsyncComponent(() => import('./Settings/SettingsAboutSection.vue'))
 import SettingsMorphaeumSection from './Settings/SettingsMorphaeumSection.vue'
 
 const themeVars = useThemeVars()

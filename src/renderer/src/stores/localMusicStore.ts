@@ -40,6 +40,68 @@ interface LocalMusicState {
   fillingMeta: boolean
 }
 
+/** 聚合列表中的单曲结构（歌手/专辑分组共用） */
+interface GroupedTrack {
+  id: string | number
+  title: string
+  artist: string
+  cover: string
+  album?: string
+  filePath?: string
+  durationMs?: number
+  year?: number
+}
+
+/**
+ * 从本地歌曲或播放记录构建统一的曲目结构
+ * @param song 本地歌曲（LocalSong）或播放记录（字段结构兼容）
+ * @param artistName 歌手名（已做“未知歌手”兜底）
+ */
+function buildTrack(
+  song: {
+    id: string | number
+    name?: string
+    title?: string
+    picUrl?: string
+    cover?: string
+    al?: { name?: string; picUrl?: string }
+    album?: string
+    filePath?: string
+    dt?: number
+  },
+  artistName: string
+): GroupedTrack {
+  return {
+    id: song.id,
+    title: song.title ?? song.name ?? '',
+    artist: artistName,
+    cover: song.cover ?? song.picUrl ?? song.al?.picUrl ?? '',
+    album: song.album ?? song.al?.name,
+    filePath: song.filePath,
+    durationMs: song.dt
+  }
+}
+
+/**
+ * 将曲目写入分组歌曲数组（去重插入）
+ * @param groups 分组名 -> 分组对象（含 songs 数组）
+ * @param seen 去重索引：`${分组名}\u0000${歌曲id}` -> songs 数组下标，替代 findIndex 的 O(n) 线性扫描
+ * @param groupName 分组名（歌手/专辑）
+ * @param track 待写入的曲目
+ */
+function upsertTrack<T extends { songs: GroupedTrack[] }>(
+  groups: Map<string, T>,
+  seen: Map<string, number>,
+  groupName: string,
+  track: GroupedTrack
+): void {
+  const key = `${groupName}\u0000${track.id}`
+  if (seen.has(key)) return
+  const songs = groups.get(groupName)!.songs
+  seen.set(key, songs.length)
+  songs.push(track)
+}
+
 export const useLocalMusicStore = defineStore('localMusic', {
   state: (): LocalMusicState => ({
     songs: [],
@@ -50,136 +112,110 @@ export const useLocalMusicStore = defineStore('localMusic', {
     /** 按歌手聚合的音乐列表，利用 Pinia getter 缓存避免 SingerView 每次 computed 重建 Map */
     artistList(state) {
       const playerStore = usePlayerStore()
-      const artistMap = new Map<string, {
+      const groups = new Map<string, {
         name: string
         cover: string
         playCount: number
         songCount: number
-        songs: { id: string | number; title: string; artist: string; cover: string; album?: string; filePath?: string; durationMs?: number }[]
+        songs: GroupedTrack[]
       }>()
+      // 去重索引：`${分组名}\u0000${歌曲id}` -> songs 数组下标，替代 findIndex 的 O(n) 线性扫描
+      const seen = new Map<string, number>()
 
-      const ensureArtist = (name: string) => {
-        if (!artistMap.has(name)) {
-          artistMap.set(name, { name, cover: '', playCount: 0, songCount: 0, songs: [] })
+      const ensureGroup = (name: string) => {
+        let group = groups.get(name)
+        if (!group) {
+          group = { name, cover: '', playCount: 0, songCount: 0, songs: [] }
+          groups.set(name, group)
         }
-        return artistMap.get(name)!
+        return group
       }
 
       state.songs.forEach((song) => {
         const artistName = song.ar?.[0]?.name || '未知歌手'
-        const info = ensureArtist(artistName)
-        if (!info.cover && song.picUrl) info.cover = song.picUrl
-        if (!info.cover && song.al?.picUrl) info.cover = song.al.picUrl
+        const group = ensureGroup(artistName)
+        if (!group.cover && song.picUrl) group.cover = song.picUrl
+        if (!group.cover && song.al?.picUrl) group.cover = song.al.picUrl
 
-        const existingIdx = info.songs.findIndex(s => s.id === song.id)
-        const track = {
-          id: song.id,
-          title: song.name,
-          artist: artistName,
-          cover: song.picUrl || song.al?.picUrl || '',
-          album: song.al?.name,
-          filePath: song.filePath,
-          durationMs: song.dt
-        }
-        if (existingIdx >= 0) {
-          info.songs[existingIdx] = track
-        } else {
-          info.songs.push(track)
-        }
+        upsertTrack(groups, seen, artistName, buildTrack(song, artistName))
       })
 
       playerStore.playHistory.forEach((record) => {
         const artistName = record.artist || '未知歌手'
-        const info = ensureArtist(artistName)
-        info.playCount++
-        if (!info.cover && record.cover) info.cover = record.cover
-        if (!info.songs.find(s => s.id === record.songId)) {
-          info.songs.push({
-            id: record.songId,
-            title: record.title,
-            artist: record.artist,
-            cover: record.cover,
-            album: record.album,
-            filePath: record.filePath
-          })
-        }
+        const group = ensureGroup(artistName)
+        group.playCount++
+        if (!group.cover && record.cover) group.cover = record.cover
+
+        upsertTrack(groups, seen, artistName, buildTrack({
+          id: record.songId,
+          title: record.title,
+          cover: record.cover,
+          album: record.album,
+          filePath: record.filePath
+        }, artistName))
       })
 
-      for (const info of artistMap.values()) {
-        info.songCount = info.songs.length
-        if (info.songs.length > 0) {
-          info.cover = info.songs.find(s => s.cover)?.cover || info.cover
+      for (const group of groups.values()) {
+        group.songCount = group.songs.length
+        if (group.songs.length > 0) {
+          group.cover = group.songs.find(s => s.cover)?.cover || group.cover
         }
       }
-      return Array.from(artistMap.values())
+      return Array.from(groups.values())
     },
 
     /** 按专辑聚合的音乐列表，利用 Pinia getter 缓存避免 AlbumView 每次 computed 重建 Map */
     albumList(state) {
       const playerStore = usePlayerStore()
-      const albumMap = new Map<string, {
+      const groups = new Map<string, {
         name: string
         artist: string
         cover: string
         playCount: number
-        songs: { id: string | number; title: string; artist: string; cover: string; album?: string; filePath?: string; durationMs?: number; year?: number }[]
+        songs: GroupedTrack[]
       }>()
+      const seen = new Map<string, number>()
 
-      const ensureAlbum = (name: string, artist: string) => {
-        if (!albumMap.has(name)) {
-          albumMap.set(name, { name, artist, cover: '', playCount: 0, songs: [] })
+      const ensureGroup = (name: string, artist: string) => {
+        let group = groups.get(name)
+        if (!group) {
+          group = { name, artist, cover: '', playCount: 0, songs: [] }
+          groups.set(name, group)
         }
-        return albumMap.get(name)!
+        return group
       }
 
       state.songs.forEach((song) => {
         const albumName = song.al?.name || '未知专辑'
         const artist = song.ar?.[0]?.name || '未知歌手'
-        const info = ensureAlbum(albumName, artist)
-        if (!info.cover && song.picUrl) info.cover = song.picUrl
-        if (!info.cover && song.al?.picUrl) info.cover = song.al.picUrl
+        const group = ensureGroup(albumName, artist)
+        if (!group.cover && song.picUrl) group.cover = song.picUrl
+        if (!group.cover && song.al?.picUrl) group.cover = song.al.picUrl
 
-        const existingIdx = info.songs.findIndex(s => s.id === song.id)
-        let year: number | undefined
-        if ((song as any).year) year = (song as any).year
-        else if ((song as any).publishTime) year = new Date((song as any).publishTime).getFullYear()
-
-        const track = {
-          id: song.id,
-          title: song.name,
-          artist,
-          cover: song.picUrl || song.al?.picUrl || '',
-          album: albumName,
-          filePath: song.filePath,
-          durationMs: song.dt,
-          year
-        }
-        if (existingIdx >= 0) {
-          info.songs[existingIdx] = track
-        } else {
-          info.songs.push(track)
-        }
+        const track = buildTrack(song, artist)
+        const year = (song as any).year
+          ?? ((song as any).publishTime ? new Date((song as any).publishTime).getFullYear() : undefined)
+        if (year !== undefined) track.year = year
+        upsertTrack(groups, seen, albumName, track)
       })
 
       playerStore.playHistory.forEach((record) => {
         const albumName = record.album || '未知专辑'
         const artist = record.artist || '未知歌手'
-        const info = ensureAlbum(albumName, artist)
-        info.playCount++
-        if (!info.cover && record.cover) info.cover = record.cover
-        if (!info.songs.find(s => s.id === record.songId)) {
-          info.songs.push({
-            id: record.songId,
-            title: record.title,
-            artist: record.artist,
-            cover: record.cover,
-            album: record.album,
-            filePath: record.filePath
-          })
-        }
+        const group = ensureGroup(albumName, artist)
+        group.playCount++
+        if (!group.cover && record.cover) group.cover = record.cover
+
+        upsertTrack(groups, seen, albumName, buildTrack({
+          id: record.songId,
+          title: record.title,
+          cover: record.cover,
+          album: record.album,
+          filePath: record.filePath
+        }, artist))
       })
 
-      return Array.from(albumMap.values())
+      return Array.from(groups.values())
     }
   },
 

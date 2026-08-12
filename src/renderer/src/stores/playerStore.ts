@@ -232,6 +232,28 @@ export const usePlayerStore = defineStore('player', {
         this.playlist.push(stripLyricsToCache(song))
       }
     },
+    /**
+     * 下一首播放：将歌曲插入到当前播放歌曲之后（不打断当前播放）
+     * 若目标歌曲已存在于播放列表中，先移除再插入，避免重复
+     * @param song 要加入队列的歌曲
+     */
+    insertNextToPlaylist(song: PlayerSong) {
+      const MAX_PLAYLIST_SIZE = 500
+      const list = [...this.playlist]
+      const dupIdx = list.findIndex(
+        (s) => s.id != null && song.id != null && String(s.id) === String(song.id)
+      )
+      if (dupIdx !== -1) list.splice(dupIdx, 1)
+      const at = Math.min(Math.max(this.currentIndex + 1, 0), list.length)
+      list.splice(at, 0, stripLyricsToCache(song))
+      if (list.length > MAX_PLAYLIST_SIZE) list.length = MAX_PLAYLIST_SIZE
+      this.playlist = list
+      // 若因去重删除了当前歌曲之前的项，重算 currentIndex
+      if (this.currentSong) {
+        const idx = this.playlist.findIndex((s) => s.id === this.currentSong!.id)
+        if (idx !== -1) this.currentIndex = idx
+      }
+    },
     removeFromPlaylist(songId: string | number) {
       const index = this.playlist.findIndex((s) => s.id === songId)
       if (index !== -1) {
@@ -462,6 +484,10 @@ export const usePlayerStore = defineStore('player', {
     /**
      * 根据本地歌曲已加载的封面恢复当前歌曲和播放队列封面
      * 启动时从持久化恢复的状态会剥离 base64 封面，本地音乐扫描完后调用此方法补全
+     *
+     * 本地封面使用 blob URL，重新扫描时会 revoke 旧 URL 并生成新 URL，
+     * 因此除了补空封面外，还要把已失效的 blob: 封面刷新为新的本地封面，
+     * 否则播放队列/当前歌曲仍指向已 revoke 的 URL，导致封面消失。
      */
     restoreCoversFromLocalSongs(localSongs: { id: string | number; picUrl?: string }[]): void {
       const coverMap = new Map<string | number, string>()
@@ -471,17 +497,20 @@ export const usePlayerStore = defineStore('player', {
         }
       })
 
+      // 空封面或指向已失效 blob URL 的封面都视为需要刷新
+      const needsRefresh = (cover: string | undefined) => !cover || cover.startsWith('blob:')
+
       if (
         this.currentSong &&
         this.currentSong.id != null &&
-        !this.currentSong.cover &&
-        coverMap.has(this.currentSong.id)
+        coverMap.has(this.currentSong.id) &&
+        needsRefresh(this.currentSong.cover)
       ) {
         this.currentSong.cover = coverMap.get(this.currentSong.id)!
       }
 
       this.playlist.forEach((song) => {
-        if (song.id != null && !song.cover && coverMap.has(song.id)) {
+        if (song.id != null && coverMap.has(song.id) && needsRefresh(song.cover)) {
           song.cover = coverMap.get(song.id)!
         }
       })

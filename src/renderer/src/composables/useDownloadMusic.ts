@@ -3,13 +3,21 @@ import { runSnowdropGetMusicUrl } from '../apis/snowdrop-transform'
 import { useMessage } from 'naive-ui'
 import type { PlayerSong } from '../stores/playerStore'
 
+/** 音质标识 -> 展示名称 */
+const QUALITY_LABEL: Record<string, string> = {
+  '128k': '标准音质',
+  '192k': '较高音质',
+  '320k': '高品音质',
+  flac: '无损音质'
+}
+
 export function useDownloadMusic() {
   const settingsStore = useSettingsStore()
   const message = useMessage()
 
   let isDownloading = false
 
-  const downloadMusic = async (song: PlayerSong) => {
+  const downloadMusic = async (song: PlayerSong, quality?: string) => {
     if (isDownloading) {
       message.warning('正在下载中，请稍后再试')
       return
@@ -43,15 +51,22 @@ export function useDownloadMusic() {
         mediaId: String(songId)
       }
 
-      const quality = settingsStore.playback.preloadQualityLevel || '128k'
+      // 音质：优先使用调用方指定的音质，未指定时回退到设置中的预加载音质
+      const qualityLevel = quality || settingsStore.playback.preloadQualityLevel || '128k'
 
       const loadingMsg = message.loading('正在获取下载链接...', { duration: 0 })
 
       // 2. 获取音乐 URL
       let url = ''
       try {
-        const res = await runSnowdropGetMusicUrl(source, musicInfo, quality)
-        url = res.url
+        if (source === 'wy') {
+          // 网易云：直接通过网易云接口获取播放/下载地址（该接口与搜索页播放共用，已可用）
+          const urlMap = await window.api.netease.songUrl([Number(songId)], qualityLevel)
+          url = urlMap[Number(songId)] || ''
+        } else {
+          const res = await runSnowdropGetMusicUrl(source, musicInfo, qualityLevel)
+          url = res.url
+        }
         if (!url) throw new Error('未获取到下载链接')
       } catch (err: any) {
         loadingMsg.destroy()
@@ -60,7 +75,7 @@ export function useDownloadMusic() {
 
       // 3. 确定文件名和后缀
       let ext = 'mp3'
-      if (quality === 'flac') ext = 'flac'
+      if (qualityLevel === 'flac') ext = 'flac'
       else {
         try {
           const u = new URL(url)
@@ -92,8 +107,24 @@ export function useDownloadMusic() {
         dir
       })
 
+      // 5. 下载成功后自动写入音乐标签（歌名、歌手、专辑、歌词、封面）
+      loadingMsg.content = '正在写入音乐标签...'
+      try {
+        await window.electron.ipcRenderer.invoke('local-music:write-song-info', targetPath, {
+          title: song.title || '',
+          artist: song.artist || '',
+          album: song.album || '',
+          lyrics: song.lyrics || '',
+          coverUrl: song.cover || ''
+        })
+      } catch (err) {
+        // 标签写入失败不影响下载结果
+        console.warn('[useDownloadMusic] 写入音乐标签失败:', err)
+      }
+
       loadingMsg.destroy()
-      message.success(`下载成功: ${targetPath}`, { duration: 5000 })
+      const qualityName = QUALITY_LABEL[qualityLevel] || qualityLevel
+      message.success(`下载成功（${qualityName}）: ${targetPath}`, { duration: 5000 })
     } catch (error: any) {
       console.error('下载失败:', error)
       message.error(`下载失败: ${error.message || '未知错误'}`)

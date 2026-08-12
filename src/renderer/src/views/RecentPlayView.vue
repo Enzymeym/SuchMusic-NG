@@ -54,7 +54,6 @@
         :songs="filteredSongs"
         :loading="false"
         :current-playing-song-id="player.currentSong?.id ?? null"
-        :menu-options="contextMenuOptions"
         @song-click="handleSongClick"
       />
     </div>
@@ -62,7 +61,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, h } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { NButton, NIcon, useMessage, NInput } from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import { usePlayerStore } from '../stores/playerStore'
@@ -167,14 +166,6 @@ onMounted(() => {
   buildSongsFromHistory()
   void fillMissingCoversFromMeta()
 })
-
-const renderIcon = (iconClass: string) => {
-  return () => h(NIcon, null, { default: () => h('i', { class: iconClass }) })
-}
-
-const contextMenuOptions = [
-  { label: '播放', key: 'play', icon: renderIcon('mgc_play_circle_line') }
-]
 
 const handleSongClick = async (song: RecentSong) => {
   // 1. 本地歌曲播放逻辑
