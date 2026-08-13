@@ -95,11 +95,6 @@ class AudioEngineManager {
   }
 
   private ensureEngineId(): string {
-    // #region debug-point B:engine-id
-    if (!this.currentEngineId) {
-      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"sound-effects-ineffective",runId:"pre-fix",hypothesisId:"B",location:"preload/index.ts:ensureEngineId",msg:"[DEBUG] currentEngineId is NULL (engine never created)",data:{},ts:Date.now()})}).catch(()=>{})
-    }
-    // #endregion
     if (!this.currentEngineId) {
       throw new Error('音频引擎未初始化，请先调用 create()')
     }

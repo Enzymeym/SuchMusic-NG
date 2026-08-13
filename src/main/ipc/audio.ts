@@ -2,6 +2,7 @@ import { ipcMain, app, type IpcMainEvent } from 'electron'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { loadNativeDecoder } from '../services/nativeDecoder'
+import { getActiveNeteaseCookie } from '../services/neteaseService'
 
 /** 记录待清理的临时下载文件路径 */
 const tempDownloadPaths = new Set<string>()
@@ -121,7 +122,15 @@ export function registerAudioHandlers(): void {
     if (!url || !/^https?:\/\//i.test(url)) {
       throw new Error(`无效的音频地址: ${url}`)
     }
-    const resp = await fetch(url)
+    // 附加登录态：网易云登录后返回的 VIP/高音质 CDN 地址需携带同一 Cookie 才能下载，
+    // 否则裸请求会 403 导致「在线音频加载失败」
+    const cookie = getActiveNeteaseCookie()
+    const headers: Record<string, string> = {}
+    if (cookie) headers['Cookie'] = cookie
+    headers['User-Agent'] =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+    headers['Referer'] = 'https://music.163.com'
+    const resp = await fetch(url, { headers })
     if (!resp.ok) {
       throw new Error(`下载音频失败: HTTP ${resp.status}`)
     }

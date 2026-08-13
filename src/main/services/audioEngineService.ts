@@ -975,25 +975,19 @@ export function registerAudioEngineHandlers(): void {
   });
 
   ipcMain.handle('audio-engine:set-eq-gains', async (_event, engineId: string, gains: number[]) => {
-    // #region debug-point C:main-handler
-    fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"sound-effects-ineffective",runId:"pre-fix",hypothesisId:"C",location:"audioEngineService.ts:set-eq-gains",msg:"[DEBUG] main received set-eq-gains",data:{engineId,gainsLen:gains?.length},ts:Date.now()})}).catch(()=>{})
-    // #endregion
     try {
       const engine = getEngine(engineId);
-      // #region debug-point E:engine-found
-      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"sound-effects-ineffective",runId:"pre-fix",hypothesisId:"E",location:"audioEngineService.ts:set-eq-gains:found",msg:"[DEBUG] engine found",data:{engineId},ts:Date.now()})}).catch(()=>{})
-      // #endregion
       const bands = engine.getEqBands();
       for (let i = 0; i < Math.min(gains.length, bands.length); i++) {
         const band = bands[i];
+        // 与 Web Audio DSP 链保持一致：EQ 增益写入 preGain（应用在滤波器前），
+        // 避免两种模式下同一滑条语义不一致导致「设置了没效果」
+        band.preGain = gains[i];
         band.postGain = gains[i];
         engine.setEqBand(i, band);
       }
       return { success: true };
     } catch (error) {
-      // #region debug-point E:engine-error
-      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"sound-effects-ineffective",runId:"pre-fix",hypothesisId:"E",location:"audioEngineService.ts:set-eq-gains:error",msg:"[DEBUG] set-eq-gains error",data:{err:String(error)},ts:Date.now()})}).catch(()=>{})
-      // #endregion
       console.error('[AudioEngine] 设置 EQ 增益失败:', error);
       return { success: false, error: String(error) };
     }

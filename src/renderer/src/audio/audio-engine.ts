@@ -27,18 +27,16 @@ class AudioEngine {
   private trackGainDb = 0
 
   private getApi() {
-    const api = (window as any).api?.audioEngine
-    // #region debug-point A:get-api
-    if (!api) fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"sound-effects-ineffective",runId:"pre-fix",hypothesisId:"A",location:"audio-engine.ts:getApi",msg:"[DEBUG] window.api.audioEngine undefined",data:{},ts:Date.now()})}).catch(()=>{})
-    // #endregion
-    return api
+    return (window as any).api?.audioEngine
   }
 
-  /** 确保 Web Audio DSP 链已初始化（懒加载） */
+  /** 确保 Web Audio DSP 链已初始化（懒加载），并立即接入输出链路 */
   private ensureDspChain(): WebAudioDspChain | null {
     if (!webAudioOutputEngine.dspChain) {
       webAudioOutputEngine.dspChain = new WebAudioDspChain()
     }
+    // 播放中打开音效面板时立即接线，让参数调整实时生效（无需等下次 doPlay）
+    webAudioOutputEngine.attachDspChain(webAudioOutputEngine.dspChain)
     return webAudioOutputEngine.dspChain
   }
 
@@ -133,22 +131,25 @@ class AudioEngine {
     if (isWebAudioMode()) {
       // Web Audio: 暂停状态 → 恢复；否则视为全新播放（由 audioPlayerManager 触发）
       if (webAudioOutputEngine.isPaused) {
-        webAudioOutputEngine.resume()
+        return webAudioOutputEngine.resume()
       } else if (!webAudioOutputEngine.isPlaying && webAudioOutputEngine.isReady) {
         // 引擎已加载但处于"非暂停、未播放"状态（歌曲自然结束 / stop 后）：
         // 从当前位置重新播放，避免 UI 显示播放中而引擎静默的卡死状态
-        webAudioOutputEngine.play(webAudioOutputEngine.getPositionMs() / 1000)
+        return webAudioOutputEngine.play(webAudioOutputEngine.getPositionMs() / 1000)
       } else {
         // 未加载任何音频（如重启后恢复失败）：返回 false，
         // 让调用方（togglePlay）走重新加载兜底，避免 UI 显示播放中但无声
         return false
       }
-      return true
     }
     const api = this.getApi()
     if (!api) return false
     try {
-      await api.play()
+      // 主进程 handler 不抛异常，需显式检查 { success } 结果，避免失败被当作成功
+      const result = await api.play()
+      if (result === false || (result && typeof result === 'object' && result.success === false)) {
+        return false
+      }
       return true
     } catch {
       return false
@@ -402,9 +403,6 @@ class AudioEngine {
   }
 
   public async setEqGains(gains: number[]): Promise<void> {
-    // #region debug-point D:mode-branch
-    fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"sound-effects-ineffective",runId:"pre-fix",hypothesisId:"D",location:"audio-engine.ts:setEqGains",msg:"[DEBUG] setEqGains entry",data:{isWebAudioMode:isWebAudioMode(),hasDspChain:!!webAudioOutputEngine.dspChain,gainsLen:gains.length},ts:Date.now()})}).catch(()=>{})
-    // #endregion
     if (isWebAudioMode()) {
       const dsp = this.ensureDspChain()
       if (dsp) dsp.setEqGains(gains)
@@ -414,18 +412,10 @@ class AudioEngine {
     if (!api) return
     try {
       const state = await api.getState().catch(() => null)
-      // #region debug-point B:get-state
-      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"sound-effects-ineffective",runId:"pre-fix",hypothesisId:"B",location:"audio-engine.ts:setEqGains:getState",msg:"[DEBUG] getState result",data:{state},ts:Date.now()})}).catch(()=>{})
-      // #endregion
       if (!state) return
       await api.setEqGains([...gains])
-      // #region debug-point C:ipc-called
-      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"sound-effects-ineffective",runId:"pre-fix",hypothesisId:"C",location:"audio-engine.ts:setEqGains:ipc",msg:"[DEBUG] api.setEqGains invoked",data:{},ts:Date.now()})}).catch(()=>{})
-      // #endregion
     } catch (e) {
-      // #region debug-point C:ipc-error
-      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"sound-effects-ineffective",runId:"pre-fix",hypothesisId:"C",location:"audio-engine.ts:setEqGains:error",msg:"[DEBUG] setEqGains threw",data:{err:String(e)},ts:Date.now()})}).catch(()=>{})
-      // #endregion
+      console.error('[AudioEngine] setEqGains failed:', e)
     }
   }
 

@@ -612,7 +612,17 @@ export function useAudioEngine() {
   async function initialize() {
     // Web Audio 模式不需要初始化 Rust 引擎
     if (isWebAudioMode()) {
-      console.log('[useAudioEngine] Web Audio 模式，跳过 Rust 引擎初始化');
+      // 但需要恢复上次保存的音效状态（Web Audio DSP 链懒加载，参数先入内存，
+      // 待首次 doPlay 接线时通过 syncAllParams 应用）
+      const savedState = loadEngineState();
+      if (savedState) {
+        try {
+          await applySavedState(savedState);
+        } catch (error) {
+          console.error('[useAudioEngine] Web Audio 恢复音效状态失败:', error);
+        }
+      }
+      state.isInitialized = true;
       return true;
     }
 

@@ -213,11 +213,7 @@ async function getSongUrlMap(
     `${API_BASE}/song/url/v1?id=${ids.join(',')}` +
     `&level=${level}&randomCNIP=true`
   try {
-    const cookie = activeAccount()?.cookie || ''
-    const resp = await fetch(
-      url,
-      cookie ? { headers: { Cookie: cookie } } : undefined
-    )
+    const resp = await netFetch(url, activeAccount()?.cookie)
     if (!resp.ok) {
       console.error(`[neteaseService] HTTP ${resp.status} fetching song urls`)
       return {}
@@ -301,6 +297,28 @@ function activeAccount(): NeteaseAccount | undefined {
   return neteaseAccounts.find((a) => a.userId === activeUserId) || neteaseAccounts[0]
 }
 
+/**
+ * 获取当前活跃网易云账号的 Cookie（供音频下载 / 下载歌曲等请求附加登录态，
+ * 否则登录后返回的 VIP/高音质 CDN 地址会在下载环节 403）
+ */
+export function getActiveNeteaseCookie(): string {
+  return activeAccount()?.cookie || ''
+}
+
+/** 浏览器请求头：部分网易云 API 对缺少 UA/Referer 的请求返回异常或误判为失效 */
+const BROWSER_HEADERS: Record<string, string> = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  Referer: 'https://music.163.com'
+}
+
+/** 带浏览器头（及可选 Cookie）的网易云 API 请求 */
+function netFetch(url: string, cookie?: string): Promise<Response> {
+  const headers: Record<string, string> = { ...BROWSER_HEADERS }
+  if (cookie) headers['Cookie'] = cookie
+  return fetch(url, { headers })
+}
+
 /** 将账号转为渲染层可见的 profile */
 function toProfile(a: NeteaseAccount): NeteaseLoginProfile {
   return {
@@ -382,9 +400,7 @@ async function fetchStatusWithCookie(
 ): Promise<{ loggedIn: boolean; profile?: NeteaseLoginProfile; invalid?: boolean }> {
   if (!cookie) return { loggedIn: false, invalid: true }
   try {
-    const resp = await fetch(`${API_BASE}/login/status`, {
-      headers: { Cookie: cookie }
-    })
+    const resp = await netFetch(`${API_BASE}/login/status`, cookie)
     if (!resp.ok) {
       console.warn(`[neteaseService] /login/status HTTP ${resp.status}`)
       return { loggedIn: false }
@@ -413,9 +429,9 @@ async function fetchStatusWithCookie(
 async function enrichAccountDetail(account: NeteaseAccount): Promise<void> {
   try {
     // 1. 账号等级 / 签名 / vipType
-    const detailResp = await fetch(
+    const detailResp = await netFetch(
       `${API_BASE}/user/detail?uid=${encodeURIComponent(account.userId)}`,
-      { headers: { Cookie: account.cookie } }
+      account.cookie
     )
     if (detailResp.ok) {
       const detail = (await detailResp.json()) as {
@@ -431,9 +447,7 @@ async function enrichAccountDetail(account: NeteaseAccount): Promise<void> {
   }
   try {
     // 2. 黑胶 VIP 等级
-    const vipResp = await fetch(`${API_BASE}/vip/info`, {
-      headers: { Cookie: account.cookie }
-    })
+    const vipResp = await netFetch(`${API_BASE}/vip/info`, account.cookie)
     if (vipResp.ok) {
       const vip = (await vipResp.json()) as { data?: { redVipLevel?: number } }
       const redVipLevel = vip.data?.redVipLevel
@@ -552,14 +566,14 @@ async function getLoginStatus(): Promise<{
  */
 async function getLoginQr(): Promise<{ unikey: string; qrimg: string }> {
   // 1. 获取二维码 key
-  const keyResp = await fetch(`${API_BASE}/login/qr/key?timestamp=${Date.now()}`)
+  const keyResp = await netFetch(`${API_BASE}/login/qr/key?timestamp=${Date.now()}`)
   if (!keyResp.ok) throw new Error(`获取二维码 key 失败: HTTP ${keyResp.status}`)
   const keyData = await keyResp.json()
   const unikey: string = keyData.data?.unikey
   if (!unikey) throw new Error('获取二维码 key 失败: 响应缺少 unikey')
 
   // 2. 生成二维码图片
-  const qrResp = await fetch(
+  const qrResp = await netFetch(
     `${API_BASE}/login/qr/create?key=${encodeURIComponent(unikey)}&qrimg=true&timestamp=${Date.now()}`
   )
   if (!qrResp.ok) throw new Error(`生成二维码失败: HTTP ${qrResp.status}`)
@@ -581,7 +595,7 @@ async function checkLoginQr(
   unikey: string
 ): Promise<{ code: number; profile?: NeteaseLoginProfile }> {
   const checkUrl = `${API_BASE}/login/qr/check?key=${encodeURIComponent(unikey)}&timestamp=${Date.now()}`
-  let resp = await fetch(checkUrl)
+  let resp = await netFetch(checkUrl)
   if (!resp.ok) {
     throw new Error(`检测扫码状态失败: HTTP ${resp.status}`)
   }
@@ -589,7 +603,7 @@ async function checkLoginQr(
 
   // 502：需要 noCookie=true 重试
   if (data.code === 502) {
-    resp = await fetch(`${checkUrl}&noCookie=true`)
+    resp = await netFetch(`${checkUrl}&noCookie=true`)
     if (!resp.ok) throw new Error(`检测扫码状态失败: HTTP ${resp.status}`)
     data = await resp.json()
   }

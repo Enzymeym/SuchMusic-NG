@@ -171,7 +171,7 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
 }
 
 // 实际加载并播放歌曲的逻辑
-const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => {
+const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false, isRetry = false) => {
   // 应用音量平衡补偿增益（覆盖手动播放、上一首/下一首、自动连播）
   applyTrackGain(song)
 
@@ -187,7 +187,23 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
   // 这里不再无条件清零，避免覆盖恢复状态/播放重试时保存的进度
 
   const currentProcessId = song.id
-  const filePath = (song as any).filePath as string | undefined
+  let filePath = (song as any).filePath as string | undefined
+
+  // 重启恢复的在线歌曲未持久化 filePath（CDN 地址会过期），按 sourceSongId 重新解析
+  if (!filePath && (song as any).source === 'netease' && (song as any).sourceSongId) {
+    try {
+      const songId = Number((song as any).sourceSongId)
+      const urlMap = await window.api.netease.songUrl([songId])
+      const freshUrl = urlMap[songId]
+      if (freshUrl) {
+        filePath = freshUrl
+        ;(song as any).filePath = freshUrl
+      }
+    } catch (e) {
+      console.warn('[PlayerBar] 重新解析网易云播放地址失败:', e)
+    }
+  }
+
   const isUrl = filePath && /^https?:\/\//.test(filePath)
 
   if (filePath && window.electron && window.electron.ipcRenderer) {
@@ -219,6 +235,20 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) =
         return
       } catch (e) {
         console.error('[PlayerBar] Failed to play remote audio:', e)
+        // 网易云在线歌曲：CDN 地址可能已过期/需登录态，重新解析一次后重试
+        if (!isRetry && (song as any).source === 'netease' && (song as any).sourceSongId) {
+          try {
+            const songId = Number((song as any).sourceSongId)
+            const urlMap = await window.api.netease.songUrl([songId])
+            const freshUrl = urlMap[songId]
+            if (freshUrl && freshUrl !== filePath) {
+              ;(song as any).filePath = freshUrl
+              return await doLoadAndPlaySong(song, forcePlay, true)
+            }
+          } catch (err) {
+            console.warn('[PlayerBar] 重新解析播放地址失败:', err)
+          }
+        }
         message.error('在线音频加载失败')
         return
       }
@@ -1563,10 +1593,10 @@ html[data-theme='dark'] .player-bar {
 
 .progress-wrapper {
   position: absolute;
-  top: -5px; /* Pull it up to overlap the border */
+  top: -6px; /* 保持贴顶观感，同时让 12px 圆形手柄完整落在 .player-bar 可视区内（不被 overflow:hidden 裁剪） */
   left: 0;
   width: 100%;
-  height: 12px; /* Increased height to accommodate handle */
+  height: 24px; /* 增高手柄居中区域，避免 hover 时圆形手柄上半部被裁掉只剩一半 */
   z-index: 1000;
   display: flex;
   align-items: center;

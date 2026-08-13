@@ -70,8 +70,8 @@ export function useUpdater() {
   // 自动检查结果监听回调
   const autoCheckCallback = (result: UpdateCheckResult) => {
     if (result.error) {
-      error.value = result.error
-      status.value = 'error'
+      // 启动时的自动检查失败（如网络异常）保持静默，不向用户弹错误提示
+      console.warn('[useUpdater] 自动检查更新失败:', result.error)
       return
     }
 

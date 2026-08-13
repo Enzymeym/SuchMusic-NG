@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, shell } from 'electron'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
 import { join } from 'path'
 import { existsSync, mkdirSync } from 'fs'
@@ -155,6 +155,28 @@ app.whenReady().then(() => {
 
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
+
+  // 注册系统媒体键（耳机线控 / 键盘媒体键），转发给渲染进程复用 player:control 处理器。
+  // 主进程拦截可保证应用窗口未聚焦（甚至隐藏到托盘）时媒体键仍能控制播放。
+  const registerMediaKeyShortcuts = () => {
+    const sendControl = (action: string) => {
+      const win = getMainWindow()
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('player:control', action)
+      }
+    }
+    try {
+      globalShortcut.register('MediaPlayPause', () => sendControl('toggle'))
+      globalShortcut.register('MediaNextTrack', () => sendControl('next'))
+      globalShortcut.register('MediaPreviousTrack', () => sendControl('prev'))
+    } catch (err) {
+      console.warn('媒体键注册失败:', err)
+    }
+  }
+  registerMediaKeyShortcuts()
+  app.on('will-quit', () => {
+    globalShortcut.unregisterAll()
+  })
 
   // Register IPC handlers
   registerAudioHandlers()

@@ -155,6 +155,8 @@ export async function checkForUpdate(channel: 'stable' | 'beta' = 'stable'): Pro
     const release = await fetchLatestRelease(channel)
 
     if (!release) {
+      // 未找到可用的 Release（含网络异常导致拉取失败）不作为错误返回，
+      // 否则启动自动检查时会向用户弹错误横幅
       return {
         hasUpdate: false,
         currentVersion,
@@ -163,8 +165,7 @@ export async function checkForUpdate(channel: 'stable' | 'beta' = 'stable'): Pro
         releaseNotes: '',
         downloadUrl: null,
         publishedAt: '',
-        isPrerelease: false,
-        error: '未找到可用的 Release'
+        isPrerelease: false
       }
     }
 

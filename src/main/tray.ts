@@ -21,9 +21,11 @@ export function createTray(): void {
     const image = nativeImage.createFromPath(getTrayIconPath())
     let icon = image
     if (process.platform === 'darwin') {
-      // macOS 菜单栏图标标准尺寸为 16x16pt，且需为模板图像以适配菜单栏深浅色
+      // macOS 菜单栏图标标准尺寸为 16x16pt。
+      // 注意：不要对全彩图标调用 setTemplateImage(true) —— 模板图像必须是「黑色+透明度」两通道图，
+      // 系统只按 alpha 蒙版着色；全彩图标被强制模板化后会渲染成纯白/纯黑块。
+      // 这里直接使用彩色图标，深浅色菜单栏下都清晰可见。
       icon = image.resize({ width: 16, height: 16 })
-      icon.setTemplateImage(true)
     }
     tray = new Tray(icon)
   } catch (e) {

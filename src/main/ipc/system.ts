@@ -3,6 +3,7 @@ import { promises as fs, createWriteStream } from 'fs'
 import path from 'path'
 import axios from 'axios'
 import { mainMemoryMonitor } from '../utils/memoryMonitor'
+import { getActiveNeteaseCookie } from '../services/neteaseService'
 
 export function registerSystemHandlers(): void {
   // 获取主进程内存统计报告（用于验证内存优化效果）
@@ -133,7 +134,14 @@ export function registerSystemHandlers(): void {
       const response = await axios({
         url,
         method: 'GET',
-        responseType: 'stream'
+        responseType: 'stream',
+        // 附加登录态，保证登录后获取的高音质 CDN 地址可正常下载
+        headers: {
+          Cookie: getActiveNeteaseCookie() || undefined,
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          Referer: 'https://music.163.com'
+        }
       })
 
       const writer = createWriteStream(targetPath)

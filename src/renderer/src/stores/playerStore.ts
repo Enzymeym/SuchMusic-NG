@@ -424,7 +424,9 @@ export const usePlayerStore = defineStore('player', {
           artist: song.artist,
           album: song.album,
           durationMs: song.durationMs,
-          filePath: song.filePath,
+          // 在线歌曲的 CDN 地址会过期（登录后返回的地址也依赖登录态），
+          // 不持久化，重启后由 PlayerBar 按 sourceSongId 重新解析，避免「启动即下载失败弹窗」
+          filePath: song.source === 'netease' ? '' : song.filePath,
           source: song.source,
           sourceSongId: song.sourceSongId,
           cover:

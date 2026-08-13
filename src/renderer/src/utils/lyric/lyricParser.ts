@@ -36,7 +36,9 @@ export function stripLyricMetadata(content: string): string {
 }
 
 /**
- * 将解析后的翻译歌词按行顺序合并到主歌词行中
+ * 将解析后的翻译歌词按时间戳合并到主歌词行中
+ * 主歌词可能包含间奏/纯音乐行（翻译歌词无对应行），按下标匹配会错位，
+ * 因此改为按时间戳就近匹配
  * @param mainLines 主歌词行数组（已解析）
  * @param translatedContent 翻译歌词文本（LRC 格式，可选）
  * @returns 合并了 translatedLyric 的歌词行数组
@@ -54,11 +56,22 @@ function mergeTranslatedLyrics(mainLines: CoreLyricLine[], translatedContent?: s
     return mainLines
   }
 
-  const maxLen = Math.min(mainLines.length, translatedLines.length)
-  for (let i = 0; i < maxLen; i++) {
-    const translatedText = translatedLines[i].words[0]?.word ?? ''
+  if (translatedLines.length === 0) return mainLines
+
+  // 双指针按时间戳就近匹配（两数组均按时间升序）
+  let j = 0
+  for (const mainLine of mainLines) {
+    // 向前推进 j，使 translatedLines[j] 是与 mainLine.startTime 最接近的翻译行
+    while (
+      j + 1 < translatedLines.length &&
+      Math.abs(translatedLines[j + 1].startTime - mainLine.startTime) <
+        Math.abs(translatedLines[j].startTime - mainLine.startTime)
+    ) {
+      j++
+    }
+    const translatedText = translatedLines[j].words[0]?.word ?? ''
     if (translatedText) {
-      mainLines[i] = { ...mainLines[i], translatedLyric: translatedText }
+      mainLine.translatedLyric = translatedText
     }
   }
 
@@ -223,8 +236,10 @@ export function parseLyricsToCore(content: string, translatedContent?: string): 
       console.log('[lyricParser] 检测到 QRC XML 格式')
       lines = parseQrc(lrc)
     }
-    // YRC (Guess by content)
-    else if (/\(\d+,\d+\)/.test(lrc)) {
+    // YRC (行级时间戳为 [数字,数字] 毫秒格式，而非 LRC 的 [mm:ss.xx])
+    // 注意：不能仅凭行内出现 (数字,数字) 判定 —— 网易云逐字歌词
+    // （LRC 时间戳 + 行尾 (0,0,150) 标记）也会命中该模式，会导致误判而整首跳过
+    else if (/^\[\d+,\d+\]/m.test(lrc)) {
       console.log('[lyricParser] 检测到 YRC 逐字歌词格式')
       const yrcLinesCount = (lrc.match(/\(\d+,\d+\)/g) || []).length
       console.log(`[lyricParser] YRC 词级时间戳数量: ${yrcLinesCount}, 首行预览: ${lrc.split('\n')[0]?.substring(0, 100)}`)
@@ -235,6 +250,14 @@ export function parseLyricsToCore(content: string, translatedContent?: string): 
     else if (/\[\d{1,2}:\d{1,2}/.test(lrc)) {
       console.log('[lyricParser] 未检测到特殊格式，回退到 LRC 解析')
       console.log(`[lyricParser] 内容首行预览: ${lrc.split('\n')[0]?.substring(0, 100)}`)
+      // 网易云逐字歌词（wordLyric）：LRC 时间戳 + 词后逐字标记 (start,dur,flag)，
+      // 剥离标记后按普通 LRC 解析，避免标记残留在歌词文本中
+      lrc = lrc
+        .split(/\r?\n/)
+        .map((line) =>
+          line.replace(/^(\[[^\]]+\])(.*)$/, (_m, ts: string, rest: string) => ts + rest.replace(/\(\d+,\d+,\d+\)/g, ''))
+        )
+        .join('\n')
       lines = parseBetterLrc(lrc)
     }
     // 纯文本歌词（无 LRC 时间戳）：按换行拆分，均匀分配时间

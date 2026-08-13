@@ -277,7 +277,9 @@ html[data-theme='dark'] .float-collapse-btn {
   position: absolute;
   top: 0;
   left: 0;
-  width: 24px;
+  /* 加宽热区：覆盖到胶囊滑出后的主体位置，避免鼠标从热区移到胶囊的
+     过渡区间触发 :hover 丢失导致胶囊反复展开/收回的闪烁 */
+  width: 64px;
   height: 100vh;
   pointer-events: auto;
 }
@@ -383,14 +385,22 @@ html[data-theme='dark'] .collapse-indicator {
   transform: translateY(-40px) translateX(-60px);
   transition:
     transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1),
-    opacity 0.3s ease;
+    opacity 0.3s ease,
+    /* 收起时延迟隐藏，避免鼠标短暂脱离触发区导致胶囊闪灭 */
+    visibility 0s linear 0.3s;
   opacity: 0;
+  visibility: hidden;
 }
 
 .capsule-wrapper:hover .capsule-tab {
   /* 悬停时往右移出一点，留出边距 */
   transform: translateY(-40px) translateX(12px);
   opacity: 1;
+  visibility: visible;
+  transition:
+    transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1),
+    opacity 0.3s ease,
+    visibility 0s;
 }
 
 html[data-theme='dark'] .capsule-tab {

@@ -91,13 +91,14 @@
   line-height: 1.2;
 }
 
-/* 顶部关闭按钮栏，绝对定位在右上角 */
+/* 顶部关闭按钮栏：作为卡片首行（流式布局），右对齐，不再悬浮遮挡内容 */
 .modal-topbar {
-  position: absolute; /* 悬浮在内容之上 */
-  top: 12px;          /* 距离顶部偏移 */
-  right: 16px;        /* 距离右侧偏移 */
-  display: flex;      /* 包裹关闭按钮 */
-  z-index: 10;        /* 确保在内容之上 */
+  display: flex;              /* 包裹关闭按钮 */
+  justify-content: flex-end;  /* 右对齐 */
+  align-items: center;
+  height: 44px;
+  padding: 8px 16px 0 0;
+  flex-shrink: 0;
 }
 
 /* Scrollbar 内容区域留出内边距，避免贴边 */

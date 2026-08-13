@@ -137,6 +137,14 @@ const handleUserButtonClick = () => {
   }
 }
 
+// 关闭账号面板时停止 QR 轮询：避免面板收起后仍每 3 秒请求一次检测接口，
+// 造成接口限流（429）而无法重新登录
+watch(showUserPanel, (visible) => {
+  if (!visible) {
+    stopQrPolling()
+  }
+})
+
 const handleRefreshQr = () => {
   loadLoginQr()
 }

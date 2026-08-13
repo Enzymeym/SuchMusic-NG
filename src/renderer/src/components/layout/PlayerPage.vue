@@ -51,7 +51,9 @@ const {
   handleTouchStart,
   handleTouchMove,
   handleTouchEnd,
-  closePage
+  closePage,
+  pauseHideControls,
+  resumeHideControls
 } = usePlayerControls()
 
 const {
@@ -508,7 +510,12 @@ watch(
           </div>
 
           <!-- Footer Control Area -->
-          <div class="footer-area" :class="{ 'hide-controls': !isControlsVisible }">
+          <div
+            class="footer-area"
+            :class="{ 'hide-controls': !isControlsVisible }"
+            @mouseenter="pauseHideControls"
+            @mouseleave="resumeHideControls"
+          >
             <!-- Top Actions (Mobile Only) -->
             <div class="mobile-top-actions">
               <n-button text circle @click="toggleFavorite" class="mobile-action-btn">
@@ -623,7 +630,7 @@ watch(
               >
                 <template #trigger>
                   <n-button quaternary class="action-btn" @click="showVisualizerControls = !showVisualizerControls">
-                    <n-icon size="22"><i class="mgc_equalizer_line"></i></n-icon>
+                    <n-icon size="22"><i class="mgc_wave_line"></i></n-icon>
                   </n-button>
                 </template>
                 <AudioVisualizerControls />

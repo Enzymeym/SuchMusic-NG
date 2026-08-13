@@ -86,6 +86,27 @@ export function usePlayerControls() {
   }
 
   /**
+   * 鼠标进入底栏时暂停隐藏计时器，避免停留在底栏上时反复闪烁
+   */
+  const pauseHideControls = () => {
+    if (hideControlsTimer) {
+      clearTimeout(hideControlsTimer)
+      hideControlsTimer = null
+    }
+  }
+
+  /**
+   * 鼠标离开底栏时重新开始隐藏计时
+   */
+  const resumeHideControls = () => {
+    if (!autoHideFooterEnabled.value) return
+    pauseHideControls()
+    hideControlsTimer = setTimeout(() => {
+      isControlsVisible.value = false
+    }, 3000)
+  }
+
+  /**
    * 处理用户活动，显示控制条
    */
   const handleActivity = () => {
@@ -374,6 +395,8 @@ export function usePlayerControls() {
     isFullscreen,
     playerPageRef,
     showControls,
+    pauseHideControls,
+    resumeHideControls,
     handleActivity,
     toggleFullscreen,
     togglePlay,

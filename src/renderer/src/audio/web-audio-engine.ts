@@ -165,6 +165,8 @@ export class WebAudioOutputEngine {
   private _isPlaying = false
   private _isPaused = false
   private _pausedOffset = 0 // 暂停时的播放位置（秒）
+  /** 进行中的 suspend Promise：快速 pause→play 时 play 需先等待其完成，避免竞态 */
+  private _pendingSuspend: Promise<void> | null = null
   private _startTime = 0 // context.currentTime 记录
   private _sampleRate = 44100
   private _channels = 2
@@ -193,7 +195,8 @@ export class WebAudioOutputEngine {
     const ctx = new AudioContextClass({ sampleRate })
     const gain = ctx.createGain()
     gain.gain.value = 1.0
-    gain.connect(ctx.destination)
+    // 注意：masterGain 的输出连接统一由 doPlay/attachDspChain 路由，
+    // 这里不再直连 destination，避免与后续 analyser/DSP 链路形成多路并联（重音根因）
     this.audioContext = ctx
     this.masterGain = gain
 
@@ -262,7 +265,6 @@ export class WebAudioOutputEngine {
       ctx = new AudioContextClass() as AudioContext
       gain = ctx.createGain()
       gain.gain.value = 1.0
-      gain.connect(ctx.destination)
       this.audioContext = ctx
       this.masterGain = gain
       this.restoreAnalyserIfNeeded()
@@ -306,7 +308,6 @@ export class WebAudioOutputEngine {
       ctx = new AudioContextClass() as AudioContext
       const gain = ctx.createGain()
       gain.gain.value = 1.0
-      gain.connect(ctx.destination)
       this.audioContext = ctx
       this.masterGain = gain
       this.restoreAnalyserIfNeeded()
@@ -358,30 +359,53 @@ export class WebAudioOutputEngine {
     this._isPaused = false
   }
 
+  /**
+   * 将 DSP 链立即接入输出链路（播放中打开音效面板时实时生效）。
+   * 若 AudioContext 尚未就绪，仅记录引用，待 doPlay 时统一路由。
+   */
+  attachDspChain(chain: WebAudioDspChain): void {
+    this.dspChain = chain
+    if (this.audioContext && this.masterGain) {
+      // 断开 masterGain 全部旧输出，确保仅保留唯一输出路径
+      try {
+        this.masterGain.disconnect()
+      } catch {
+        /* 忽略 */
+      }
+      const finalDest = this.analyserNode ?? this.audioContext.destination
+      chain.connect(this.masterGain, finalDest)
+    }
+  }
+
   // ====== 播放控制 ======
 
   /**
    * 开始/恢复播放
    * @param offsetSeconds 从指定秒数开始播放（用于 seek），默认 0
+   * @returns 是否成功进入播放状态
    */
-  play(offsetSeconds: number = 0): void {
+  async play(offsetSeconds: number = 0): Promise<boolean> {
     if (!this.audioContext || !this.audioBuffer || !this.masterGain) {
-      return
+      return false
     }
 
-    // 确保 AudioContext 运行 — 但即使 resume 失败也要尝试播放（start 会在挂起的 context 上排队）
+    // 等待上一次 suspend 完成，避免快速 pause→play 时 AudioContext 被冻结（外部媒体控制栏续播竞态）
+    if (this._pendingSuspend) {
+      await this._pendingSuspend.catch(() => {})
+      this._pendingSuspend = null
+    }
+
+    // 确保 AudioContext 运行 — 即使 resume 失败也要尝试播放（start 会在挂起的 context 上排队）
     if (this.audioContext.state === 'suspended') {
-      this.audioContext
-        .resume()
-        .then(() => this.doPlay(offsetSeconds))
-        .catch((err) => {
-          console.warn('[WebAudioEngine] AudioContext resume failed, attempting playback:', err)
-          this.doPlay(offsetSeconds)
-        })
-      return
+      try {
+        await this.audioContext.resume()
+      } catch (err) {
+        console.warn('[WebAudioEngine] AudioContext resume failed, attempting playback:', err)
+      }
     }
 
     this.doPlay(offsetSeconds)
+    return true
   }
 
   /** 实际执行播放的内部方法 */
@@ -411,6 +435,14 @@ export class WebAudioOutputEngine {
     // 连接链路：sourceA -> gainA -> masterGain -> [可选 DSP 链] -> [可选 AnalyserNode] -> destination
     // 用户音量（masterGain）放在 DSP 链之前，让限制器/软限幅器捕获 boost 后的峰值
     this.sourceA.connect(this.gainA)
+
+    // 单一路径路由：先断开 masterGain 的全部旧输出（可能残留 init 遗留的 destination 直连），
+    // 避免干/湿双路并联导致的「重音」及「EQ 被干声掩盖听不出效果」
+    try {
+      this.masterGain.disconnect()
+    } catch {
+      /* 忽略 */
+    }
 
     // AnalyserNode 已在 ensureAnalyserNode 中建立到 destination 的持久连接
     const finalDest = this.analyserNode ?? ctx.destination
@@ -462,7 +494,8 @@ export class WebAudioOutputEngine {
     this._isPlaying = false
 
     if (this.audioContext.state === 'running') {
-      this.audioContext.suspend().catch(() => {
+      // 记录 suspend Promise，供 play() 在快速 pause→play 时先等待其完成
+      this._pendingSuspend = this.audioContext.suspend().catch(() => {
         /* 忽略 suspend 失败 */
       })
     }
@@ -471,11 +504,11 @@ export class WebAudioOutputEngine {
   /**
    * 恢复播放
    */
-  resume(): void {
+  async resume(): Promise<boolean> {
     if (!this.audioContext || !this._isPaused) {
-      return
+      return false
     }
-    this.play()
+    return this.play()
   }
 
   /**
@@ -488,6 +521,7 @@ export class WebAudioOutputEngine {
     this._isPlaying = false
     this._isPaused = false
     this._pausedOffset = 0
+    this._pendingSuspend = null
     this._startTime = 0
   }
 

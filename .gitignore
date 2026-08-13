@@ -16,3 +16,4 @@ src/renderer/src/utils/supabase.ts
 .trae
 .trae/specs
 docs
+.dbg
