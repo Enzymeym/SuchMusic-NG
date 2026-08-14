@@ -211,6 +211,25 @@ const handleCustomColorChange = (color: string | null) => {
       </div>
     </n-card>
 
+    <div class="section-group-title" style="margin-top: 24px;">首页设置</div>
+
+    <n-card
+      class="setting-item"
+      :class="{ 'setting-item--highlight': props.highlightKey === 'appearance.homeShowInfoCards' }"
+      data-setting-key="appearance.homeShowInfoCards"
+      :bordered="true"
+      size="small"
+      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">首页信息展示卡片</div>
+          <div class="sub-label">开启后首页显示歌曲 / 专辑推荐卡片；关闭后显示随时间变化的问候标语</div>
+        </div>
+        <n-switch v-model:value="settingsStore.appearance.homeShowInfoCards" />
+      </div>
+    </n-card>
+
     <div class="section-group-title" style="margin-top: 24px;">播放页布局</div>
 
     <n-card

@@ -91,14 +91,12 @@
   line-height: 1.2;
 }
 
-/* 顶部关闭按钮栏：作为卡片首行（流式布局），右对齐，不再悬浮遮挡内容 */
+/* 关闭按钮悬浮在卡片右上角，不占用头部栏空间（去除顶部灰色栏） */
 .modal-topbar {
-  display: flex;              /* 包裹关闭按钮 */
-  justify-content: flex-end;  /* 右对齐 */
-  align-items: center;
-  height: 44px;
-  padding: 8px 16px 0 0;
-  flex-shrink: 0;
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
 }
 
 /* Scrollbar 内容区域留出内边距，避免贴边 */
@@ -156,15 +154,26 @@
   color: var(--settings-subtext-color);
 }
 
-/* 通用关闭按钮样式 */
+/* 关闭按钮：仅按钮自身背景区域带渐进模糊（半透明基底 + backdrop blur），
+   悬浮在内容之上时其下的内容会被柔和模糊，形成毛玻璃效果 */
 .close-btn {
   cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background-color 0.2s;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--n-color) 65%, transparent),
+    color-mix(in srgb, var(--n-color) 30%, transparent)
+  );
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition:
+    background-color 0.2s ease,
+    transform 0.15s ease;
 }
 
 /* 关闭按钮图标颜色 */
@@ -172,9 +181,14 @@
   color: var(--settings-close-icon-color);
 }
 
-/* 悬停时关闭按钮背景色 */
+/* 悬停时背景渐进增强，图标微放大 */
 .close-btn:hover {
-  background-color: var(--settings-close-hover-bg);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--n-color) 85%, transparent),
+    color-mix(in srgb, var(--n-color) 55%, transparent)
+  );
+  transform: scale(1.06);
 }
 
 /* 关于区域整体布局 */

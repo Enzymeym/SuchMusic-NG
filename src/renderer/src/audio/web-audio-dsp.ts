@@ -145,7 +145,10 @@ export class WebAudioDspChain {
 
     // 如果已构建内部节点且 AudioContext 未变，仅重新连线输入/输出
     if (this._builtNodes.length > 0 && this._ctx === ctx) {
-      this.disconnectInputOutput()
+      // 注意：这里不能先断开 eqNodes[0] 的全部输出 —— AudioNode.disconnect()
+      // 会切断其所有输出连接（包括 EQ[0] → EQ[1] 的内部链），导致整条链路静音。
+      // 旧的外部输入连接由调用方（masterGain.disconnect）清理，重复 connect
+      // 同一输入/输出对是幂等的，因此直接接线即可。
       this.wireInputOutput(inputNode, outputNode)
       this._isConnected = true
       return
@@ -265,6 +268,10 @@ export class WebAudioDspChain {
 
   /** 仅连接输入/输出（内部链已在 buildChain 中连接好，无需重建） */
   private wireInputOutput(inputNode: AudioNode, outputNode: AudioNode): void {
+    // 先断开输出端的旧连接：只断 softClipperPostGain（链的末端）即可清理
+    // 上次接线遗留的输出，绝不能动 eqNodes[0] —— AudioNode.disconnect() 会切断
+    // 其所有输出（含 EQ[0] → EQ[1] 内部链），导致整条链路静音。
+    try { this.softClipperPostGain?.disconnect() } catch { /* ignore */ }
     // 输入：inputNode → 第一个 EQ 节点
     if (this.eqNodes.length > 0) {
       inputNode.connect(this.eqNodes[0])
@@ -273,12 +280,6 @@ export class WebAudioDspChain {
     if (this.softClipperPostGain) {
       this.softClipperPostGain.connect(outputNode)
     }
-  }
-
-  /** 仅断开输入/输出连线（内部链保持完整） */
-  private disconnectInputOutput(): void {
-    try { this.eqNodes[0]?.disconnect() } catch { /* ignore */ }
-    try { this.softClipperPostGain?.disconnect() } catch { /* ignore */ }
   }
 
   /**

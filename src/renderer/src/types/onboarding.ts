@@ -85,6 +85,13 @@ export const EQ_PRESETS: EqPreset[] = [
  */
 export const SETUP_WIZARD_STEPS: SetupWizardStep[] = [
   {
+    id: 'privacy',
+    title: '隐私政策与在线服务声明',
+    subtitle: '请阅读并同意以下条款后继续使用',
+    icon: 'mgc_shield_line',
+    skippable: false
+  },
+  {
     id: 'welcome',
     title: '欢迎使用 Such',
     subtitle: '一款精致的本地音乐播放器，为你带来卓越的听觉享受',
@@ -103,34 +110,6 @@ export const SETUP_WIZARD_STEPS: SetupWizardStep[] = [
     title: '音频引擎',
     subtitle: '选择适合你设备的音频输出模式，获得最佳音质',
     icon: 'mgc_speaker_line',
-    skippable: false
-  },
-  {
-    id: 'feature-1',
-    title: '新功能更新',
-    subtitle: '本次版本带来了诸多体验优化',
-    icon: 'mgc_sparkles_line',
-    skippable: true
-  },
-  {
-    id: 'feature-2',
-    title: '新功能更新',
-    subtitle: '更强大的音频播放能力',
-    icon: 'mgc_headphone_line',
-    skippable: true
-  },
-  {
-    id: 'feature-3',
-    title: '新功能更新',
-    subtitle: '更灵活的音乐管理方式',
-    icon: 'mgc_folder_star_line',
-    skippable: true
-  },
-  {
-    id: 'feature-4',
-    title: '准备就绪',
-    subtitle: '一切就绪，开始享受音乐吧',
-    icon: 'mgc_rocket_line',
     skippable: false
   }
 ]

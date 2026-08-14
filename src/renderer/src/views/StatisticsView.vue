@@ -52,6 +52,16 @@ const topSongs = computed(() => getTopItems('songId', 4))
 
 const totalPlaysCount = computed(() => totalPlays.value)
 
+// 总播放时长（基于每条播放记录的歌曲时长求和）
+const totalPlayDuration = computed(() => {
+  const totalMs = allHistory.value.reduce((sum, r) => sum + (r.durationMs || 0), 0)
+  const totalSeconds = Math.floor(totalMs / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  if (hours > 0) return `${hours} 小时 ${minutes} 分钟`
+  return `${minutes} 分钟`
+})
+
 const getTopItem = (key: 'songId' | 'artist' | 'album') => {
   const history = allHistory.value
   if (history.length === 0) return null
@@ -140,12 +150,16 @@ const handlePlaySong = (item: ReturnType<typeof getTopItems>[number]) => {
                 <div class="month">音乐回忆</div>
                 <div class="year">全部时间</div>
               </div>
-              <div class="play-total-group">
-                <div class="total-count">{{ totalPlaysCount }}</div>
-                <div class="total-label">总播放</div>
-              </div>
-              <div class="play-btn-circle">
-                <n-icon size="24" color="white"><i class="mgc_play_fill"></i></n-icon>
+              <div class="play-stats">
+                <div class="play-total-group">
+                  <div class="total-count">{{ totalPlaysCount }}</div>
+                  <div class="total-label">总播放</div>
+                </div>
+                <div class="stats-divider"></div>
+                <div class="play-duration-group">
+                  <div class="total-duration">{{ totalPlayDuration }}</div>
+                  <div class="total-label">总播放时长</div>
+                </div>
               </div>
             </div>
             <!-- 中间：精彩回顾 -->
@@ -316,7 +330,8 @@ const handlePlaySong = (item: ReturnType<typeof getTopItems>[number]) => {
   color: white;
   display: grid;
   backdrop-filter: blur(100px);
-  grid-template-columns: 1.5fr 2fr 1fr;
+  /* minmax(0, ...) 防止内容（如长歌名）撑破 fr 轨道导致卡片溢出 */
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 2fr) minmax(0, 1fr);
   gap: 24px;
   min-height: 200px;
   z-index: 1;
@@ -341,6 +356,7 @@ const handlePlaySong = (item: ReturnType<typeof getTopItems>[number]) => {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  min-width: 0; /* 允许在窄容器内收缩，防止长文本撑破网格 */
   padding-right: 24px;
   border-right: 1px solid rgba(255, 255, 255, 0.1);
 }
@@ -355,7 +371,7 @@ const handlePlaySong = (item: ReturnType<typeof getTopItems>[number]) => {
   margin-top: 4px;
 }
 .total-count {
-  font-size: 36px;
+  font-size: 24px;
   font-weight: bold;
   line-height: 1;
 }
@@ -364,25 +380,25 @@ const handlePlaySong = (item: ReturnType<typeof getTopItems>[number]) => {
   opacity: 0.8;
   margin-top: 4px;
 }
-.play-btn-circle {
-  position: absolute;
-  right: 24px;
-  bottom: 6px;
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background-color: rgba(255, 255, 255, 0.1);
+.play-stats {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: background-color 0.2s;
+  align-items: baseline; /* 让播放次数与时长数字基线对齐 */
+  gap: 16px;
 }
-.play-btn-circle:hover {
-  background-color: rgba(255, 255, 255, 0.2);
+.stats-divider {
+  align-self: center;
+  width: 1px;
+  height: 36px;
+  background: rgba(255, 255, 255, 0.2);
+}
+.total-duration {
+  font-size: 18px;
+  font-weight: bold;
+  line-height: 1;
+  white-space: nowrap;
 }
 .stats-middle {
-  max-width: 600px;
+  min-width: 0; /* 移除原 max-width: 600px，让中间列随卡片宽度自适应 */
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -460,6 +476,7 @@ const handlePlaySong = (item: ReturnType<typeof getTopItems>[number]) => {
   gap: 12px;
 }
 .stats-right {
+  min-width: 0;
   padding-left: 24px;
   border-left: 1px solid rgba(255, 255, 255, 0.1);
   display: flex;
@@ -676,7 +693,7 @@ const handlePlaySong = (item: ReturnType<typeof getTopItems>[number]) => {
    ============================================ */
 @media (max-width: 950px) {
   .stats-card {
-    grid-template-columns: 1fr 1.5fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
     padding: 24px;
   }
   .stats-right {
@@ -686,7 +703,7 @@ const handlePlaySong = (item: ReturnType<typeof getTopItems>[number]) => {
 
 @media (max-width: 768px) {
   .stats-card {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 18px;
     padding: 20px;
   }
@@ -716,6 +733,10 @@ const handlePlaySong = (item: ReturnType<typeof getTopItems>[number]) => {
 @media (max-width: 480px) {
   .month {
     font-size: 28px;
+  }
+
+  .highlight-row {
+    grid-template-columns: 1fr; /* 窄屏下两个小卡片改为纵向堆叠，避免挤压 */
   }
 }
 </style>

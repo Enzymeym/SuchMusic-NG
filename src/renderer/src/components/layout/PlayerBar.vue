@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch, onMounted } from 'vue'
+import { computed, onBeforeUnmount, ref, watch, onMounted, h } from 'vue'
 import {
   NSlider,
   NIcon,
@@ -15,7 +15,8 @@ import {
   useMessage,
   NBadge,
   NCheckbox,
-  useDialog
+  useDialog,
+  NModal
 } from 'naive-ui'
 import { usePlayerStore, type PlayerSong } from '../../stores/playerStore'
 import { usePlaylistStore } from '../../stores/playlistStore'
@@ -28,6 +29,7 @@ import { useDesktopLyric } from '../../composables/useDesktopLyric'
 import { useTaskbarLyric } from '../../composables/useTaskbarLyric'
 import { AudioPlayerManager } from '../../utils/audioPlayerManager'
 import SoundEffectsModal from '../common/SoundEffectsModal.vue'
+import AudioVisualizerControls from '../common/AudioVisualizerControls.vue'
 import ShinyText from '../common/ShinyText.vue'
 import { useRouter } from 'vue-router'
 import { getTransitionController } from '../../audio/transition-controller'
@@ -65,6 +67,9 @@ const {
 
 // 音效调节弹窗
 const showSoundEffectsModal = ref(false)
+
+// 音频可视化设置弹窗
+const showVisualizerModal = ref(false)
 
 // Automix 智能过渡调度控制器（任务 4）
 const transitionController = getTransitionController()
@@ -644,19 +649,38 @@ const playbackRateOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((rate) => ({
 }))
 
 /**
- * 更多菜单选项
+ * 生成下拉菜单选项图标（mingcute 字体图标）
+ */
+const menuIcon = (cls: string) => () => h('i', { class: cls })
+
+/**
+ * 更多菜单选项（整合可视化 / 音效设置 / 更多功能入口）
  */
 const moreMenuOptions = computed(() => [
   {
+    label: '音频可视化',
+    key: 'visualizer',
+    icon: menuIcon('mgc_wave_line')
+  },
+  {
+    label: '音效设置',
+    key: 'sound-effects',
+    icon: menuIcon('mgc_settings_2_line')
+  },
+  {
+    type: 'divider' as const,
+    key: 'divider-0'
+  },
+  {
     label: '歌词偏移',
     key: 'lyrics-offset-header',
-    icon: () => null,
+    icon: menuIcon('mgc_time_line'),
     children: lyricsOffsetOptions
   },
   {
     label: '播放速度',
     key: 'playback-rate-header',
-    icon: () => null,
+    icon: menuIcon('mgc_fast_forward_line'),
     children: playbackRateOptions
   },
   {
@@ -666,6 +690,7 @@ const moreMenuOptions = computed(() => [
   {
     label: '搜索同名歌曲',
     key: 'search-same-name',
+    icon: menuIcon('mgc_search_line'),
     disabled: !player.currentSong?.title
   }
 ])
@@ -677,6 +702,17 @@ const moreMenuOptions = computed(() => [
 const handleMoreMenuSelect = (key: string) => {
   showMoreMenu.value = false
 
+  // 音频可视化设置
+  if (key === 'visualizer') {
+    showVisualizerModal.value = true
+    return
+  }
+
+  // 音效设置
+  if (key === 'sound-effects') {
+    showSoundEffectsModal.value = true
+    return
+  }
   // 歌词偏移选项
   if (key.startsWith('lyrics-offset-')) {
     const offset = parseFloat(key.replace('lyrics-offset-', ''))
@@ -1379,20 +1415,17 @@ watch(
       >
         <n-icon size="22" style="margin-left: -5px"><i class="mgc_text_line"></i></n-icon>
       </n-button>
-      <n-button quaternary class="action-btn" @click="showSoundEffectsModal = true">
-        <n-icon size="22" style="margin-left: -5px"><i class="mgc_settings_2_line"></i></n-icon>
-      </n-button>
-
       <n-dropdown
         trigger="click"
         :options="moreMenuOptions"
         :show="showMoreMenu"
         :to="drawerTarget"
+        class="player-page-dropdown"
         @select="handleMoreMenuSelect"
         @update:show="(val: boolean) => (showMoreMenu = val)"
       >
-        <n-button quaternary class="action-btn">
-          <n-icon size="22" style="margin-left: -5px"><i class="mgc_more_2_line"></i></n-icon>
+        <n-button quaternary class="action-btn" title="更多设置">
+          <n-icon size="22" style="margin-left: -5px"><i class="mgc_settings_2_line"></i></n-icon>
         </n-button>
       </n-dropdown>
 
@@ -1540,6 +1573,7 @@ watch(
               trigger="click"
               :options="batchActionOptions"
               @select="handleBatchActionSelect"
+              class="player-page-dropdown"
             >
               <n-button size="small" quaternary :disabled="selectedIds.size === 0">
                 <template #icon
@@ -1570,20 +1604,32 @@ watch(
 
     <!-- 音效调节弹窗 -->
     <sound-effects-modal v-model:show="showSoundEffectsModal" />
+
+    <!-- 音频可视化设置弹窗 -->
+    <n-modal
+      v-model:show="showVisualizerModal"
+      :mask-closable="true"
+      :close-on-esc="true"
+      preset="card"
+      title="音频可视化设置"
+      :style="{ width: '340px' }"
+    >
+      <AudioVisualizerControls />
+    </n-modal>
   </div>
 </template>
 
 <style scoped>
 .player-bar {
   position: relative;
-  display: flex;
-  justify-content: space-between;
+  /* 三栏 grid：左右 1fr 等宽，中间 auto，使中间控制按钮严格水平居中 */
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
   height: 100%;
-  padding: 12px 16px 13px;
+  padding: 18px 16px 12px 13px;
   background-color: #fff;
   gap: 16px;
-  flex-wrap: nowrap;
   overflow: hidden;
 }
 
@@ -1593,10 +1639,10 @@ html[data-theme='dark'] .player-bar {
 
 .progress-wrapper {
   position: absolute;
-  top: -6px; /* 保持贴顶观感，同时让 12px 圆形手柄完整落在 .player-bar 可视区内（不被 overflow:hidden 裁剪） */
+  top: 0; /* 紧贴 .player-bar 顶部，不再向上溢出也不侵入内容区（内容从 padding-top 12px 开始） */
   left: 0;
   width: 100%;
-  height: 24px; /* 增高手柄居中区域，避免 hover 时圆形手柄上半部被裁掉只剩一半 */
+  height: 12px; /* 恰好容纳 12px 圆形手柄完整落入可视区（rail 居中），避免 hover 时手柄被裁成半圆 */
   z-index: 1000;
   display: flex;
   align-items: center;
@@ -1666,7 +1712,7 @@ html[data-theme='dark'] .progress-wrapper :deep(.n-slider .n-slider-rail) {
   gap: 11px;
   min-width: 200px;
   max-width: 350px;
-  flex: 1;
+  justify-self: start;
   overflow: hidden;
 }
 
@@ -1733,11 +1779,10 @@ html[data-theme='dark'] .progress-wrapper :deep(.n-slider .n-slider-rail) {
 }
 
 .player-controls {
-  flex: 1;
+  justify-self: center;
   display: flex;
   justify-content: center;
   align-items: center;
-  min-width: 200px;
 }
 
 .control-buttons {
@@ -1767,12 +1812,10 @@ html[data-theme='dark'] .progress-wrapper :deep(.n-slider .n-slider-rail) {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-right: 0;
-  width: auto;
+  justify-self: end;
   min-width: 250px;
   max-width: 350px;
   justify-content: flex-end;
-  flex: 1;
   flex-shrink: 0;
 }
 
@@ -2055,5 +2098,71 @@ html[data-theme='dark'] .item-cover {
 .volume-slider :deep(.n-slider:hover .n-slider-handle) {
   width: 14px;
   height: 14px;
+}
+
+/* ===== 播放页下拉菜单（半透明磨砂玻璃） ===== */
+.player-page-dropdown.n-dropdown {
+  /* 覆盖 naive-ui 主题变量（其以 inline style 注入，需 !important 提升优先级）：
+     半透明深色底 + 播放页强调色文字 */
+  --n-color: transparent !important; /* 根菜单背景交由 ::before 磨砂层承载 */
+  --n-box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4) !important;
+  --n-border-radius: 12px !important;
+  --n-padding: 4px 2px !important; /* 垂直内边距不变，水平内边距收紧 */
+  --n-option-color-hover: rgba(255, 255, 255, 0.1) !important;
+  --n-option-color-active: rgba(255, 255, 255, 0.16) !important;
+  --n-option-text-color: var(--player-accent-color, rgba(255, 255, 255, 0.88)) !important;
+  --n-option-text-color-hover: #fff !important;
+  --n-option-text-color-active: #fff !important;
+  --n-option-text-color-child-active: #fff !important;
+  --n-prefix-color: var(--player-accent-color, rgba(255, 255, 255, 0.72)) !important;
+  --n-suffix-color: var(--player-accent-color, rgba(255, 255, 255, 0.72)) !important;
+  --n-divider-color: rgba(255, 255, 255, 0.12) !important;
+
+  border: 1px solid rgba(255, 255, 255, 0.08);
+
+  /* 磨砂玻璃层：用伪元素承载，避免根元素成为 backdrop root 而阻断子菜单的模糊 */
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    background: rgba(12, 12, 18, 0.4);
+    backdrop-filter: blur(20px) saturate(1.3);
+    -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  }
+
+  /* 选项与分隔线绘制在磨砂层之上 */
+  .n-dropdown-option,
+  .n-dropdown-divider {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* 子菜单：独立磨砂玻璃（根元素无 backdrop-filter，子菜单可直接模糊页面背景） */
+  .n-dropdown-menu {
+    background-color: rgba(12, 12, 18, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(20px) saturate(1.3);
+    -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  }
+
+  /* 选项主体：透出磨砂背景 */
+  .n-dropdown-option-body {
+    border-radius: 8px;
+  }
+
+  /* 悬停高亮：内缩圆角药丸，保持半透明不遮挡磨砂质感 */
+  .n-dropdown-option-body::before {
+    top: 2px;
+    bottom: 2px;
+    left: 6px;
+    right: 6px;
+    border-radius: 8px;
+  }
+
+  .n-dropdown-divider {
+    margin: 2px 8px;
+  }
 }
 </style>

@@ -12,7 +12,7 @@ import { getDefaultOutputMode, type AudioOutputMode } from '../utils/audioOutput
 /**
  * 首次设置向导状态管理 Store
  * 负责管理首次启动时的初始设置流程：
- * 欢迎页 → 主题色选择 → 音频引擎 → 功能更新展示
+ * 隐私声明 → 欢迎页 → 主题色选择 → 音频引擎
  */
 export const useSetupWizardStore = defineStore('setupWizard', () => {
   // --- State ---

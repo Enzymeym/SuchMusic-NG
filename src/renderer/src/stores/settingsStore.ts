@@ -29,6 +29,8 @@ export interface AppearanceSettings {
   playlistLayoutStyle: 'classic' | 'modern'
   songListStyle: 'card' | 'plain'
   themeColorFollowsCover: boolean
+  /** 首页是否显示信息展示卡片（关闭后显示随时间变化的问候标语） */
+  homeShowInfoCards: boolean
 }
 
 export interface PlaybackSettings {
@@ -44,6 +46,8 @@ export interface PlaybackSettings {
   lyricsFontSize: number
   lyricsAreaRatio: number
   lyricsAppleStyle: boolean
+  /** 当前歌词行垂直位置（百分比，0-100，50 为居中，仅 Apple 风格歌词生效） */
+  lyricsAlignPosition: number
   lyricsBlurEnabled: boolean
   lyricsSpringEnabled: boolean
   playerBackgroundStyle: 'classic' | 'amll'
@@ -114,7 +118,8 @@ export const useSettingsStore = defineStore('settings', () => {
     customThemeColor: '#2C8EFD',
     playlistLayoutStyle: 'classic',
     songListStyle: 'card',
-    themeColorFollowsCover: false
+    themeColorFollowsCover: false,
+    homeShowInfoCards: true
   })
 
   const playback = ref<PlaybackSettings>({
@@ -131,6 +136,8 @@ export const useSettingsStore = defineStore('settings', () => {
     lyricsAreaRatio: 60,
     // 是否启用 Apple 风格歌词
     lyricsAppleStyle: true,
+    // 当前歌词垂直位置（百分比，50 为居中）
+    lyricsAlignPosition: 50,
     // Apple 风格歌词模糊效果开关
     lyricsBlurEnabled: true,
     // Apple 风格歌词弹簧效果开关

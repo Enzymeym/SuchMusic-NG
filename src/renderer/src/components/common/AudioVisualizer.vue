@@ -98,9 +98,8 @@ function drawBars(): void {
 
   for (let i = 0; i < BAR_COUNT; i++) {
     const value = Math.min(displayData[i], 1) * props.intensity
-    if (value < 0.01) continue
-
-    const barHeight = Math.max(value * maxBarHeight, 2)
+    // 无信号频段也渲染占位矮柱，避免频谱出现整段留空（不铺满全宽）
+    const barHeight = Math.max(value * maxBarHeight, 3)
 
     const x = barPositions[i]
     const y = canvasH - barHeight - (canvasH - maxBarHeight) / 2
@@ -153,7 +152,11 @@ function renderFrame(): void {
   if (isPlaying || decayLevel > 0.01) {
     // 平滑 + 衰减
     for (let i = 0; i < BAR_COUNT; i++) {
-      const val = rawSpectrum[i] * 255
+      // rawSpectrum 已是归一化数据 [0,1]（Web Audio /255，WASAPI Rust 端 /max），
+      // 直接使用，避免 ×255 后 Math.min(…,1) 将所有 bar 钳制到满高（可视化饱和失真）。
+      // 音乐高频段能量通常远低于低频段，线性值下右侧 bar 会低于跳过阈值而整段消失；
+      // 对值取平方根做感知压缩，使整条频谱铺满全宽且仍保持相对比例。
+      const val = Math.sqrt(rawSpectrum[i])
       smoothedData[i] = smoothedData[i] * 0.7 + val * 0.3
     }
 

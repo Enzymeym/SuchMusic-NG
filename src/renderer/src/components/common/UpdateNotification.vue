@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { NButton, NProgress, useMessage } from 'naive-ui'
+import { NButton, NModal, NProgress, useMessage, useThemeVars } from 'naive-ui'
 import { useUpdater } from '../../composables/useUpdater'
 import { useSettingsStore } from '../../stores/settingsStore'
 
 const message = useMessage()
 const settingsStore = useSettingsStore()
+// 弹窗 teleport 到 body 后无法继承 n-config-provider 的 CSS 变量，
+// 需通过 useThemeVars 取实际颜色值内联，确保图标/分隔线颜色正常
+const themeVars = useThemeVars()
 
 const {
   updateInfo,
@@ -121,24 +124,24 @@ const statusText = computed(() => {
         <i
           v-if="isChecking"
           class="mgc_loading_line update-dialog__spin"
-          style="color: var(--n-primary-color)"
+          :style="{ color: themeVars.primaryColor }"
         />
         <i
           v-else-if="hasError"
           class="mgc_close_circle_line"
-          style="color: var(--n-error-color)"
+          :style="{ color: themeVars.errorColor }"
         />
         <i
           v-else-if="isDownloaded"
           class="mgc_check_circle_line"
-          style="color: var(--n-success-color)"
+          :style="{ color: themeVars.successColor }"
         />
         <i
           v-else-if="isDownloading"
           class="mgc_download_3_line"
-          style="color: var(--n-primary-color)"
+          :style="{ color: themeVars.primaryColor }"
         />
-        <i v-else class="mgc_alert_line" style="color: var(--n-warning-color)" />
+        <i v-else class="mgc_alert_line" :style="{ color: themeVars.warningColor }" />
         <span class="update-dialog__status-text">{{ statusText }}</span>
       </div>
 
@@ -162,6 +165,7 @@ const statusText = computed(() => {
       <div
         v-if="isUpdateAvailable && updateInfo?.releaseNotes"
         class="update-dialog__notes"
+        :style="{ borderTopColor: themeVars.dividerColor }"
       >
         <div class="update-dialog__notes-title">更新内容</div>
         <pre class="update-dialog__notes-body">{{ updateInfo.releaseNotes }}</pre>

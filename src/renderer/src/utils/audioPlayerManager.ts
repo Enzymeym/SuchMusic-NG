@@ -74,8 +74,14 @@ export class AudioPlayerManager {
     if (url && !targetPath) {
       if (window.electron && window.electron.ipcRenderer) {
         try {
-          targetPath = await window.electron.ipcRenderer.invoke('audio:download-to-temp', url)
-          if (targetPath) {
+          // 主进程缓存优先：命中缓存时直接返回本地路径，跳过网络下载，加快二次播放
+          const result = (await window.electron.ipcRenderer.invoke(
+            'audio:get-online-audio',
+            url
+          )) as string | { path: string; cached: boolean }
+          targetPath = typeof result === 'string' ? result : result.path
+          // 仅缓存未命中时产生的临时文件参与切歌清理；缓存文件由主进程淘汰策略管理
+          if (result && typeof result === 'object' && !result.cached) {
             this.lastTempPath = targetPath
           }
         } catch (e) {

@@ -621,7 +621,7 @@
   }
 
   .footer-area {
-    flex-direction: column;
+    grid-template-columns: 1fr;
     padding-bottom: 24px;
     height: auto;
     gap: 12px;
@@ -647,9 +647,10 @@
 
 .footer-area {
   flex-shrink: 0;
-  display: flex;
+  /* 三栏 grid：左右 1fr 等宽，中间自动（最大 600px），使中间控制按钮严格水平居中 */
+  display: grid;
+  grid-template-columns: 1fr minmax(0, 600px) 1fr;
   align-items: center;
-  justify-content: space-between;
   padding: 0 22px 10px;
   gap: 16px;
   position: fixed;
@@ -673,6 +674,7 @@
     display: flex;
     gap: 8px;
     align-items: center;
+    justify-self: start;
 
     .action-btn {
       color: var(--player-accent-color, rgba(255, 255, 255, 0.8)); // 页脚按钮使用封面主色
@@ -690,6 +692,7 @@
   }
 
   .footer-right {
+    justify-self: end;
     justify-content: flex-end;
 
     .quality-tag {
@@ -703,9 +706,8 @@
   }
 
   .footer-center {
-    flex: 1;
-    min-width: 200px;
-    max-width: 600px;
+    width: 100%;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 2px;

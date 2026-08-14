@@ -261,10 +261,19 @@ onBeforeUnmount(() => {
 <template>
   <div class="settings-content plugin-section-root">
     <!-- 列表视图 -->
-    <template v-if="!selectedPlugin">
+    <div v-if="!selectedPlugin" class="plugin-view-list">
       <div class="plugin-section-header" data-setting-key="plugins.manage">
         <div class="section-group-title">插件管理</div>
-        <n-button type="primary" size="small" @click="addPlugin">
+      </div>
+
+      <!-- 空状态 -->
+      <div v-if="pluginStore.plugins.length === 0" class="plugin-empty">
+        <div class="plugin-empty-icon">
+          <i class="mgc_extension_line"></i>
+        </div>
+        <p class="plugin-empty-title">暂无插件</p>
+        <p class="plugin-empty-desc">选择 .ts 或 .js 插件文件，加载后即可在此管理</p>
+        <n-button type="primary" size="medium" @click="addPlugin">
           <template #icon>
             <i class="mgc_add_line" style="font-size: 14px"></i>
           </template>
@@ -272,15 +281,17 @@ onBeforeUnmount(() => {
         </n-button>
       </div>
 
-      <!-- 空状态 -->
-      <div v-if="pluginStore.plugins.length === 0" class="plugin-empty">
-        <i class="mgc_extension_line" style="font-size: 48px; color: var(--n-text-color-4)"></i>
-        <p class="plugin-empty-title">暂无插件</p>
-        <p class="plugin-empty-desc">点击「添加插件」选择 .ts 或 .js 插件文件</p>
-      </div>
-
       <!-- 插件卡片列表 -->
       <div v-else class="plugin-list">
+        <div class="plugin-list-toolbar">
+          <span class="plugin-count">共 {{ pluginStore.plugins.length }} 个插件</span>
+          <n-button type="primary" size="small" @click="addPlugin">
+            <template #icon>
+              <i class="mgc_add_line" style="font-size: 14px"></i>
+            </template>
+            添加插件
+          </n-button>
+        </div>
         <n-card
           v-for="plugin in pluginStore.plugins"
           :key="plugin.id"
@@ -299,32 +310,37 @@ onBeforeUnmount(() => {
                 <n-tag :type="stateConfig[plugin.state]?.type || 'info'" size="small" round>
                   {{ stateConfig[plugin.state]?.label || plugin.state }}
                 </n-tag>
-                <n-tag v-if="plugin.isActive" type="success" size="small" round>活跃</n-tag>
               </div>
               <p class="plugin-card-desc">{{ plugin.description || '暂无描述' }}</p>
               <div class="plugin-card-meta">
                 <span class="meta-item">v{{ plugin.version }}</span>
                 <span class="meta-divider">·</span>
                 <span class="meta-item">{{ plugin.author }}</span>
+                <template v-if="plugin.isActive">
+                  <span class="meta-divider">·</span>
+                  <span class="meta-item meta-active">
+                    <i class="mgc_check_circle_fill" style="font-size: 12px; margin-right: 3px"></i>活跃
+                  </span>
+                </template>
               </div>
             </div>
             <div class="plugin-card-actions">
               <n-button
                 size="small"
                 :type="plugin.isActive ? 'warning' : 'primary'"
-                ghost
+                tertiary
                 @click="toggleActive(plugin, $event)"
               >
                 {{ plugin.isActive ? '取消激活' : '激活' }}
               </n-button>
-              <n-button size="small" type="error" ghost @click="removePlugin(plugin, $event)">
+              <n-button size="small" type="error" tertiary @click="removePlugin(plugin, $event)">
                 移除
               </n-button>
             </div>
           </div>
         </n-card>
       </div>
-    </template>
+    </div>
 
     <!-- 详情视图 -->
     <div v-else class="plugin-detail">
@@ -371,12 +387,12 @@ onBeforeUnmount(() => {
               <n-button
                 @click="toggleActiveFromDetail"
                 :type="selectedPlugin.isActive ? 'warning' : 'primary'"
-                ghost
+                tertiary
               >
                 {{ selectedPlugin.isActive ? '取消激活' : '激活' }}
               </n-button>
-              <n-button @click="checkUpdate" ghost>检查更新</n-button>
-              <n-button type="error" ghost @click="handleRemoveFromDetail">移除</n-button>
+              <n-button @click="checkUpdate" tertiary>检查更新</n-button>
+              <n-button type="error" tertiary @click="handleRemoveFromDetail">移除</n-button>
             </n-space>
           </div>
 
@@ -489,17 +505,32 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* 分区头部：标题与添加按钮同行 */
+/* 分区标题 */
 .plugin-section-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-right: 36px;
+  margin-top: 8px;
 }
 
 .plugin-section-header .section-group-title {
   margin-bottom: 0;
+}
+
+/* 列表 / 详情视图进入动画 */
+.plugin-view-list,
+.plugin-detail {
+  animation: plugin-view-in 0.22s ease;
+}
+
+@keyframes plugin-view-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* 空状态 */
@@ -510,6 +541,19 @@ onBeforeUnmount(() => {
   justify-content: center;
   padding: 48px 0;
   gap: 8px;
+}
+
+.plugin-empty-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  color: var(--n-primary-color);
+  background: color-mix(in srgb, var(--n-primary-color) 10%, transparent);
+  margin-bottom: 4px;
 }
 
 .plugin-empty-title {
@@ -525,27 +569,50 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
-/* 插件卡片列表 */
+.plugin-empty .n-button {
+  margin-top: 8px;
+}
+
+/* 插件列表 */
 .plugin-list {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
+/* 列表工具栏：插件数量 + 添加按钮 */
+.plugin-list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px;
+}
+
+.plugin-count {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+}
+
 .plugin-card {
   cursor: pointer;
-  transition: transform 0.15s, box-shadow 0.15s;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .plugin-card:hover {
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
+}
+
+/* 按下即时反馈（按压时短暂贴下） */
+.plugin-card:active {
+  transform: scale(0.992);
+  transition-duration: 0.05s;
 }
 
 .plugin-card-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+  gap: 14px;
 }
 
 .plugin-card-main {
@@ -588,11 +655,29 @@ onBeforeUnmount(() => {
   color: var(--n-border-color);
 }
 
+.meta-active {
+  display: inline-flex;
+  align-items: center;
+  color: var(--n-success-color);
+}
+
 .plugin-card-actions {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  flex-direction: row;
+  gap: 8px;
   flex-shrink: 0;
+}
+
+/* 减弱动态偏好：关闭进入动画与卡片位移 */
+@media (prefers-reduced-motion: reduce) {
+  .plugin-view-list,
+  .plugin-detail {
+    animation: none;
+  }
+
+  .plugin-card {
+    transition: none;
+  }
 }
 
 /* 详情视图 */

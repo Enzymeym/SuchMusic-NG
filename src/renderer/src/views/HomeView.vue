@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 import defaultCover from '@renderer/assets/default-cover.png'
 import { usePlayerStore } from '../stores/playerStore'
 import { useLocalMusicStore } from '../stores/localMusicStore'
+import { useSettingsStore } from '../stores/settingsStore'
 import { usePlaylistTheme } from '../composables/usePlaylistTheme'
 import { albumCache } from '../stores/albumCache'
 import { throttle } from '../utils/performance'
@@ -12,6 +13,7 @@ import { formatTime } from '../utils/format'
 
 const playerStore = usePlayerStore()
 const localMusicStore = useLocalMusicStore()
+const settingsStore = useSettingsStore()
 const router = useRouter()
 
 const currentTimeDisplay = ref(0)
@@ -30,24 +32,69 @@ const stopProgressTimer = () => {
   }
 }
 
+// ===== 首页问候标语（随时间变化） =====
+const greetingNow = ref(new Date())
+let greetingTimer: ReturnType<typeof setInterval> | null = null
+const startGreetingTimer = () => {
+  if (greetingTimer) return
+  greetingTimer = setInterval(() => {
+    greetingNow.value = new Date()
+  }, 10000)
+}
+const stopGreetingTimer = () => {
+  if (greetingTimer) {
+    clearInterval(greetingTimer)
+    greetingTimer = null
+  }
+}
+
+/** 根据当前时段返回问候语 */
+const greetingText = computed(() => {
+  const hour = greetingNow.value.getHours()
+  if (hour >= 5 && hour < 8) return '清晨好'
+  if (hour >= 8 && hour < 11) return '上午好'
+  if (hour >= 11 && hour < 13) return '中午好'
+  if (hour >= 13 && hour < 17) return '下午好'
+  if (hour >= 17 && hour < 19) return '傍晚好'
+  if (hour >= 19 && hour < 23) return '晚上好'
+  return '夜深了'
+})
+
+/** 随时间轮换的副标语 */
+const greetingSubTexts = [
+  '让好音乐陪你度过此刻',
+  '愿旋律与你不期而遇',
+  '此刻，静下心来听首歌吧',
+  '给生活留一段旋律',
+  '愿你拥有愉快的听歌时光'
+]
+const greetingSubText = computed(
+  () => greetingSubTexts[greetingNow.value.getMinutes() % greetingSubTexts.length]
+)
+// ===== 首页问候标语 END =====
+
 onMounted(() => {
   updateDisplayLimit()
   window.addEventListener('resize', onWindowResize)
   playerStore.loadHistory()
   startProgressTimer()
+  startGreetingTimer()
 })
 
 onDeactivated(() => {
   stopProgressTimer()
+  stopGreetingTimer()
 })
 
 onActivated(() => {
   startProgressTimer()
+  startGreetingTimer()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', onWindowResize)
   stopProgressTimer()
+  stopGreetingTimer()
 })
 
 const displayLimit = ref(8)
@@ -164,7 +211,7 @@ const navigateToAlbum = (albumName: string) => {
   <div style="height: 100%">
     <n-scrollbar style="height: 100%" content-style="padding: 16px 24px 32px;">
       <div class="home-view">
-        <div v-if="playerStore.currentSong" class="now-playing-section">
+        <div v-if="settingsStore.appearance.homeShowInfoCards && playerStore.currentSong" class="now-playing-section">
           <div class="np-bg-layer full" :style="{ backgroundImage: `url(${nowPlayingCover})` }"></div>
           <div class="np-bg-reflection full" :style="{ backgroundImage: `url(${nowPlayingCover})` }"></div>
           <div class="np-header-section">
@@ -190,11 +237,17 @@ const navigateToAlbum = (albumName: string) => {
             </div>
           </div>
         </div>
-        <div v-else class="now-playing-section np-placeholder">
+        <div v-else-if="settingsStore.appearance.homeShowInfoCards" class="now-playing-section np-placeholder">
           <div class="np-empty">
             <i class="mgc_music_3_line" style="font-size: 48px; opacity: 0.3"></i>
             <p style="margin-top: 12px; opacity: 0.5; font-size: 15px">{{ L.noSongPlaying }}</p>
           </div>
+        </div>
+
+        <!-- 首页当前歌曲信息卡片隐藏时，显示随时间变化的问候标语 -->
+        <div v-else class="greeting-section">
+          <div class="greeting-main">{{ greetingText }}</div>
+          <div class="greeting-sub">{{ greetingSubText }}</div>
         </div>
 
         <div v-if="recommendedSongs.length > 0" class="section-block">
@@ -265,6 +318,49 @@ const navigateToAlbum = (albumName: string) => {
   font-size: 20px;
   font-weight: bold;
   margin: 0;
+}
+
+/* ===== 首页问候标语（替换当前歌曲信息卡片） ===== */
+.greeting-section {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 16px;
+  padding: 72px 0 8px;
+  text-align: left;
+}
+
+/* 主问候语：思源宋体，字重与字号突出主次，副标语更小 */
+.greeting-main {
+  font-family: 'SHSC', serif;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+}
+
+.greeting-sub {
+  font-size: 16px;
+  letter-spacing: 0.05em;
+  opacity: 0.55;
+}
+
+@media (max-width: 768px) {
+  .greeting-section {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 56px 0 8px;
+  }
+
+  .greeting-main {
+    font-size: 20px;
+  }
+
+  .greeting-sub {
+    font-size: 14px;
+  }
 }
 
 .now-playing-section {

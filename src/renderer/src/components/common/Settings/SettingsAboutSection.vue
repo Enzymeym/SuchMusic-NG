@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { NCard, NIcon, useThemeVars, NAlert, NSpin, NButton, NProgress, useMessage } from 'naive-ui'
+import { NCard, NIcon, useThemeVars, NAlert, NSpin, NButton, NProgress, useMessage, NModal, NScrollbar } from 'naive-ui'
 import MarkdownIt from 'markdown-it'
 import { full as emoji } from 'markdown-it-emoji'
 import markdownItGitHubAlerts from 'markdown-it-github-alerts'
@@ -10,6 +10,7 @@ import 'markdown-it-github-alerts/styles/github-base.css'
 import axios, { type AxiosError } from 'axios'
 import { useUpdater } from '../../../composables/useUpdater'
 import { useSettingsStore } from '../../../stores/settingsStore'
+import LegalTexts from '../LegalTexts.vue'
 
 // 主题变量，用于控制关于页颜色与玻璃卡片样式
 const themeVars = useThemeVars()
@@ -83,76 +84,6 @@ try {
 const appName = computed(() => 'Such Music')
 const appVersion = computed(() => currentVersion.value || '1.1.0')
 
-// 本地更新日志（优先使用，GitHub 获取失败时回退）
-const localChangelog: Record<string, string> = {
-  '1.1.0': `## v1.1.0
-
-> 发布日期：2026-08-04
-
-### 新增功能
-
-- 关于页面的 App 名称有惊喜，双击试试哦））
-
-### 优化改进
-
-- 播放栏全面重构，支持智能过渡模式切换与可视化反馈
-- 音频引擎升级为双音源架构（sourceA/sourceB），支持无缝交叉淡化
-- Web Audio 引擎新增时域帧回调，为过渡分析提供实时音频数据
-- 音频可视化器增强，优化频谱渲染与视觉效果
-- 播放页布局优化，过渡提示嵌入封面增强沉浸感
-- 设置页面交互与布局改进
-- 桌面歌词与任务栏歌词性能优化
-- 统计页面精简，移除冗余展示
-- 启用 WebNN 实验特性，NPU 环境自动加速 AI 推理
-
-### 移除
-
-- 移除在线插件系统（PluginView / PluginDetailView）及相关路由
-- 移除在线服务依赖，专注纯本地播放体验`,
-  '1.0.0-beta3': `## v1.0.0-beta3
-
-> 发布日期：2026-07-28
-
-### 新增功能
-
-- 新增本地更新日志展示，无需依赖网络即可查看版本变更
-- 新增播放列表底部状态栏，显示列表总数信息
-
-### 优化改进
-
-- 优化应用整体性能，减少内存占用
-- 优化设置页面布局与交互体验
-- 改进播放器控制栏交互与布局
-- 优化歌词解析与展示性能
-- 改进主界面布局结构的稳定性
-
-### Bug 修复
-
-- 修复播放列表页面滚动与布局相关显示问题
-- 修复若干已知 UI 问题，提升使用体验`,
-  '1.0.0-beta.2': `## v1.0.0-beta.2
-
-> 发布日期：2026-06-16
-
-### 新增功能
-
-- 新增歌词翻译支持
-- 新增 QQ 音乐歌词源优化
-- 重构歌词解析引擎，提升兼容性
-- 新增插件自动更新机制
-
-### 优化改进
-
-- 移除在线服务依赖，重构为纯本地音乐播放器
-- 大规模代码重构，优化整体架构
-- 优化 Linux 平台打包配置
-
-### Bug 修复
-
-- 修复 Linux 包打包失败问题
-- 修复部分依赖路径与编译错误`
-}
-
 // 更新日志相关
 const showChangelog = ref(false)
 const changelogLoading = ref(false)
@@ -163,6 +94,9 @@ const currentChangelogVersion = ref('')
 // 开发者信息
 const developerInfo = ref<GitHubUser | null>(null)
 const developerLoading = ref(false)
+
+// 法律信息（隐私政策与在线服务声明）弹窗
+const showLegalModal = ref(false)
 
 onMounted(() => {
   fetchChangelog()
@@ -240,19 +174,12 @@ const openSponsor = () => {
   }
 }
 
-// 获取更新日志
+// 获取更新日志（从 GitHub Releases 动态获取）
 const fetchChangelog = async () => {
   showChangelog.value = true
   if (changelogContent.value) return
 
   const version = appVersion.value
-
-  // 优先使用本地更新日志
-  if (localChangelog[version]) {
-    changelogContent.value = localChangelog[version]
-    currentChangelogVersion.value = version
-    return
-  }
 
   changelogLoading.value = true
   changelogError.value = ''
@@ -278,14 +205,12 @@ const fetchChangelog = async () => {
   }
 
   try {
-    const version = appVersion.value
-
     // 获取最近的 release 列表，避免通过 tag 猜测导致的 404 错误
     const releases = await getReleases()
 
     // 1. 在列表中查找当前版本
     // 优先匹配 name 字段为 v+version，其次匹配 tag_name
-    let release = releases.find(
+    const release = releases.find(
       (r) =>
         (r.name && r.name === `v${version}`) ||
         r.tag_name === `v${version}` ||
@@ -311,16 +236,7 @@ const fetchChangelog = async () => {
     }
   } catch (e: any) {
     console.error('Fetch changelog error:', e)
-    // 网络请求失败时，尝试使用任意本地日志作为回退
-    const localKeys = Object.keys(localChangelog)
-    if (localKeys.length > 0) {
-      changelogContent.value =
-        `> **提示**：无法获取在线更新日志，以下为本地缓存的更新日志：\n\n` +
-        localChangelog[localKeys[0]]
-      currentChangelogVersion.value = localKeys[0]
-    } else {
-      changelogError.value = '获取更新日志失败，请检查网络连接或稍后重试。'
-    }
+    changelogError.value = '获取更新日志失败，请检查网络连接或稍后重试。'
   } finally {
     changelogLoading.value = false
   }
@@ -451,6 +367,19 @@ const renderedChangelog = computed(() => {
         </div>
       </n-card>
 
+      <!-- 法律信息卡片 -->
+      <n-card class="about-card" :bordered="false" :style="{
+        backgroundColor: themeVars.cardColor
+      }">
+        <template #header>
+          <div>法律信息</div>
+        </template>
+        <div class="about-card-row legal-row">
+          <span class="about-card-label">隐私政策与在线服务声明</span>
+          <n-button size="small" secondary @click="showLegalModal = true">查看</n-button>
+        </div>
+      </n-card>
+
       <!-- 更新日志卡片 -->
       <n-card class="about-card changelog-card" :bordered="false" :style="{
         backgroundColor: themeVars.cardColor
@@ -477,6 +406,20 @@ const renderedChangelog = computed(() => {
         <div v-else class="markdown-body changelog-content" v-html="renderedChangelog"></div>
       </n-card>
     </div>
+
+    <!-- 隐私政策与在线服务声明弹窗 -->
+    <n-modal
+      v-model:show="showLegalModal"
+      preset="card"
+      title="隐私政策与在线服务声明"
+      :bordered="false"
+      size="medium"
+      style="width: 640px; max-width: 90vw"
+    >
+      <n-scrollbar style="max-height: 60vh">
+        <LegalTexts />
+      </n-scrollbar>
+    </n-modal>
   </div>
 </template>
 

@@ -2,7 +2,7 @@
 /**
  * 首次设置向导组件（Naive UI 版本）
  * 在应用首次启动时引导用户完成初始配置：
- * 欢迎页 → 主题色 → 音频引擎 → 功能更新展示(4页)
+ * 隐私声明 → 欢迎页 → 主题色 → 音频引擎
  */
 import { ref, computed, onMounted, watch } from 'vue'
 import {
@@ -13,14 +13,15 @@ import {
   NSpace,
   NButtonGroup,
   NSelect,
-  NProgress,
   NColorPicker,
+  NScrollbar,
   useThemeVars
 } from 'naive-ui'
 import { useSetupWizardStore } from '../../stores/setupWizardStore'
 import { setPrimaryColor } from '../../themes'
 import { THEME_COLOR_PRESETS } from '../../types/onboarding'
 import { type AudioOutputMode, getAvailableOutputModes } from '../../utils/audioOutputModeManager'
+import LegalTexts from './LegalTexts.vue'
 import appIcon from '../../assets/icon.png'
 
 const wizardStore = useSetupWizardStore()
@@ -60,8 +61,8 @@ const colorSelectOptions = computed(() => {
   return presets
 })
 const currentStepId = computed(() => wizardStore.currentStep?.id || '')
+const isPrivacyStep = computed(() => currentStepId.value === 'privacy')
 const isWelcomeStep = computed(() => currentStepId.value === 'welcome')
-const isFeatureStep = computed(() => currentStepId.value.startsWith('feature-'))
 const isThemeStep = computed(() => currentStepId.value === 'theme')
 const isAudioEngineStep = computed(() => currentStepId.value === 'audio-engine')
 const availableModes = computed(() => getAvailableOutputModes())
@@ -95,12 +96,32 @@ const handleSkipCurrentStep = (): void => {
 }
 
 const goToStep = (index: number): void => {
+  // 隐私政策步骤必须通过"同意并继续"进入后续流程，禁止通过指示点跳转跳过
+  if (isPrivacyStep.value) return
   if (index < wizardStore.currentStepIndex) {
     slideDirection.value = -1
   } else if (index > wizardStore.currentStepIndex) {
     slideDirection.value = 1
   }
   wizardStore.goTo(index)
+}
+
+// ===== 隐私政策与在线服务声明 =====
+
+/** 同意并继续：进入下一步 */
+const handleAgree = (): void => {
+  slideDirection.value = 1
+  wizardStore.next()
+}
+
+/** 不同意：退出应用 */
+const handleDisagree = (): void => {
+  if (window.electron?.ipcRenderer) {
+    window.electron.ipcRenderer.send('winAction', { type: 'close' })
+  } else {
+    // 非 Electron 环境（如浏览器调试）无法退出，回退为跳过向导
+    wizardStore.skip()
+  }
 }
 
 // ===== 主题色处理 =====
@@ -173,11 +194,6 @@ onMounted(() => {
   }
 })
 
-const getPresetLabel = (value: string): string => {
-  if (value === 'custom') return '自定义'
-  return THEME_COLOR_PRESETS.find((p) => p.value === value)?.label || value
-}
-
 const getDotStyle = (idx: number): Record<string, string> => {
   const isActive = idx === wizardStore.currentStepIndex
   const isCompleted = idx < wizardStore.currentStepIndex
@@ -198,7 +214,7 @@ const getDotStyle = (idx: number): Record<string, string> => {
         <div class="wizard-backdrop"></div>
 
         <n-card class="wizard-card" :bordered="false"
-          content-style="display: flex; flex-direction: column; flex: 1; padding: 0;">
+          content-style="display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 0;">
           <!-- 类轮播图指示点 -->
           <div class="wizard-dots-header">
             <div class="wizard-dots" :style="{ '--wizard-dot-hover-color': themeVars.primaryColor }">
@@ -210,12 +226,42 @@ const getDotStyle = (idx: number): Record<string, string> => {
           </div>
 
           <!-- 内容区域 -->
-          <div style="flex: 1; overflow: visible;">
+          <div style="flex: 1; min-height: 0; overflow: visible; display: flex; flex-direction: column;">
             <Transition :name="slideDirection === 1 ? 'step-slide-forward' : 'step-slide-backward'" mode="out-in">
               <div class="wizard-content" :key="wizardStore.currentStep?.id">
 
+                <!-- ==================== 隐私政策与在线服务声明 ==================== -->
+                <div v-if="isPrivacyStep" class="step-body step-body-left">
+                  <div class="step-title-container">
+                    <div class="step-title-row step-title-row-left">
+                      <n-icon size="24" :color="themeVars.primaryColor">
+                        <i class="mgc_shield_line"></i>
+                      </n-icon>
+                      <n-text class="step-title-text">{{ wizardStore.currentStep?.title }}</n-text>
+                    </div>
+                    <n-text depth="3" class="step-subtitle-text step-subtitle-text-left">{{
+                      wizardStore.currentStep?.subtitle }}</n-text>
+                  </div>
+
+                  <n-scrollbar class="legal-scroll">
+                    <LegalTexts />
+                  </n-scrollbar>
+
+                  <div class="privacy-actions">
+                    <n-button size="large" secondary @click="handleDisagree">
+                      不同意并退出
+                    </n-button>
+                    <n-button size="large" type="primary" icon-placement="right" @click="handleAgree">
+                      同意并继续
+                      <template #icon>
+                        <i class="mgc_right_line"></i>
+                      </template>
+                    </n-button>
+                  </div>
+                </div>
+
                 <!-- ==================== 欢迎页 ==================== -->
-                <div v-if="isWelcomeStep" class="step-body welcome-body">
+                <div v-else-if="isWelcomeStep" class="step-body welcome-body">
                   <img :src="appIcon" alt="Such Logo" class="welcome-logo" />
                   <div class="welcome-text">
                     <n-text tag="h2" class="welcome-title">欢迎使用 Such Music</n-text>
@@ -310,50 +356,8 @@ const getDotStyle = (idx: number): Record<string, string> => {
                   </div>
                 </div>
 
-                <!-- ==================== 功能更新页 ==================== -->
-                <div v-else-if="isFeatureStep" class="step-body step-body-left">
-                  <template v-if="currentStepId === 'feature-4'">
-                    <div class="done-section done-section-left">
-                      <n-icon size="48" :color="themeVars.primaryColor">
-                        <i class="mgc_rocket_line"></i>
-                      </n-icon>
-                      <n-text tag="h2" class="done-title">{{ wizardStore.currentStep?.title }}</n-text>
-                      <n-text depth="2" class="done-subtitle">{{ wizardStore.currentStep?.subtitle }}</n-text>
-
-                      <n-space vertical :size="6" class="done-summary">
-                        <div class="summary-row">
-                          <div class="summary-dot" :style="{ backgroundColor: wizardStore.activeColor }"></div>
-                          <div>
-                            <n-text depth="3" style="font-size: 12px; display: block;">主题色</n-text>
-                            <n-text strong>{{ getPresetLabel(wizardStore.selectedThemePreset) }}</n-text>
-                          </div>
-                        </div>
-                        <div class="summary-row">
-                          <n-icon size="20" :color="themeVars.primaryColor"><i class="mgc_speaker_line"></i></n-icon>
-                          <div>
-                            <n-text depth="3" style="font-size: 12px; display: block;">音频引擎</n-text>
-                            <n-text strong>{{ engineModeLabels[wizardStore.audioOutputMode] }}</n-text>
-                          </div>
-                        </div>
-                      </n-space>
-                    </div>
-                  </template>
-
-                  <template v-else>
-                    <div class="feature-section feature-section-left">
-                      <n-icon size="48" :color="themeVars.primaryColor">
-                        <i :class="wizardStore.currentStep?.icon || 'mgc_sparkles_line'"></i>
-                      </n-icon>
-                      <n-text tag="h3" class="feature-title">功能更新 {{ currentStepId.replace('feature-', '') }}/3</n-text>
-                      <n-text depth="2" class="feature-subtitle">{{ wizardStore.currentStep?.subtitle }}</n-text>
-                      <n-progress type="line" :percentage="parseInt(currentStepId.replace('feature-', '')) * 33"
-                        :height="4" :show-indicator="false" :color="themeVars.primaryColor" style="max-width: 260px;" />
-                    </div>
-                  </template>
-                </div>
-
                 <!-- 底部导航 -->
-                <div v-if="!isWelcomeStep" class="wizard-nav">
+                <div v-if="!isWelcomeStep && !isPrivacyStep" class="wizard-nav">
                   <n-space>
                     <n-button v-if="wizardStore.currentStep?.skippable" text size="small"
                       @click="handleSkipCurrentStep">
@@ -420,6 +424,9 @@ const getDotStyle = (idx: number): Record<string, string> => {
   max-width: calc(100vw - 48px);
   height: 560px;
   max-height: calc(100vh - 64px);
+  /* 固定卡片高度下让内容区 flex:1 生效，防止内容撑破卡片 */
+  display: flex;
+  flex-direction: column;
 }
 
 /* ===== 轮播图指示点 ===== */
@@ -462,7 +469,8 @@ const getDotStyle = (idx: number): Record<string, string> => {
 /* ===== 内容区域 ===== */
 .wizard-content {
   padding: 20px 40px 20px;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -479,6 +487,7 @@ const getDotStyle = (idx: number): Record<string, string> => {
   flex-direction: column;
   gap: 18px;
   flex: 1;
+  min-height: 0;
 }
 
 /* 非欢迎页统一居左 */
@@ -569,6 +578,21 @@ const getDotStyle = (idx: number): Record<string, string> => {
   opacity: 0.9;
 }
 
+/* ===== 隐私政策与在线服务声明 ===== */
+.legal-scroll {
+  flex: 1;
+  min-height: 0;
+  padding: 2px 4px;
+}
+
+.privacy-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
 /* ===== 音频引擎 ===== */
 .engine-mode-group {
   padding: 12px 14px;
@@ -588,78 +612,6 @@ const getDotStyle = (idx: number): Record<string, string> => {
   background: var(--n-action-color);
   border-radius: 10px;
   width: 100%;
-}
-
-/* ===== 功能更新页 ===== */
-.feature-section {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 14px;
-  padding: 30px 0 10px;
-  text-align: center;
-}
-
-.feature-section-left {
-  align-items: flex-start;
-  text-align: left;
-}
-
-.feature-title {
-  font-size: 20px;
-  font-weight: 700;
-  margin: 0;
-}
-
-.feature-subtitle {
-  font-size: 15px;
-  line-height: 1.6;
-}
-
-/* ===== 完成页 ===== */
-.done-section {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 20px 0 10px;
-  text-align: center;
-}
-
-.done-section-left {
-  align-items: flex-start;
-  text-align: left;
-}
-
-.done-title {
-  font-size: 22px;
-  font-weight: 700;
-  margin: 0;
-}
-
-.done-subtitle {
-  font-size: 15px;
-}
-
-.done-summary {
-  width: 100%;
-  max-width: 320px;
-}
-
-.summary-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  background: var(--n-action-color);
-  border-radius: 10px;
-}
-
-.summary-dot {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
-  flex-shrink: 0;
 }
 
 /* ===== 底部导航 ===== */

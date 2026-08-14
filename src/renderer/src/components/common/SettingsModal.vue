@@ -174,6 +174,12 @@ const searchOptions = [
     desc: '关闭自适应后使用指定字号显示歌词'
   },
   {
+    label: '当前歌词垂直位置',
+    value: 'playback.lyricsAlignPosition',
+    section: 'lyrics',
+    desc: '调整播放页中当前高亮歌词行的垂直位置'
+  },
+  {
     label: '播放页布局',
     value: 'playback.lyricsAreaRatio',
     section: 'appearance',
@@ -454,7 +460,7 @@ watch(
       }"
       content-style="padding: 0; display: flex; flex-direction: column; min-height: 0;"
     >
-      <!-- 顶部右上角关闭按钮区域 -->
+      <!-- 关闭按钮：悬浮在右上角，仅按钮自身背景带渐进模糊，不占用头部栏 -->
       <div class="modal-topbar">
         <div class="close-btn" @click="showModal = false">
           <n-icon size="18"><i class="mgc_close_line"></i></n-icon>

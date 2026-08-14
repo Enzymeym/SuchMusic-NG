@@ -316,7 +316,7 @@ watch(activeTab, (tab) => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 16px 24px 0;
+  padding: 64px 24px 0;
   box-sizing: border-box;
 }
 

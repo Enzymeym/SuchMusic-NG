@@ -185,7 +185,14 @@ onMounted(async () => {
           </div>
         </div>
         <div class="cache-actions">
-          <n-button size="small" @click="chooseDownloadDir">更改目录</n-button>
+          <n-button size="small" @click="chooseDownloadDir">
+            <template #icon>
+              <n-icon size="16">
+                <i class="mgc_folder_open_line" />
+              </n-icon>
+            </template>
+            更改目录
+          </n-button>
           <n-button size="small" tertiary @click="resetDownloadDir" v-if="downloadDir">
             恢复默认
           </n-button>
@@ -339,8 +346,9 @@ html[data-theme='light'] .dir-item {
 
 .cache-actions {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 0;
 }
 

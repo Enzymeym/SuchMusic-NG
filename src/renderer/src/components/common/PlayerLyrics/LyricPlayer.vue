@@ -109,6 +109,9 @@ const hidePassedLines = computed(() => settingsStore.playback.amllHidePassedLine
 
 const wordFadeWidth = computed(() => settingsStore.playback.amllWordFadeWidth)
 
+/** 当前歌词行垂直位置（0.0-1.0，0.5 为居中），仅 Apple 风格歌词生效 */
+const alignPosition = computed(() => settingsStore.playback.lyricsAlignPosition / 100)
+
 const handleLineClick = (event: any) => {
   const rawLine =
     event && event.line && typeof event.line.getLine === 'function'
@@ -198,6 +201,7 @@ watch([hidePassedLines, appleLyrics], ([enabled]) => {
         :enable-spring="enableSpring"
         :hide-passed-lines="hidePassedLines"
         :word-fade-width="wordFadeWidth"
+        :align-position="alignPosition"
         class="am-lyric"
         :style="{
           '--amll-lp-color': 'var(--player-accent-color, rgba(255, 255, 255, 0.95))'

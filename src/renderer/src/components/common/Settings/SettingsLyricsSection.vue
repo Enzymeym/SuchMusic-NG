@@ -350,6 +350,33 @@ const playerBackgroundStyleOptions = [
 
     <n-card
       class="setting-item"
+      :class="{ 'setting-item--highlight': props.highlightKey === 'playback.lyricsAlignPosition' }"
+      data-setting-key="playback.lyricsAlignPosition"
+      :bordered="true"
+      size="small"
+      :style="{ backgroundColor: props.settingItemBgColor, borderColor: props.settingItemBorderColor }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">当前歌词垂直位置</div>
+          <div class="sub-label">调整播放页中当前高亮歌词行的垂直位置，50% 为居中</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; min-width: 220px">
+          <n-slider
+            v-model:value="settingsStore.playback.lyricsAlignPosition"
+            :min="0"
+            :max="100"
+            :step="1"
+            :tooltip="false"
+            style="width: 160px"
+          />
+          <span class="time-text">{{ settingsStore.playback.lyricsAlignPosition }}%</span>
+        </div>
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
       :class="{ 'setting-item--highlight': props.highlightKey === 'playback.amllHidePassedLines' }"
       data-setting-key="playback.amllHidePassedLines"
       :bordered="true"

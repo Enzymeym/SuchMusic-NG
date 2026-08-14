@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, computed, defineAsyncComponent } from 'vue'
+import { ref, watch, nextTick, computed, defineAsyncComponent, h } from 'vue'
 import { useRouter } from 'vue-router'
 import { usePlayerStore } from '../../stores/playerStore'
 import { useLocalMusicStore } from '../../stores/localMusicStore'
@@ -13,7 +13,8 @@ import {
   NSlider,
   NButton,
   NDropdown,
-  NPopover
+  NPopover,
+  NModal
 } from 'naive-ui'
 import LyricPlayer from '../common/PlayerLyrics/LyricPlayer.vue'
 import ShinyText from '../common/ShinyText.vue'
@@ -123,8 +124,8 @@ const showDesktopMoreMenu = ref(false)
 // 音效调节弹窗
 const showSoundEffectsModal = ref(false)
 
-/** 可视化控制弹窗 */
-const showVisualizerControls = ref(false)
+/** 音频可视化设置弹窗 */
+const showVisualizerModal = ref(false)
 
 /** 歌词搜索选择弹窗 */
 const showLyricSearchModal = ref(false)
@@ -245,17 +246,38 @@ const playbackRateOptions = computed(() => {
 })
 
 /**
- * 更多菜单选项
+ * 生成下拉菜单选项图标（mingcute 字体图标）
+ */
+const menuIcon = (cls: string) => () => h('i', { class: cls })
+
+/**
+ * 更多菜单选项（整合可视化 / 音效设置 / 更多功能入口）
  */
 const moreMenuOptions = computed(() => [
   {
+    label: '音频可视化',
+    key: 'visualizer',
+    icon: menuIcon('mgc_wave_line')
+  },
+  {
+    label: '音效设置',
+    key: 'sound-effects',
+    icon: menuIcon('mgc_settings_2_line')
+  },
+  {
+    type: 'divider' as const,
+    key: 'divider-0'
+  },
+  {
     label: '歌词偏移',
     key: 'lyrics-offset-header',
+    icon: menuIcon('mgc_time_line'),
     children: lyricsOffsetOptions.value
   },
   {
     label: '播放速度',
     key: 'playback-rate-header',
+    icon: menuIcon('mgc_fast_forward_line'),
     children: playbackRateOptions.value
   },
   {
@@ -265,6 +287,7 @@ const moreMenuOptions = computed(() => [
   {
     label: '搜索同名歌曲',
     key: 'search-same-name',
+    icon: menuIcon('mgc_search_line'),
     disabled: !player.currentSong?.title
   }
 ])
@@ -276,6 +299,18 @@ const moreMenuOptions = computed(() => [
 const handleMoreMenuSelect = (key: string) => {
   showMobileMoreMenu.value = false
   showDesktopMoreMenu.value = false
+
+  // 音频可视化设置
+  if (key === 'visualizer') {
+    showVisualizerModal.value = true
+    return
+  }
+
+  // 音效设置
+  if (key === 'sound-effects') {
+    showSoundEffectsModal.value = true
+    return
+  }
 
   if (key.startsWith('lyrics-offset-')) {
     const offset = parseFloat(key.replace('lyrics-offset-', ''))
@@ -528,6 +563,7 @@ watch(
                 :options="addToPlaylistDropdownOptions"
                 @select="handleAddToPlaylistSelect"
                 :to="drawerTarget"
+                class="player-page-dropdown"
               >
                 <n-button text circle class="mobile-action-btn">
                   <n-icon size="24"><i class="mgc_add_circle_line"></i></n-icon>
@@ -538,6 +574,7 @@ watch(
                 :options="moreMenuOptions"
                 :show="showMobileMoreMenu"
                 :to="drawerTarget"
+                class="player-page-dropdown"
                 @select="handleMoreMenuSelect"
                 @update:show="(val: boolean) => showMobileMoreMenu = val"
               >
@@ -559,6 +596,7 @@ watch(
                 :options="addToPlaylistDropdownOptions"
                 @select="handleAddToPlaylistSelect"
                 :to="drawerTarget"
+                class="player-page-dropdown"
               >
                 <n-button quaternary class="action-btn">
                   <n-icon size="24" style="transform: translateX(-5px) translateY(0.5px)"
@@ -620,34 +658,17 @@ watch(
 
             <!-- Right Actions -->
             <div class="footer-right desktop-only">
-              <!-- 音频可视化控制入口 -->
-              <n-popover
-                v-model:show="showVisualizerControls"
-                trigger="click"
-                :show-arrow="false"
-                placement="top"
-                :to="drawerTarget"
-              >
-                <template #trigger>
-                  <n-button quaternary class="action-btn" @click="showVisualizerControls = !showVisualizerControls">
-                    <n-icon size="22"><i class="mgc_wave_line"></i></n-icon>
-                  </n-button>
-                </template>
-                <AudioVisualizerControls />
-              </n-popover>
-              <n-button quaternary class="action-btn" @click="showSoundEffectsModal = true">
-                <n-icon size="22"><i class="mgc_settings_2_line"></i></n-icon>
-              </n-button>
               <n-dropdown
                 trigger="click"
                 :options="moreMenuOptions"
                 :show="showDesktopMoreMenu"
                 :to="drawerTarget"
+                class="player-page-dropdown"
                 @select="handleMoreMenuSelect"
                 @update:show="(val: boolean) => showDesktopMoreMenu = val"
               >
-                <n-button quaternary class="action-btn">
-                  <n-icon size="22"><i class="mgc_more_2_line"></i></n-icon>
+                <n-button quaternary class="action-btn" title="更多设置">
+                  <n-icon size="22"><i class="mgc_settings_2_line"></i></n-icon>
                 </n-button>
               </n-dropdown>
               <div class="volume-control">
@@ -684,6 +705,18 @@ watch(
   <!-- 音效调节弹窗 -->
   <SoundEffectsModal v-model:show="showSoundEffectsModal" />
 
+  <!-- 音频可视化设置弹窗 -->
+  <n-modal
+    v-model:show="showVisualizerModal"
+    :mask-closable="true"
+    :close-on-esc="true"
+    preset="card"
+    title="音频可视化设置"
+    :style="{ width: '340px' }"
+  >
+    <AudioVisualizerControls />
+  </n-modal>
+
   <!-- 歌词搜索选择弹窗 -->
   <LyricSearchModal
     v-model:show="showLyricSearchModal"
@@ -696,5 +729,73 @@ watch(
 
 <style scoped lang="scss">
 @use './PlayerPage/PlayerPage.scss';
+</style>
+
+<style lang="scss">
+/* ===== 播放页下拉菜单（半透明磨砂玻璃） ===== */
+.player-page-dropdown.n-dropdown {
+  /* 覆盖 naive-ui 主题变量（其以 inline style 注入，需 !important 提升优先级）：
+     半透明深色底 + 播放页强调色文字 */
+  --n-color: transparent !important; /* 根菜单背景交由 ::before 磨砂层承载 */
+  --n-box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4) !important;
+  --n-border-radius: 12px !important;
+  --n-padding: 4px 2px !important; /* 垂直内边距不变，水平内边距收紧 */
+  --n-option-color-hover: rgba(255, 255, 255, 0.1) !important;
+  --n-option-color-active: rgba(255, 255, 255, 0.16) !important;
+  --n-option-text-color: var(--player-accent-color, rgba(255, 255, 255, 0.88)) !important;
+  --n-option-text-color-hover: #fff !important;
+  --n-option-text-color-active: #fff !important;
+  --n-option-text-color-child-active: #fff !important;
+  --n-prefix-color: var(--player-accent-color, rgba(255, 255, 255, 0.72)) !important;
+  --n-suffix-color: var(--player-accent-color, rgba(255, 255, 255, 0.72)) !important;
+  --n-divider-color: rgba(255, 255, 255, 0.12) !important;
+
+  border: 1px solid rgba(255, 255, 255, 0.08);
+
+  /* 磨砂玻璃层：用伪元素承载，避免根元素成为 backdrop root 而阻断子菜单的模糊 */
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    background: rgba(12, 12, 18, 0.4);
+    backdrop-filter: blur(20px) saturate(1.3);
+    -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  }
+
+  /* 选项与分隔线绘制在磨砂层之上 */
+  .n-dropdown-option,
+  .n-dropdown-divider {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* 子菜单：独立磨砂玻璃（根元素无 backdrop-filter，子菜单可直接模糊页面背景） */
+  .n-dropdown-menu {
+    background-color: rgba(12, 12, 18, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(20px) saturate(1.3);
+    -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  }
+
+  /* 选项主体：透出磨砂背景 */
+  .n-dropdown-option-body {
+    border-radius: 8px;
+  }
+
+  /* 悬停高亮：内缩圆角药丸，保持半透明不遮挡磨砂质感 */
+  .n-dropdown-option-body::before {
+    top: 2px;
+    bottom: 2px;
+    left: 6px;
+    right: 6px;
+    border-radius: 8px;
+  }
+
+  .n-dropdown-divider {
+    margin: 2px 8px;
+  }
+}
 </style>
 

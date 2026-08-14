@@ -521,14 +521,9 @@ export const usePlayerStore = defineStore('player', {
     recordPlay(song: PlayerSong) {
       if (!song.id) return
 
-      // 避免重复添加相同的最近播放记录（如果最新的一条就是这首歌）
-      if (this.playHistory.length > 0 && this.playHistory[0].songId === song.id) {
-        this.playHistory[0].timestamp = Date.now()
-        if (song.durationMs) this.playHistory[0].durationMs = song.durationMs
-        this.saveHistory()
-        return
-      }
-
+      // 每次实际播放都新增一条记录：
+      // 原「最新一条相同则只更新时间戳」的逻辑会让单曲循环/连续播放同一首歌的
+      // 次数不增加，导致统计页总播放次数与排行计数偏少
       const record: PlayRecord = {
         songId: song.id,
         title: song.title,
