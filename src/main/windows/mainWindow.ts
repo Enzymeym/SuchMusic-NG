@@ -28,7 +28,10 @@ export function createWindow(): void {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
-      webSecurity: false
+      webSecurity: false,
+      // 隐藏到托盘 / 最小化后仍保持定时器与动画帧正常运行，
+      // 否则 Chromium 会节流后台 renderer，导致播放进度同步（set-progress IPC）停摆
+      backgroundThrottling: false
     },
     frame: false,
     // Windows/Linux 隐藏系统标题栏并关闭系统按钮覆盖层（AppHeader 自绘控制按钮）

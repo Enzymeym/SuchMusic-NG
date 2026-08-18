@@ -41,6 +41,7 @@ const {
   checkUpdate,
   downloadUpdate,
   installUpdate,
+  getCurrentVersion,
   formatBytes,
   formatSpeed
 } = useUpdater()
@@ -80,9 +81,12 @@ try {
   console.error('Failed to initialize MarkdownIt:', e)
 }
 
-// 应用名称与版本信息
-const appName = computed(() => 'Such Music')
-const appVersion = computed(() => currentVersion.value || '1.1.0')
+// 应用名称与版本信息（构建时从 package.json 注入，见 electron.vite.config.ts）
+const appName = computed(() => __APP_NAME__ || 'Such Music')
+const appDescription = __APP_DESCRIPTION__
+const appHomepage = __APP_HOMEPAGE__
+// 优先使用注入的真实版本号，IPC 未返回时也无需硬编码回退
+const appVersion = computed(() => currentVersion.value || __APP_VERSION__)
 
 // 更新日志相关
 const showChangelog = ref(false)
@@ -153,7 +157,7 @@ const fetchDeveloperInfo = async () => {
 
 // 打开 GitHub 项目地址
 const openGithub = () => {
-  const url = 'https://github.com/Enzymeym/SuchMusic-NG'
+  const url = appHomepage || 'https://github.com/Enzymeym/SuchMusic-NG'
   if ((window as any).electron?.shell) {
     ; (window as any).electron.shell.openExternal(url)
   } else {
@@ -179,10 +183,18 @@ const fetchChangelog = async () => {
   showChangelog.value = true
   if (changelogContent.value) return
 
-  const version = appVersion.value
-
   changelogLoading.value = true
   changelogError.value = ''
+
+  // 等待实际版本号加载完成，避免使用回退版本号导致更新日志与当前版本不匹配
+  let version = appVersion.value
+  if (!currentVersion.value) {
+    try {
+      version = (await getCurrentVersion()) || version
+    } catch {
+      // 获取版本失败时沿用回退版本号
+    }
+  }
 
   const owner = 'Enzymeym'
   const repo = 'SuchMusic-NG'
@@ -270,6 +282,9 @@ const renderedChangelog = computed(() => {
       </div>
       <div class="about-hero-version">
         {{ appVersion }}
+      </div>
+      <div v-if="appDescription" class="about-hero-desc">
+        {{ appDescription }}
       </div>
       <div class="about-hero-toolbar">
         <button class="about-hero-github" type="button" @click="openGithub" title="GitHub">
@@ -450,6 +465,14 @@ const renderedChangelog = computed(() => {
   margin-top: 6px;
   font-size: 13px;
   opacity: 0.7;
+  position: relative;
+  z-index: 1;
+}
+
+.about-hero-desc {
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.5;
   position: relative;
   z-index: 1;
 }

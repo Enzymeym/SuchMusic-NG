@@ -1,0 +1,49 @@
+# git-cliff 配置：根据 Conventional Commits 自动生成 changelog / release 正文
+# 参考：https://git-cliff.org
+
+[changelog]
+# changelog 文件头部
+header = """
+# Changelog
+
+本项目的变更记录由 git-cliff 根据 Conventional Commits 自动生成。
+"""
+# 每次迭代生成的正文模板
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message }}{% if commit.breaking %} ⚠{% endif %}{% if commit.body %}{{ commit.body }}{% endif %}
+{% endfor %}
+{% endfor %}
+"""
+# 去除模板产生的多余空行
+trim = true
+# changelog 文件底部
+footer = "<!-- 由 git-cliff 自动生成 -->"
+
+[git]
+# 启用 Conventional Commits 解析
+conventional_commits = true
+# 提交信息分组规则（按顺序匹配）
+commit_parsers = [
+  { message = "^feat", group = "特性" },
+  { message = "^fix", group = "修复" },
+  { message = "^docs", group = "文档" },
+  { message = "^refactor", group = "重构" },
+  { message = "^perf", group = "性能优化" },
+  { message = "^style", group = "样式" },
+  { message = "^test", group = "测试" },
+  { message = "^chore", group = "杂项" },
+  { message = "^build", group = "构建" },
+  { message = "^ci", group = "CI" },
+  { message = "^revert", group = "回退" },
+  { body = "^BREAKING CHANGE", group = "🔥 破坏性变更" },
+  { message = "^.*", group = "其他" },
+]
+# 保护破坏性变更提交：即使其类型被上方规则匹配，也归入破坏性变更组
+protect_breaking_commits = true
+# 过滤掉不匹配任何 parser 的提交
+filter_commits = true
+# 提交排序方式：从旧到新
+sort_commits = "oldest"

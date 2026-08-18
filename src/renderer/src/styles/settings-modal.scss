@@ -3,6 +3,12 @@
   position: relative; /* 作为关闭按钮定位的参照容器 */
 }
 
+/* 深色模式下给设置主卡片补一道清晰的描边，使其从窗口近黑底色中明确浮出 */
+html[data-theme='dark'] .settings-root-card {
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  overflow: hidden;
+}
+
 .n-color-picker-trigger .n-color-picker-trigger__fill {
   div {
     border-radius: 7px;
@@ -145,13 +151,22 @@
 /* 设置名称样式 */
 .main-label {
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
+  color: var(--n-card-text-color, inherit);
+  line-height: 1.4;
 }
 
 /* 设置描述文本样式 */
 .sub-label {
   font-size: 12px;
   color: var(--settings-subtext-color);
+  line-height: 1.5;
+  margin-top: 2px;
+}
+
+/* 深色模式提升副标题对比度，保证长描述在小字号下依然易读 */
+html[data-theme='dark'] .settings-content .setting-item .sub-label {
+  color: color-mix(in srgb, var(--settings-subtext-color) 78%, white);
 }
 
 /* 关闭按钮：仅按钮自身背景区域带渐进模糊（半透明基底 + backdrop blur），

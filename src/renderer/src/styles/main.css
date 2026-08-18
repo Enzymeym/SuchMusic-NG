@@ -30,9 +30,68 @@ html, body {
   overflow: hidden;
 }
 
-/* 深色模式下统一设置 body 背景色 */
+/* 深色模式：更沉的黑色基底，半透明叠加顶部/底部的柔光营造通透质感，并带轻微描边 */
+html[data-theme='dark'] {
+  background: #040407;
+}
+
 html[data-theme='dark'] body {
-  background-color: #101014 !important;
+  box-sizing: border-box;
+  background:
+    radial-gradient(120% 70% at 50% -15%, rgba(96, 84, 150, 0.15), transparent 55%),
+    radial-gradient(90% 60% at 85% 115%, rgba(60, 70, 120, 0.1), transparent 60%),
+    rgba(6, 6, 10, 0.94) !important;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/*
+ * 深色模式下给弹窗 / 对话框 / 浮层卡片补上描边与柔和投影，
+ * 让它们从近黑的窗口底色中明显浮出。
+ * 已显式设置内联 border（如各设置项卡片）的卡片会被 :not 排除，避免重复描边。
+ */
+html[data-theme='dark'] .n-modal .n-card:not([style*='borderColor']):not([style*='border-color']),
+html[data-theme='dark'] .n-dialog,
+html[data-theme='dark'] .n-popover,
+html[data-theme='dark'] .n-dropdown-menu,
+html[data-theme='dark'] .n-tooltip {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* 浅色模式下同样给浮层补上清晰描边，避免与白底弹窗无边界区分 */
+html[data-theme='light'] .n-popover,
+html[data-theme='light'] .n-dropdown-menu {
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.14),
+    0 12px 40px rgba(0, 0, 0, 0.1);
+}
+
+/*
+ * n-dropdown / n-select 菜单自带 --n-box-shadow / --n-menu-box-shadow，
+ * box-shadow 覆盖可能被主题变量盖掉，因此直接给面板补真实描边。
+ * 下拉类面板为 .n-dropdown/.n-dropdown-menu，n-select 面板为 .n-base-select-menu。
+ */
+html[data-theme='dark'] .n-dropdown,
+html[data-theme='dark'] .n-dropdown-menu,
+html[data-theme='dark'] .n-base-select-menu {
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+}
+
+html[data-theme='light'] .n-dropdown,
+html[data-theme='light'] .n-dropdown-menu,
+html[data-theme='light'] .n-base-select-menu {
+  border: 1px solid rgba(0, 0, 0, 0.14) !important;
+}
+
+/*
+ * 背景蒙层模糊：给 NaiveUI 弹窗、确认框等蒙层叠加毛玻璃，
+ * 让被遮挡的主界面柔和虚化，突出前景弹窗。
+ */
+.n-modal-mask,
+.n-dialog-mask {
+  backdrop-filter: blur(8px) saturate(1.1);
+  -webkit-backdrop-filter: blur(8px) saturate(1.1);
 }
 
 .route-fade-enter-active,

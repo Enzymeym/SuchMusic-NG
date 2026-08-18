@@ -4,7 +4,8 @@
  * 供 IPC handler 和插件系统共用
  */
 import { promises as fs } from 'fs'
-import { extname } from 'path'
+import { extname, basename, join } from 'path'
+import { tmpdir } from 'os'
 
 export interface MusicMetaTags {
   title?: string
@@ -20,6 +21,142 @@ export interface MusicMetaTags {
     description?: string
   }
   [key: string]: any
+}
+
+/** 可回退的写入类错误（权限 / 文件占用 / 目录缺等） */
+const RETRYABLE_WRITE_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'ENOTDIR', 'ENOENT'])
+
+/**
+ * 清除目标文件的只读属性。
+ * Windows 上 readonly 文件对 writeFile / rename / copyFile 覆盖都会返回 EPERM，
+ * Node 的 chmod 在 Windows 只影响只读位：写入位（0o200）存在即清除只读。
+ */
+async function clearReadOnly(target: string): Promise<void> {
+  try {
+    await fs.chmod(target, 0o666)
+  } catch {
+    // 忽略，交给后续写入重试判断
+  }
+}
+
+/**
+ * 向同一路径写入临时文件后替换目标文件
+ * @param useRename true 表示同目录原子替换（先删后 rename）；false 表示跨盘复制覆盖
+ */
+async function writeTempAndReplace(
+  tmpPath: string,
+  target: string,
+  data: Buffer,
+  useRename: boolean
+): Promise<void> {
+  try {
+    await fs.writeFile(tmpPath, data)
+    // 目标可能是只读文件，先清除只读再替换
+    await clearReadOnly(target)
+    if (useRename) {
+      try {
+        await fs.rename(tmpPath, target)
+      } catch {
+        // Windows 上目标已存在时 rename 会失败，先删除再重命名
+        await fs.unlink(target)
+        await fs.rename(tmpPath, target)
+      }
+    } else {
+      await fs.copyFile(tmpPath, target)
+    }
+  } finally {
+    try {
+      await fs.unlink(tmpPath)
+    } catch {
+      // 忽略清理失败
+    }
+  }
+}
+
+/** 单次写入的等待间隔（用于瞬态文件锁，如 Defender / 媒体索引占用） */
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 格式化错误为「code message 」以便定位失败阶段 */
+function describeErr(e: unknown): string {
+  const err = e as NodeJS.ErrnoException
+  const code = err?.code ? `${err.code} ` : ''
+  return `${code}${err?.message || String(e)}`.trim()
+}
+
+/**
+ * 单次写入尝试：①直接写入 → ②清除只读后重试 → ③同目录临时文件 + 重命名 → ④系统临时目录 + 复制替换
+ */
+async function writeFileOnce(filePath: string, data: Buffer): Promise<void> {
+  const attemptLog: string[] = []
+
+  // ① 直接写入
+  try {
+    await fs.writeFile(filePath, data)
+    return
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code
+    if (code && !RETRYABLE_WRITE_CODES.has(code)) throw e
+    attemptLog.push(`①直接写入: ${describeErr(e)}`)
+  }
+
+  // ② 清除只读属性后重试直接写入
+  await clearReadOnly(filePath)
+  try {
+    await fs.writeFile(filePath, data)
+    return
+  } catch (e) {
+    attemptLog.push(`②清只读后写入: ${describeErr(e)}`)
+  }
+
+  // ③ 同目录临时文件 + 原子重命名（避免跨盘且降低被拦截概率）
+  const bare = filePath.replace(/\.[^/.\\]+$/, '')
+  const sameDirTmp = `${bare}.${process.pid}.${Date.now()}.part`
+  try {
+    await writeTempAndReplace(sameDirTmp, filePath, data, true)
+    return
+  } catch (e) {
+    attemptLog.push(`③同目录替换: ${describeErr(e)}`)
+  }
+
+  // ④ 系统临时目录 + 复制替换
+  const sysTmp = join(tmpdir(), `${basename(filePath)}.${process.pid}.${Date.now()}.part`)
+  try {
+    await writeTempAndReplace(sysTmp, filePath, data, false)
+  } catch (e) {
+    attemptLog.push(`④系统临时替换: ${describeErr(e)}`)
+    throw new Error(`写入文件失败: ${filePath}（${attemptLog.join(' | ')}）`, { cause: e })
+  }
+}
+
+/**
+ * 向音频文件写入标签数据。
+ * Windows 下只读属性 / 防病毒软件 / 瞬态文件锁（Defender、媒体索引等）会拦截
+ * 对原文件的写覆盖（EPERM）。方案：①-④ 多级容错 + ⑤ 指数退避整轮重试，
+ * 以扛过保存瞬间出现的短暂文件占用。
+ */
+async function writeFileRobust(filePath: string, data: Buffer): Promise<void> {
+  // 16 次尝试：首轮立即，之后逐步退避到 10s。
+  // Windows Defender 实时防护扫描新写入的音频文件（尤其大 FLAC）会短暂加锁（EPERM），
+  // 只要扫描窗口是瞬态的，增大重试次数与间隔即可错开并最终写入成功。
+  const retries = 16
+  const backoff = [0, 100, 200, 300, 500, 800, 1200, 1800, 2500, 3500, 4500, 5500, 6500, 7500, 8500, 10000]
+  let lastError: unknown
+
+  for (let i = 0; i < retries; i++) {
+    if (i > 0) {
+      await sleep(backoff[Math.min(i, backoff.length - 1)])
+    }
+    try {
+      await writeFileOnce(filePath, data)
+      return
+    } catch (e) {
+      lastError = e
+    }
+  }
+  const reason = lastError instanceof Error ? lastError.message : String(lastError)
+  throw new Error(`写入文件失败: ${filePath}（${reason}）`, { cause: lastError })
 }
 
 /**
@@ -59,7 +196,7 @@ async function writeMp3Tag(filePath: string, tags: MusicMetaTags): Promise<boole
     throw new Error('MP3 标签更新失败')
   }
 
-  await fs.writeFile(filePath, success as Buffer)
+  await writeFileRobust(filePath, success as Buffer)
   return true
 }
 
@@ -160,7 +297,7 @@ async function writeFlacTag(filePath: string, tags: MusicMetaTags): Promise<bool
   }
   audioData.copy(outBuffer, pos)
 
-  await fs.writeFile(filePath, outBuffer)
+  await writeFileRobust(filePath, outBuffer)
   return true
 }
 
@@ -188,6 +325,6 @@ async function writeWavTag(filePath: string, tags: MusicMetaTags): Promise<boole
   }
 
   const newBuffer = wav.toBuffer()
-  await fs.writeFile(filePath, newBuffer)
+  await writeFileRobust(filePath, newBuffer)
   return true
 }

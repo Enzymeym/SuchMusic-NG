@@ -37,10 +37,30 @@ if (!settingsStore.appearance.themeColorFollowsCover && settingsStore.appearance
   setPrimaryColor(settingsStore.appearance.customThemeColor)
 }
 
-const { theme } = useAutoNaiveTheme()
+const { theme, isDark } = useAutoNaiveTheme()
 
 const route = useRoute()
 const isDesktopLyric = computed(() => route.name === 'desktop-lyric')
+
+// 深色模式下统一深化 NaiveUI 组件背景，与窗口深黑便捷基底对齐，并带轻微描边
+const providerOverrides = computed(() => {
+  const base = themeOverridesRef.value
+  if (isDesktopLyric.value || !isDark.value) return base
+  return {
+    ...base,
+    common: {
+      ...base.common,
+      bodyColor: '#07070b',
+      cardColor: '#0a0a0f',
+      modalColor: '#0b0b11',
+      popoverColor: '#0b0b11',
+      tableColor: '#0b0b11',
+      actionColor: '#0d0d13',
+      borderColor: 'rgba(255,255,255,0.08)',
+      dividerColor: 'rgba(255,255,255,0.06)'
+    }
+  }
+})
 
 const playerStore = usePlayerStore()
 const playlistStore = usePlaylistStore()
@@ -134,7 +154,16 @@ onUnmounted(() => {
 
 onMounted(() => {
   if (!isDesktopLyric.value) {
-    window.electron.ipcRenderer.on('player:control', (_, action: string) => {
+    window.electron.ipcRenderer.on('player:control', (_, action: any) => {
+      // 任务栏播控拖动进度条：action 为对象 { action:'seek', positionMs }
+      if (action && typeof action === 'object' && action.action === 'seek') {
+        if (playerStore.currentSong && typeof action.positionMs === 'number') {
+          audioEngine.seek(action.positionMs).then(() => {
+            playerStore.setPosition(action.positionMs)
+          })
+        }
+        return
+      }
       switch (action) {
         case 'play':
           if (!playerStore.isPlaying) {
@@ -216,7 +245,7 @@ onMounted(() => {
     <SplashScreen :visible="!appReady" @fade-out-complete="handleSplashFadeOutComplete" />
   </template>
 
-  <n-config-provider :theme="isDesktopLyric ? null : theme" :theme-overrides="themeOverridesRef">
+  <n-config-provider :theme="isDesktopLyric ? null : theme" :theme-overrides="providerOverrides">
     <n-global-style v-if="!isDesktopLyric" />
     <n-notification-provider>
       <n-message-provider>

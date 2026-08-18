@@ -144,12 +144,6 @@ const searchOptions = [
     desc: '歌词界面的显示字体'
   },
   {
-    label: '任务栏歌词字体',
-    value: 'appearance.taskbarLyricsFont',
-    section: 'appearance',
-    desc: '桌面歌词和任务栏歌词的显示字体'
-  },
-  {
     label: '主题主色',
     value: 'appearance.themeColor',
     section: 'appearance',
@@ -396,11 +390,12 @@ const settingItemBgColor = computed(() => {
   return isDark.value ? themeVars.value.cardColor : '#FFFFFF'
 })
 
-// 设置项卡片边框颜色（优先主题边框色，其次分隔线色），弱化为半透明以弱化边框
+// 设置项卡片边框颜色：深色下用清晰的白色描边增强卡片辨识度与可读性，浅色下弱化为半透明
 const settingItemBorderColor = computed(() => {
+  if (isDark.value) return 'rgba(255, 255, 255, 0.12)'
   const base = themeVars.value.borderColor || themeVars.value.dividerColor || 'transparent'
   if (base === 'transparent') return base
-  return `color-mix(in srgb, ${base} 60%, transparent)`
+  return `color-mix(in srgb, ${base} 45%, transparent)`
 })
 
 // 处理搜索选择，切换到对应分组并高亮目标项

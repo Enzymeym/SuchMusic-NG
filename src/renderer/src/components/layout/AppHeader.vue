@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { NInput, NIcon, NButton, NDivider, useDialog, NPopover, NScrollbar, useThemeVars, NImage, NSpin, useMessage } from 'naive-ui'
+import { NInput, NIcon, NButton, NDivider, useDialog, NPopover, NScrollbar, useThemeVars, NImage, NSpin, useMessage, NAvatar, NText, NTag } from 'naive-ui'
 
 const props = defineProps<{
   collapsed?: boolean
@@ -544,86 +544,89 @@ const headerPaddingStyle = computed(() => {
         </template>
 
         <div v-if="neteaseUser" class="user-panel-logged">
-          <div class="user-panel-current">
-            <img
-              v-if="neteaseUser.avatarUrl"
-              :src="neteaseUser.avatarUrl"
+          <!-- 当前账号信息：竖向布局 -->
+          <div class="user-panel-profile">
+            <n-avatar
+              :src="neteaseUser.avatarUrl || undefined"
+              round
+              :size="52"
               class="user-panel-avatar"
-              referrerpolicy="no-referrer"
-              alt=""
-            />
-            <div v-else class="user-panel-avatar user-panel-avatar-placeholder">
-              <n-icon size="22"><i class="mgc_user_fill"></i></n-icon>
+            >
+              <n-icon v-if="!neteaseUser.avatarUrl" size="24"><i class="mgc_user_fill"></i></n-icon>
+            </n-avatar>
+            <n-text strong :depth="1" class="user-panel-name">{{ neteaseUser.nickname }}</n-text>
+            <div class="user-panel-tags">
+              <n-tag v-if="isVip" type="warning" size="small" :bordered="false">VIP</n-tag>
+              <n-tag v-if="neteaseUser.level" size="small" :bordered="false">
+                Lv.{{ neteaseUser.level }}
+              </n-tag>
             </div>
-            <div class="user-panel-info">
-              <div class="user-panel-name-line">
-                <span class="user-panel-name">{{ neteaseUser.nickname }}</span>
-                <span v-if="isVip" class="vip-badge">VIP</span>
-                <span v-if="neteaseUser.level" class="level-badge">Lv.{{ neteaseUser.level }}</span>
-              </div>
-              <div v-if="vipLabel" class="vip-level-text">{{ vipLabel }}</div>
-              <div class="user-panel-id">用户ID: {{ neteaseUser.userId || '-' }}</div>
-            </div>
+            <n-text v-if="vipLabel" depth="3" class="user-panel-vip">{{ vipLabel }}</n-text>
+            <n-text depth="3" class="user-panel-id">用户ID: {{ neteaseUser.userId || '-' }}</n-text>
           </div>
 
           <template v-if="neteaseAccounts.length > 1">
-            <n-divider style="margin: 6px 0" />
-            <div class="user-panel-section-title">已登录账号（点击切换）</div>
-            <div class="user-account-list">
-              <div
+            <n-divider style="margin: 8px 0" />
+            <div class="user-panel-section-title">已登录账号</div>
+            <div class="user-panel-menu">
+              <button
                 v-for="acc in neteaseAccounts"
                 :key="acc.userId"
-                class="user-account-item"
-                :class="{ active: acc.userId === neteaseUser.userId }"
+                type="button"
+                class="menu-item"
+                :class="{ 'menu-item-active': acc.userId === neteaseUser.userId }"
                 @click="handleSwitchAccount(acc.userId)"
               >
-                <img
-                  v-if="acc.avatarUrl"
-                  :src="acc.avatarUrl"
-                  class="user-account-avatar"
-                  referrerpolicy="no-referrer"
-                  alt=""
-                />
-                <div v-else class="user-account-avatar user-account-avatar-placeholder">
-                  <n-icon size="16"><i class="mgc_user_fill"></i></n-icon>
-                </div>
-                <div class="user-account-info">
-                  <div class="user-account-name">{{ acc.nickname }}</div>
-                  <div class="user-account-meta">
-                    <span v-if="acc.vipType && acc.vipType > 0" class="vip-badge mini">VIP</span>
-                    <span v-if="acc.level" class="level-badge mini">Lv.{{ acc.level }}</span>
-                  </div>
-                </div>
-                <n-icon
-                  v-if="acc.userId === neteaseUser.userId"
-                  size="16"
-                  class="user-account-check"
-                  ><i class="mgc_check_line"></i
-                ></n-icon>
-              </div>
+                <n-avatar
+                  :src="acc.avatarUrl || undefined"
+                  round
+                  :size="28"
+                  class="menu-item-icon"
+                >
+                  <n-icon v-if="!acc.avatarUrl" size="16"><i class="mgc_user_fill"></i></n-icon>
+                </n-avatar>
+                <span class="menu-item-label">
+                  <span class="menu-item-text">{{ acc.nickname }}</span>
+                  <span v-if="acc.vipType && acc.vipType > 0" class="menu-item-badge vip">VIP</span>
+                  <span v-if="acc.level" class="menu-item-badge">Lv.{{ acc.level }}</span>
+                </span>
+                <n-icon v-if="acc.userId === neteaseUser.userId" size="16" class="menu-item-check">
+                  <i class="mgc_check_line"></i>
+                </n-icon>
+              </button>
             </div>
           </template>
 
-          <div class="user-panel-actions">
-            <n-button size="small" secondary @click="() => handleLogout()">退出登录</n-button>
+          <!-- 操作选项：下拉菜单项样式 -->
+          <n-divider style="margin: 8px 0" />
+          <div class="user-panel-menu">
+            <button type="button" class="menu-item menu-item-danger" @click="handleLogout()">
+              <n-icon size="16" class="menu-item-icon"><i class="mgc_exit_line"></i></n-icon>
+              <span class="menu-item-label menu-item-text">退出登录</span>
+            </button>
           </div>
         </div>
 
         <div v-else class="user-panel-login">
-          <div class="user-panel-qr-status">{{ qrStatusText || '正在准备二维码...' }}</div>
-          <n-image
-            v-if="qrImg"
-            :src="qrImg"
-            width="200"
-            style="border-radius: 8px;"
-          />
+          <n-text depth="3" class="user-panel-qr-status">
+            {{ qrStatusText || '正在准备二维码...' }}
+          </n-text>
+          <n-image v-if="qrImg" :src="qrImg" width="200" style="border-radius: 8px;" />
           <div v-else-if="qrLoading" class="user-panel-qr-loading">
             <n-spin size="medium" />
           </div>
-          <div class="user-panel-actions">
-            <n-button size="small" secondary :disabled="qrLoading" @click="handleRefreshQr">
-              刷新二维码
-            </n-button>
+          <n-divider style="margin: 6px 0 0" />
+          <!-- 操作选项：下拉菜单项样式 -->
+          <div class="user-panel-menu">
+            <button
+              type="button"
+              class="menu-item"
+              :disabled="qrLoading"
+              @click="handleRefreshQr"
+            >
+              <n-icon size="16" class="menu-item-icon"><i class="mgc_refresh_4_line"></i></n-icon>
+              <span class="menu-item-label menu-item-text">刷新二维码</span>
+            </button>
           </div>
         </div>
       </n-popover>
@@ -860,38 +863,6 @@ html[data-theme='dark'] .app-header:not(.is-transparent) .search-bar :deep(.n-in
   font-weight: 500;
 }
 
-.vip-badge {
-  flex-shrink: 0;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1.4;
-  background: linear-gradient(135deg, #f6c945, #d9911f);
-  color: #fff;
-  padding: 1px 5px;
-  border-radius: 4px;
-}
-
-.vip-badge.mini {
-  font-size: 9px;
-  padding: 0 4px;
-}
-
-.level-badge {
-  flex-shrink: 0;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1.4;
-  color: var(--n-text-color);
-  border: 1px solid var(--n-border-color);
-  padding: 0 5px;
-  border-radius: 4px;
-}
-
-.level-badge.mini {
-  font-size: 9px;
-  padding: 0 4px;
-}
-
 .window-controls {
   display: flex;
   align-items: center;
@@ -1072,49 +1043,28 @@ html[data-theme='dark'] .suggestion-item:hover {
 .user-panel-logged {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 4px;
   padding: 2px 0;
 }
 
-.user-panel-current {
+/* 当前账号信息：竖向布局 */
+.user-panel-profile {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: 4px;
   width: 100%;
+  padding: 4px 0 8px;
+  text-align: center;
 }
 
 .user-panel-avatar {
-  width: 52px;
-  height: 52px;
-  border-radius: 50%;
-  object-fit: cover;
   flex-shrink: 0;
-}
-
-.user-panel-avatar-placeholder {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(128, 128, 128, 0.15);
-  color: var(--n-text-color-3);
-}
-
-.user-panel-info {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.user-panel-name-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
+  margin-bottom: 4px;
 }
 
 .user-panel-name {
+  max-width: 100%;
   font-size: 15px;
   font-weight: 600;
   overflow: hidden;
@@ -1122,89 +1072,28 @@ html[data-theme='dark'] .suggestion-item:hover {
   white-space: nowrap;
 }
 
-.user-panel-id {
-  font-size: 12px;
-  color: var(--n-text-color-3);
+.user-panel-tags {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 
-.vip-level-text {
+.user-panel-vip {
   font-size: 11px;
   font-weight: 500;
   color: #c9962e;
 }
 
+.user-panel-id {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .user-panel-section-title {
   font-size: 12px;
   color: var(--n-text-color-3);
-  margin-bottom: 6px;
-}
-
-.user-account-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: 100%;
-  max-height: 180px;
-  overflow-y: auto;
-}
-
-.user-account-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 8px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.user-account-item:hover {
-  background-color: rgba(128, 128, 128, 0.1);
-}
-
-.user-account-item.active {
-  background-color: rgba(128, 128, 128, 0.12);
-}
-
-.user-account-avatar {
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  object-fit: cover;
-  flex-shrink: 0;
-}
-
-.user-account-avatar-placeholder {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(128, 128, 128, 0.15);
-  color: var(--n-text-color-3);
-}
-
-.user-account-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.user-account-name {
-  font-size: 13px;
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.user-account-meta {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 2px;
-}
-
-.user-account-check {
-  color: var(--n-primary-color);
-  flex-shrink: 0;
+  padding: 0 10px 4px;
 }
 
 .user-panel-login {
@@ -1212,6 +1101,103 @@ html[data-theme='dark'] .suggestion-item:hover {
   flex-direction: column;
   align-items: center;
   gap: 10px;
+}
+
+/* 下拉菜单项样式 */
+.user-panel-menu {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--n-text-color);
+  font-size: 13px;
+  font-family: inherit;
+  text-align: left;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.menu-item:hover {
+  background-color: rgba(128, 128, 128, 0.14);
+}
+
+html[data-theme='dark'] .menu-item:hover {
+  background-color: rgba(255, 255, 255, 0.09);
+}
+
+.menu-item-active {
+  background-color: rgba(128, 128, 128, 0.16);
+}
+
+html[data-theme='dark'] .menu-item-active {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+.menu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.menu-item-danger {
+  color: #d03050;
+}
+
+html[data-theme='dark'] .menu-item-danger:hover {
+  background-color: rgba(208, 48, 80, 0.14);
+}
+
+.menu-item-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+
+.menu-item-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.menu-item-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-item-check {
+  flex-shrink: 0;
+  color: var(--n-primary-color);
+}
+
+.menu-item-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  line-height: 1.4;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid var(--n-border-color);
+  color: var(--n-text-color);
+}
+
+.menu-item-badge.vip {
+  border: none;
+  background: linear-gradient(135deg, #f6c945, #d9911f);
+  color: #fff;
 }
 
 .user-panel-qr-status {
@@ -1227,11 +1213,5 @@ html[data-theme='dark'] .suggestion-item:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.user-panel-actions {
-  display: flex;
-  justify-content: center;
-  margin-top: 2px;
 }
 </style>

@@ -15,9 +15,42 @@ const cacheIndex = new Map<string, string>()
 /** 进行中的下载 Promise（按 URL 去重，避免并发重复下载同一地址） */
 const pendingDownloads = new Map<string, Promise<string>>()
 
+/** 用户自定义缓存目录（空字符串表示使用默认目录）。启动时从 userData/cache-dir.json 加载 */
+let customCacheDir = ''
+
+/** 默认缓存目录：userData/audio-cache */
+function getDefaultAudioCacheDir(): string {
+  return join(app.getPath('userData'), 'audio-cache')
+}
+
+/** 加载用户自定义缓存目录配置（应用启动时调用） */
+async function loadCustomCacheDir(): Promise<void> {
+  try {
+    const configPath = join(app.getPath('userData'), 'cache-dir.json')
+    const data = await fs.readFile(configPath, 'utf-8')
+    const config = JSON.parse(data)
+    if (typeof config.cacheDir === 'string' && config.cacheDir.trim()) {
+      customCacheDir = config.cacheDir.trim()
+    }
+  } catch {
+    // 配置文件不存在或解析失败时使用默认目录
+  }
+}
+
+/** 持久化自定义缓存目录配置 */
+async function saveCustomCacheDir(dir: string): Promise<void> {
+  const configPath = join(app.getPath('userData'), 'cache-dir.json')
+  await fs.writeFile(configPath, JSON.stringify({ cacheDir: dir }, null, 2), 'utf-8')
+}
+
 /** 获取缓存目录（app ready 后才可安全调用 getPath，故用惰性函数） */
 function getAudioCacheDir(): string {
-  return join(app.getPath('userData'), 'audio-cache')
+  return customCacheDir || getDefaultAudioCacheDir()
+}
+
+/** 当前缓存目录（供 IPC 读取，与渲染进程展示保持一致） */
+function getAudioCacheDirForDisplay(): string {
+  return getAudioCacheDir()
 }
 
 /** 计算 URL 的缓存键（sha256 前 32 位，用作文件名） */
@@ -116,12 +149,30 @@ async function downloadOnlineAudio(url: string, hash: string): Promise<string> {
   }
   const contentType = resp.headers.get('content-type')
   const ext = inferAudioExt(contentType, url)
-  const filePath = join(getAudioCacheDir(), `${hash}.${ext}`)
+  let filePath = join(getAudioCacheDir(), `${hash}.${ext}`)
   const buf = Buffer.from(await resp.arrayBuffer())
   if (buf.length === 0) {
     throw new Error('下载音频失败: 内容为空')
   }
-  await fs.writeFile(filePath, buf)
+  // 写入缓存文件。Windows EPERM 通常由防病毒扫描/只读属性引起，
+  // 先删后写重试一次；仍失败则回退到系统临时目录，避免播放中断
+  try {
+    await fs.writeFile(filePath, buf)
+  } catch (writeErr: any) {
+    if (writeErr.code === 'EPERM') {
+      await fs.unlink(filePath).catch(() => {})
+      try {
+        await fs.writeFile(filePath, buf)
+      } catch {
+        const tempDir = join(require('os').tmpdir(), 'such-music-audio-cache')
+        await fs.mkdir(tempDir, { recursive: true })
+        filePath = join(tempDir, `${hash}.${ext}`)
+        await fs.writeFile(filePath, buf)
+      }
+    } else {
+      throw writeErr
+    }
+  }
   cacheIndex.set(hash, filePath)
   // 新写入文件 mtime 即为最新，作为 LRU 基准；随后按容量上限淘汰旧缓存
   await evictCacheIfNeeded()
@@ -157,8 +208,119 @@ export function registerAudioHandlers(): void {
   // 初始化本地音频解码 IPC，调用 native/symphonia_napi_decoder.node
   const { decode_audio_to_pcm, decode_audio_stream } = loadNativeDecoder()
 
-  // 初始化在线音频缓存索引（异步，不阻塞启动；期间首次播放会走下载路径）
-  initAudioCache().catch(() => {})
+  // 先加载自定义缓存目录配置，再构建缓存索引（异步，不阻塞启动）
+  loadCustomCacheDir()
+    .catch(() => {})
+    .finally(() => {
+      initAudioCache().catch(() => {})
+    })
+
+  // 获取缓存目录与统计信息（文件数量、总大小）
+  ipcMain.handle('audio:get-cache-info', async () => {
+    const dir = getAudioCacheDirForDisplay()
+    let fileCount = 0
+    let totalSize = 0
+    try {
+      const files = await fs.readdir(dir)
+      for (const file of files) {
+        const filePath = join(dir, file)
+        try {
+          const stat = await fs.stat(filePath)
+          if (stat.isFile()) {
+            fileCount += 1
+            totalSize += stat.size
+          }
+        } catch {
+          // 忽略读取失败的文件
+        }
+      }
+    } catch {
+      // 目录不存在（如首次使用）时返回空统计
+    }
+    return {
+      dir,
+      isDefault: !customCacheDir,
+      fileCount,
+      totalSize,
+      maxSize: MAX_CACHE_SIZE_MB * 1024 * 1024
+    }
+  })
+
+  // 更新缓存目录：清空旧索引 → 迁移/创建新目录 → 重建索引 → 持久化配置
+  ipcMain.handle('audio:set-cache-dir', async (_event, dir: string) => {
+    const newDir = (dir || '').trim()
+    const oldDir = getAudioCacheDirForDisplay()
+    if (newDir === oldDir) return { success: true, dir: oldDir }
+    if (!newDir) {
+      // 恢复默认目录
+      customCacheDir = ''
+      await saveCustomCacheDir('')
+    } else {
+      customCacheDir = newDir
+      await saveCustomCacheDir(newDir)
+    }
+    cacheIndex.clear()
+    const targetDir = getAudioCacheDir()
+    await fs.mkdir(targetDir, { recursive: true }).catch(() => {})
+    // 尽力迁移旧缓存文件到新目录（文件被占用等失败时跳过），避免旧目录残留
+    if (oldDir !== targetDir) {
+      try {
+        const oldFiles = await fs.readdir(oldDir)
+        for (const file of oldFiles) {
+          const src = join(oldDir, file)
+          const dst = join(targetDir, file)
+          try {
+            const stat = await fs.stat(src)
+            if (!stat.isFile()) continue
+            await fs.rename(src, dst)
+          } catch {
+            try {
+              await fs.copyFile(src, dst)
+              await fs.unlink(src).catch(() => {})
+            } catch {
+              // 文件被占用等场景跳过
+            }
+          }
+        }
+        // 迁移后若旧目录为空则删除
+        const remaining = await fs.readdir(oldDir)
+        if (remaining.length === 0) {
+          await fs.rmdir(oldDir).catch(() => {})
+        }
+      } catch {
+        // 旧目录不存在或迁移失败时忽略
+      }
+    }
+    await initAudioCache().catch(() => {})
+    return { success: true, dir: getAudioCacheDirForDisplay() }
+  })
+
+  // 清空缓存目录
+  ipcMain.handle('audio:clear-cache', async () => {
+    const dir = getAudioCacheDirForDisplay()
+    let removedCount = 0
+    let removedSize = 0
+    try {
+      const files = await fs.readdir(dir)
+      for (const file of files) {
+        const filePath = join(dir, file)
+        try {
+          const stat = await fs.stat(filePath)
+          if (stat.isFile()) {
+            await fs.unlink(filePath)
+            removedCount += 1
+            removedSize += stat.size
+          }
+        } catch {
+          // 文件被占用或删除失败时跳过
+        }
+      }
+    } catch {
+      // 目录不存在时忽略
+    }
+    cacheIndex.clear()
+    return { success: true, removedCount, removedSize }
+  })
 
   ipcMain.handle('audio:decode', async (_event, filePath: string) => {
     // 调用本地解码器，将路径交给 Rust NAPI 插件处理

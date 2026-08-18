@@ -127,14 +127,25 @@ export function registerSystemHandlers(): void {
 
   // 下载音乐文件
   ipcMain.handle('system:download-music', async (_event, { url, filename, dir }: { url: string, filename: string, dir: string }) => {
-    try {
-      const targetDir = dir || app.getPath('music')
-      const targetPath = path.join(targetDir, filename)
+    const targetDir = dir || app.getPath('music')
+    // 目标目录可能不存在（自定义目录被删除 / 新装系统默认音乐目录未创建），先确保存在
+    await fs.mkdir(targetDir, { recursive: true })
 
+    // 目标文件若已存在（同名旧文件 / 之前下载的半成品）可能被占用、只读或被杀软锁定，直接写入会触发 EPERM。
+    // 因此先写入带随机后缀的临时文件，写完后删除旧文件并重命名，规避 Windows 文件锁定问题。
+    const targetPath = path.join(targetDir, filename)
+    const ext = path.extname(filename)
+    const tempPath = path.join(
+      targetDir,
+      `${path.basename(filename, ext)}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.part${ext}`
+    )
+
+    try {
       const response = await axios({
         url,
         method: 'GET',
         responseType: 'stream',
+        maxRedirects: 5,
         // 附加登录态，保证登录后获取的高音质 CDN 地址可正常下载
         headers: {
           Cookie: getActiveNeteaseCookie() || undefined,
@@ -144,14 +155,30 @@ export function registerSystemHandlers(): void {
         }
       })
 
-      const writer = createWriteStream(targetPath)
+      const writer = createWriteStream(tempPath)
       response.data.pipe(writer)
 
-      return new Promise((resolve, reject) => {
-        writer.on('finish', () => resolve(targetPath))
-        writer.on('error', reject)
+      await new Promise<void>((resolve, reject) => {
+        writer.on('finish', () => resolve())
+        writer.on('error', (err) => {
+          // 下载中断时清理半成品文件，避免残留损坏文件
+          fs.unlink(tempPath).catch(() => {})
+          reject(err)
+        })
       })
+
+      // 写入完成：先尽力删除旧文件，再重命名；若目标仍被占用导致失败，再删一次后重试
+      await fs.unlink(targetPath).catch(() => {})
+      try {
+        await fs.rename(tempPath, targetPath)
+      } catch {
+        await fs.unlink(targetPath).catch(() => {})
+        await fs.rename(tempPath, targetPath)
+      }
+      return targetPath
     } catch (error) {
+      // 网络/流/重命名错误时同样清理临时文件
+      fs.unlink(tempPath).catch(() => {})
       console.error('下载音乐失败:', error)
       throw error
     }

@@ -141,30 +141,6 @@ const handleCustomColorChange = (color: string | null) => {
 
     <n-card
       class="setting-item"
-      :class="{ 'setting-item--highlight': props.highlightKey === 'appearance.taskbarLyricsFont' }"
-      data-setting-key="appearance.taskbarLyricsFont"
-      :bordered="true"
-      size="small"
-      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
-    >
-      <div class="setting-row">
-        <div class="setting-label">
-          <div class="main-label">任务栏歌词字体</div>
-          <div class="sub-label">任务栏歌词的显示字体</div>
-        </div>
-        <n-select
-          v-model:value="settingsStore.appearance.taskbarLyricsFont"
-          :options="props.fontOptions"
-          :render-label="renderFontLabel"
-          filterable
-          placeholder="选择字体"
-          style="width: 200px"
-        />
-      </div>
-    </n-card>
-
-    <n-card
-      class="setting-item"
       :class="{ 'setting-item--highlight': props.highlightKey === 'appearance.desktopLyricsFont' }"
       data-setting-key="appearance.desktopLyricsFont"
       :bordered="true"

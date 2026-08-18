@@ -1,5 +1,7 @@
 // Cross-platform native build wrapper
 // On Windows: uses powershell. On Linux/macOS: uses pwsh if available, otherwise skips gracefully.
+// Delegates to build-native.ps1, which builds media-control-napi (all platforms)
+// and audio-napi (Windows only), so no platform-specific flag is needed here.
 import { execSync } from 'child_process'
 import { existsSync } from 'fs'
 import { join, dirname } from 'path'

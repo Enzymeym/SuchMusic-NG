@@ -12,7 +12,7 @@ import { registerVolumeBalanceHandlers } from './ipc/volumeBalance'
 import { registerLocalMusicHandlers } from './ipc/localMusic'
 import { registerSystemHandlers } from './ipc/system'
 import { registerDesktopLyricHandlers } from './ipc/desktopLyric'
-import { registerTaskbarLyricHandlers } from './ipc/taskbarLyric'
+import { registerTaskbarControlHandlers } from './ipc/taskbarControl'
 import { createTray } from './tray'
 import { registerAudioEngineHandlers } from './services/audioEngineService'
 import { registerWasapiHandlers } from './services/wasapiService'
@@ -24,6 +24,11 @@ import { loadAllSavedPlugins } from './ipc/pluginManager'
 import { registerLyricHandlers } from './services/lyricService'
 import { registerNeteaseHandlers } from './services/neteaseService'
 import { mainMemoryMonitor } from './utils/memoryMonitor'
+import {
+  initMediaControl,
+  destroyMediaControl,
+  dispatchMediaCommand
+} from './services/mediaControlService'
 
 // 修复 PowerShell 中中文显示错误的问题
 if (process.platform === 'win32') {
@@ -57,6 +62,25 @@ app.commandLine.appendArgument('--disable_webnn_for_npu=0')
 // 设置应用名称，解决 SMTC（系统媒体传输控制）中显示未知应用或 electron 的问题
 app.name = 'Such Music'
 app.setAppUserModelId('com.mym.suchmusic')
+
+// 单实例锁：防止应用重复启动
+// 第二次启动时主动退出当前实例，并让已存在的实例聚焦主窗口
+const gotTheLock = app.requestSingleInstanceLock()
+if (!gotTheLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    const win = getMainWindow()
+    if (win && !win.isDestroyed()) {
+      // 主窗口可能处于最小化或隐藏到托盘状态，恢复并聚焦
+      if (win.isMinimized()) win.restore()
+      if (!win.isVisible()) win.show()
+      win.focus()
+    } else {
+      createWindow()
+    }
+  })
+}
 
 /**
  * 在 Windows 注册表中注册 AppUserModelID，并在开始菜单创建快捷方式，
@@ -144,6 +168,7 @@ app.whenReady().then(() => {
 
   app.on('before-quit', () => {
     ;(app as any).isQuiting = true
+    destroyMediaControl()
   })
 
   // Default open or close DevTools by F12 in development
@@ -156,19 +181,14 @@ app.whenReady().then(() => {
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
 
-  // 注册系统媒体键（耳机线控 / 键盘媒体键），转发给渲染进程复用 player:control 处理器。
-  // 主进程拦截可保证应用窗口未聚焦（甚至隐藏到托盘）时媒体键仍能控制播放。
+  // 系统媒体键兜底：仅 Linux 通过 globalShortcut 注册（Windows/macOS 由原生会话接管），
+  // 经 dispatchMediaCommand 走 200ms 去重，避免与 MPRIS 双触发。
   const registerMediaKeyShortcuts = () => {
-    const sendControl = (action: string) => {
-      const win = getMainWindow()
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('player:control', action)
-      }
-    }
+    if (process.platform !== 'linux') return
     try {
-      globalShortcut.register('MediaPlayPause', () => sendControl('toggle'))
-      globalShortcut.register('MediaNextTrack', () => sendControl('next'))
-      globalShortcut.register('MediaPreviousTrack', () => sendControl('prev'))
+      globalShortcut.register('MediaPlayPause', () => dispatchMediaCommand('toggle'))
+      globalShortcut.register('MediaNextTrack', () => dispatchMediaCommand('next'))
+      globalShortcut.register('MediaPreviousTrack', () => dispatchMediaCommand('prev'))
     } catch (err) {
       console.warn('媒体键注册失败:', err)
     }
@@ -185,7 +205,7 @@ app.whenReady().then(() => {
   registerLocalMusicHandlers()
   registerSystemHandlers()
   registerDesktopLyricHandlers()
-  registerTaskbarLyricHandlers()
+  registerTaskbarControlHandlers()
   registerAudioEngineHandlers()
   registerWasapiHandlers()
   registerUpdateHandlers()
@@ -193,6 +213,7 @@ app.whenReady().then(() => {
   registerNeteaseHandlers()
 
   createWindow()
+  initMediaControl()
   createTray()
   monitorEvent()
 

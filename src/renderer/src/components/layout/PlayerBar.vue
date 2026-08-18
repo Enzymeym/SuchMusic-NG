@@ -26,7 +26,8 @@ import { audioEngine } from '../../audio/audio-engine'
 import PlayerPage from './PlayerPage.vue'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useDesktopLyric } from '../../composables/useDesktopLyric'
-import { useTaskbarLyric } from '../../composables/useTaskbarLyric'
+import { useTaskbarControl } from '../../composables/useTaskbarControl'
+import { useSystemMediaControl } from '../../composables/useSystemMediaControl'
 import { AudioPlayerManager } from '../../utils/audioPlayerManager'
 import SoundEffectsModal from '../common/SoundEffectsModal.vue'
 import AudioVisualizerControls from '../common/AudioVisualizerControls.vue'
@@ -59,11 +60,12 @@ const applyTrackGain = (song: PlayerSong | null) => {
 }
 
 const { isDesktopLyricOpen, toggleDesktopLyric } = useDesktopLyric()
-const {
-  isOpen: isTaskbarLyricOpen,
-  toggle: toggleTaskbarLyric,
-  init: initTaskbarLyric
-} = useTaskbarLyric()
+
+// 任务栏播控：由设置开关驱动窗口开闭，并同步歌曲信息/播放状态/设置
+useTaskbarControl()
+
+// 跨平台系统媒体控制（Windows SMTC / macOS 现在播放 / Linux MPRIS）
+useSystemMediaControl()
 
 // 音效调节弹窗
 const showSoundEffectsModal = ref(false)
@@ -74,12 +76,11 @@ const showVisualizerModal = ref(false)
 // Automix 智能过渡调度控制器（任务 4）
 const transitionController = getTransitionController()
 
-// 初始化任务栏歌词、音频引擎和 SMTC 控制
+// 初始化音频引擎和 SMTC 控制
 onMounted(async () => {
   // 恢复音量平衡设置并对当前歌曲应用一次补偿增益（应用启动恢复场景）
   volumeBalanceStore.load()
   applyTrackGain(player.currentSong)
-  initTaskbarLyric()
   // 提前初始化音频引擎，避免拖动滑块时的初始化开销；
   // WASAPI 模式下必须先 await 完成引擎创建，否则后续恢复歌曲的 load 会失败
   await audioEngine.ensureContext()
@@ -97,9 +98,6 @@ onMounted(async () => {
     player.handleSongEnd()
   })
 
-  // 注册 SMTC 多媒体控制（Windows 任务栏媒体按钮 / 系统媒体键）
-  registerMediaSessionHandlers()
-
   // 恢复上次播放的歌曲（仅加载并定位到保存的进度，不自动播放）。
   // 原因：loadPlayerState() 在 App.vue setup 中执行，早于本组件 currentSong
   // watch 的注册，恢复的歌曲不会触发 watch 加载；这里显式加载一次，
@@ -109,11 +107,10 @@ onMounted(async () => {
   }
 })
 
-// 清理音频播放结束回调和 SMTC 控制
+// 清理音频播放结束回调
 onBeforeUnmount(() => {
   transitionController.dispose()
   audioEngine.removeOnEndedCallback()
-  unregisterMediaSessionHandlers()
   stopProgressPolling()
 
   if (playlistScrollTimer) {
@@ -240,13 +237,15 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false, i
         return
       } catch (e) {
         console.error('[PlayerBar] Failed to play remote audio:', e)
-        // 网易云在线歌曲：CDN 地址可能已过期/需登录态，重新解析一次后重试
+        // 网易云在线歌曲：CDN 地址可能已过期（下载 403）/需登录态，重新解析一次后重试。
+        // 注意 refresh=true 强制服务端返回新地址：普通重查会命中服务端 URL 缓存，
+        // 可能返回同一已过期地址，导致重试无效
         if (!isRetry && (song as any).source === 'netease' && (song as any).sourceSongId) {
           try {
             const songId = Number((song as any).sourceSongId)
-            const urlMap = await window.api.netease.songUrl([songId])
+            const urlMap = await window.api.netease.songUrl([songId], undefined, true)
             const freshUrl = urlMap[songId]
-            if (freshUrl && freshUrl !== filePath) {
+            if (freshUrl) {
               ;(song as any).filePath = freshUrl
               return await doLoadAndPlaySong(song, forcePlay, true)
             }
@@ -376,9 +375,6 @@ const togglePlay = async () => {
     }
     await audioEngine.pause()
     player.setPlaying(false)
-    // 主动更新 SMTC 播放状态
-    updateMediaPlaybackState()
-    updateMediaPositionState()
   } else {
     if (player.currentSong) {
       const success = await audioEngine.play()
@@ -389,9 +385,6 @@ const togglePlay = async () => {
         if (!transitionController.isActive) {
           transitionController.onSongStarted(player.currentSong)
         }
-        // 主动更新 SMTC 播放状态
-        updateMediaPlaybackState()
-        updateMediaPositionState()
       } else {
         // 播放失败（如未加载），尝试重新加载并播放
         console.log('[PlayerBar] Play failed, reloading song...')
@@ -725,7 +718,6 @@ const handleMoreMenuSelect = (key: string) => {
     const rate = parseFloat(key.replace('playback-rate-', ''))
     settingsStore.playback.playbackRate = rate
     audioEngine.setPlaybackRate(rate)
-    updateMediaPositionState()
     return
   }
 
@@ -869,206 +861,10 @@ const totalSeconds = computed(() => {
   return Math.floor(player.currentSong.durationMs / 1000)
 })
 
-// 判断当前环境是否支持 Media Session（用于 SMTC）
-const supportsMediaSession =
-  typeof navigator !== 'undefined' && (navigator as any).mediaSession !== undefined
-
-// 更新 Media Session 的元数据（标题 / 艺术家 / 封面）
-const updateMediaMetadata = () => {
-  if (!supportsMediaSession) return
-
-  const mediaSession = (navigator as any).mediaSession
-  const MediaMetadataCtor = (window as any).MediaMetadata
-
-  if (!MediaMetadataCtor) return
-
-  const song = player.currentSong
-  if (!song) {
-    mediaSession.metadata = null
-    return
-  }
-
-  const artworkSrc = song.cover || defaultCover
-
-  // 尝试从 data URL 中解析封面 MIME 类型，保证与实际格式一致
-  let artworkType = 'image/png'
-  if (typeof artworkSrc === 'string' && artworkSrc.startsWith('data:')) {
-    const mimeMatch = artworkSrc.slice(5).split(';', 1)[0]
-    if (mimeMatch) {
-      artworkType = mimeMatch
-    }
-  }
-
-  mediaSession.metadata = new MediaMetadataCtor({
-    title: song.title || '未选择歌曲',
-    artist: song.artist || '',
-    album: song.album || '',
-    artwork: [
-      {
-        src: artworkSrc,
-        sizes: '512x512',
-        type: artworkType
-      }
-    ]
-  })
-}
-
-// 更新 Media Session 的播放位置状态（用于系统进度条与拖动）
-const updateMediaPositionState = () => {
-  if (!supportsMediaSession) return
-
-  const mediaSession = (navigator as any).mediaSession
-  if (typeof mediaSession.setPositionState !== 'function') return
-
-  const song = player.currentSong
-  if (!song || !song.durationMs || song.durationMs <= 0) return
-
-  // 确保 position 值不超过 duration 值，避免 setPositionState 抛出错误
-  const duration = song.durationMs / 1000
-  const position = Math.min(player.positionMs / 1000, duration)
-
-  mediaSession.setPositionState({
-    duration: duration,
-    position: position,
-    playbackRate: 1
-  })
-}
-
-// 更新 Media Session 的播放状态（playing/paused/none）
-const updateMediaPlaybackState = () => {
-  if (!supportsMediaSession) return
-  const mediaSession = (navigator as any).mediaSession
-
-  if (!player.currentSong) {
-    mediaSession.playbackState = 'none'
-    return
-  }
-
-  mediaSession.playbackState = player.isPlaying ? 'playing' : 'paused'
-}
-
-// 刷新完整的 SMTC 状态（metadata + playbackState + position）
-const refreshMediaSession = () => {
-  updateMediaMetadata()
-  updateMediaPlaybackState()
-  updateMediaPositionState()
-}
-
-// 注册 Media Session 操作处理器（在 onMounted 中调用一次）
-const registerMediaSessionHandlers = () => {
-  if (!supportsMediaSession) return
-
-  const mediaSession = (navigator as any).mediaSession
-
-  // 播放 —— 复用 togglePlay，包含 currentSong 检查和 play 失败兜底
-  mediaSession.setActionHandler('play', () => {
-    if (!player.isPlaying) {
-      togglePlay()
-    }
-  })
-
-  // 暂停 —— 复用 togglePlay
-  mediaSession.setActionHandler('pause', () => {
-    if (player.isPlaying) {
-      togglePlay()
-    }
-  })
-
-  // 停止
-  mediaSession.setActionHandler('stop', () => {
-    if (player.isPlaying) {
-      togglePlay()
-    }
-  })
-
-  // 上一首
-  mediaSession.setActionHandler('previoustrack', () => {
-    handlePrev()
-    refreshMediaSession()
-  })
-
-  // 下一首
-  mediaSession.setActionHandler('nexttrack', () => {
-    handleNext()
-    refreshMediaSession()
-  })
-
-  // 快退
-  mediaSession.setActionHandler('seekbackward', (details: any) => {
-    const offsetSec = details?.seekOffset ?? 10
-    const targetMs = Math.max(0, player.positionMs - offsetSec * 1000)
-    abortTransitionForSeek()
-    audioEngine.seek(targetMs)
-    // seek 中断了过渡流程：重新武装智能过渡
-    transitionController.rearmAfterSeek()
-    updateMediaPositionState()
-  })
-
-  // 快进
-  mediaSession.setActionHandler('seekforward', (details: any) => {
-    const offsetSec = details?.seekOffset ?? 10
-    const targetMs = player.positionMs + offsetSec * 1000
-    abortTransitionForSeek()
-    audioEngine.seek(targetMs)
-    // seek 中断了过渡流程：重新武装智能过渡
-    transitionController.rearmAfterSeek()
-    updateMediaPositionState()
-  })
-
-  // 跳转到指定时间
-  mediaSession.setActionHandler('seekto', (details: any) => {
-    if (typeof details?.seekTime !== 'number') return
-    const targetMs = Math.max(0, details.seekTime * 1000)
-    abortTransitionForSeek()
-    audioEngine.seek(targetMs)
-    // seek 中断了过渡流程：重新武装智能过渡
-    transitionController.rearmAfterSeek()
-    updateMediaPositionState()
-  })
-}
-
-// 清除 Media Session 操作处理器
-const unregisterMediaSessionHandlers = () => {
-  if (!supportsMediaSession) return
-
-  const mediaSession = (navigator as any).mediaSession
-  const actions = [
-    'play',
-    'pause',
-    'stop',
-    'previoustrack',
-    'nexttrack',
-    'seekbackward',
-    'seekforward',
-    'seekto'
-  ]
-  for (const action of actions) {
-    mediaSession.setActionHandler(action, null)
-  }
-}
-
-// 监听当前歌曲及其元数据变化，刷新 SMTC
-watch(
-  () => ({
-    id: player.currentSong?.id,
-    title: player.currentSong?.title,
-    artist: player.currentSong?.artist,
-    album: player.currentSong?.album,
-    cover: player.currentSong?.cover
-  }),
-  () => {
-    updateMediaMetadata()
-    updateMediaPositionState()
-  },
-  { immediate: true }
-)
-
-// 监听播放状态，更新 SMTC 播放状态并管理进度轮询
+// 监听播放状态，管理进度轮询
 watch(
   () => player.isPlaying,
   (isPlaying) => {
-    updateMediaPlaybackState()
-    updateMediaPositionState()
     if (isPlaying) {
       startProgressPolling()
     } else {
@@ -1076,14 +872,6 @@ watch(
     }
   },
   { immediate: true }
-)
-
-// 监听播放进度，定期更新位置状态
-watch(
-  () => player.positionMs,
-  () => {
-    updateMediaPositionState()
-  }
 )
 
 // 任务栏进度（0-1 之间，小于 0 表示关闭显示）
@@ -1402,16 +1190,6 @@ watch(
         class="action-btn"
         :type="isDesktopLyricOpen ? 'primary' : 'default'"
         @click="toggleDesktopLyric"
-      >
-        <n-icon size="22" style="margin-left: -5px"><i class="mgc_text_line"></i></n-icon>
-      </n-button>
-      <n-button
-        quaternary
-        class="action-btn"
-        style="display: none"
-        :type="isTaskbarLyricOpen ? 'primary' : 'default'"
-        @click="toggleTaskbarLyric"
-        title="任务栏歌词"
       >
         <n-icon size="22" style="margin-left: -5px"><i class="mgc_text_line"></i></n-icon>
       </n-button>

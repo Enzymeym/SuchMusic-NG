@@ -3,6 +3,7 @@ import { promises as fs } from 'fs'
 import { join, extname, basename, dirname } from 'path'
 import { writeAudioMeta } from '../utils/musicMetaWriter'
 import { readMetaManually } from '../utils/musicMetaReader'
+import { readNativeTags } from '../services/tagReaderService'
 
 // 本地音乐扫描结果的数据结构
 interface LocalMusicTrack {
@@ -33,6 +34,50 @@ export function registerLocalMusicHandlers(): void {
   // 按需读取单个音频文件的元数据（时长 + 封面）
   ipcMain.handle('local-music:get-meta', async (_event, filePath: string) => {
     try {
+      // 首选 native 标签读取（music_tag_reader）。native 可用且读取到结果时走 native 分支。
+      const native = await readNativeTags(filePath, { includeCover: true })
+      if (native !== 'UNAVAILABLE' && native !== null) {
+        // 尝试读取同名 .lrc 歌词文件，若有内容则以 .lrc 内容优先覆盖 native 标签歌词
+        let lyrics: string | undefined = native.lyrics
+        try {
+          const lrcPath = filePath.substring(0, filePath.lastIndexOf('.')) + '.lrc'
+          // Check if file exists
+          await fs.access(lrcPath)
+          // Read file
+          const lrcContent = await fs.readFile(lrcPath, 'utf-8')
+          if (lrcContent) {
+            lyrics = lrcContent
+          }
+        } catch (e) {
+          // Ignore if lrc file doesn't exist or read error
+        }
+
+        const result: {
+          durationMs?: number
+          bitrate?: number
+          sampleRate?: number
+          cover?: { mimeType: string; base64: string }
+          title?: string
+          artists: string[]
+          album?: string
+          lyrics?: string
+          year?: number
+          source: 'native'
+        } = {
+          source: 'native',
+          durationMs: native.durationMs,
+          bitrate: native.bitrate,
+          sampleRate: native.sampleRate,
+          cover: native.cover,
+          title: native.title,
+          artists: native.artists ?? [],
+          album: native.album,
+          lyrics,
+          year: native.year
+        }
+        return result
+      }
+
       const parseFile = await getMusicMetadataParser()
 
       // 优先尝试带时长分析的解析
@@ -168,7 +213,8 @@ export function registerLocalMusicHandlers(): void {
         artists,
         album,
         lyrics,
-        year
+        year,
+        source: 'js'
       }
     } catch (error) {
       console.error('get-meta failed:', filePath, error)
@@ -184,6 +230,20 @@ export function registerLocalMusicHandlers(): void {
       console.error('Failed to write meta:', filePath, error)
       throw error
     }
+  })
+
+  // 根据封面 URL 下载并返回 base64 数据（供标签编辑弹窗「自动匹配」填充封面，避免渲染层 CORS）
+  ipcMain.handle('local-music:fetch-cover', async (_event, url: string) => {
+    if (!url || typeof url !== 'string' || !url.trim()) {
+      throw new Error('封面 URL 不能为空')
+    }
+    const response = await fetch(url.trim())
+    if (!response.ok) {
+      throw new Error(`下载封面失败: HTTP ${response.status}`)
+    }
+    const contentType = response.headers.get('content-type') || 'image/jpeg'
+    const buffer = Buffer.from(await response.arrayBuffer())
+    return { mimeType: contentType, base64: buffer.toString('base64') }
   })
 
   // 根据封面 URL 下载并写入音频文件标签
@@ -279,7 +339,21 @@ export function registerLocalMusicHandlers(): void {
     const defaultDir = app.getPath('music')
     const roots = Array.isArray(scanDirs) && scanDirs.length ? scanDirs : [defaultDir]
 
-    const exts = new Set(['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg'])
+    const exts = new Set([
+      '.mp3',
+      '.flac',
+      '.wav',
+      '.m4a',
+      '.aac',
+      '.ogg',
+      '.opus',
+      '.ape',
+      '.wv',
+      '.aiff',
+      '.aif',
+      '.mp4',
+      '.m4b'
+    ])
     const tracks: LocalMusicTrack[] = []
     const seenFiles = new Set<string>()
 

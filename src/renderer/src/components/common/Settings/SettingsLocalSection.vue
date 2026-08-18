@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { NCard, NButton, NIcon, NTag, useMessage } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 
@@ -76,7 +76,94 @@ const resetDownloadDir = () => {
   downloadDir.value = ''
 }
 
+// ====== 在线音频缓存设置 ======
+const cacheInfo = ref<{
+  dir: string
+  isDefault: boolean
+  fileCount: number
+  totalSize: number
+  maxSize: number
+} | null>(null)
+
+const cacheLoading = ref(false)
+
+/** 格式化字节为可读大小 */
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0
+  let val = bytes
+  while (val >= 1024 && i < units.length - 1) {
+    val /= 1024
+    i += 1
+  }
+  return `${val.toFixed(val >= 100 || i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+/** 刷新缓存目录与统计信息 */
+async function refreshCacheInfo() {
+  if (!window.electron || !window.electron.ipcRenderer) return
+  cacheLoading.value = true
+  try {
+    cacheInfo.value = await window.api.cache.getInfo()
+  } catch (error) {
+    console.error('获取缓存信息失败', error)
+  } finally {
+    cacheLoading.value = false
+  }
+}
+
+/** 更改缓存目录 */
+async function chooseCacheDir() {
+  if (!window.electron || !window.electron.ipcRenderer) return
+  try {
+    const dir = (await window.electron.ipcRenderer.invoke('system:choose-dir')) as string
+    if (!dir) return
+    const result = await window.api.cache.setDir(dir)
+    if (result && result.success) {
+      message.success('缓存目录已更改')
+      await refreshCacheInfo()
+    }
+  } catch (error) {
+    console.error('更改缓存目录失败', error)
+    message.error('更改缓存目录失败')
+  }
+}
+
+/** 恢复默认缓存目录 */
+async function resetCacheDir() {
+  if (!window.electron || !window.electron.ipcRenderer) return
+  try {
+    const result = await window.api.cache.setDir('')
+    if (result && result.success) {
+      message.success('已恢复默认缓存目录')
+      await refreshCacheInfo()
+    }
+  } catch (error) {
+    console.error('恢复默认缓存目录失败', error)
+    message.error('恢复默认缓存目录失败')
+  }
+}
+
+/** 清空缓存 */
+async function clearCache() {
+  if (!window.electron || !window.electron.ipcRenderer) return
+  try {
+    const result = await window.api.cache.clear()
+    if (result && result.success) {
+      message.success(
+        `已清空 ${result.removedCount} 个缓存文件，释放 ${formatBytes(result.removedSize)}`
+      )
+      await refreshCacheInfo()
+    }
+  } catch (error) {
+    console.error('清空缓存失败', error)
+    message.error('清空缓存失败')
+  }
+}
+
 onMounted(async () => {
+  refreshCacheInfo()
   if (scanDirs.value.length === 0 && window.electron && window.electron.ipcRenderer) {
     try {
       const musicDir = (await window.electron.ipcRenderer.invoke('system:get-music-dir')) as string
@@ -195,6 +282,69 @@ onMounted(async () => {
           </n-button>
           <n-button size="small" tertiary @click="resetDownloadDir" v-if="downloadDir">
             恢复默认
+          </n-button>
+        </div>
+      </div>
+    </n-card>
+
+    <div class="section-group-title" style="margin-top: 24px">缓存</div>
+    <n-card
+      class="setting-item cache-card"
+      data-setting-key="local.cacheDir"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="cache-row">
+        <div class="cache-info-main">
+          <div class="cache-title">在线音乐缓存</div>
+          <div class="cache-desc">
+            在线播放的歌曲会缓存到本地，二次播放时秒开、避免重复下载。可自定义缓存位置或清空缓存。
+          </div>
+          <div class="cache-meta">
+            <div class="cache-path">
+              <span class="label">缓存目录：</span>
+              <span class="value">{{ cacheInfo?.dir || '加载中...' }}</span>
+              <n-tag v-if="cacheInfo?.isDefault" size="small" type="default" round>
+                默认
+              </n-tag>
+            </div>
+            <div class="cache-stats" v-if="cacheInfo">
+              <span>{{ cacheInfo.fileCount }} 首歌曲</span>
+              <span class="dot">·</span>
+              <span>{{ formatBytes(cacheInfo.totalSize) }}</span>
+              <span class="dot">·</span>
+              <span>上限 {{ formatBytes(cacheInfo.maxSize) }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="cache-actions">
+          <n-button size="small" :loading="cacheLoading" @click="chooseCacheDir">
+            <template #icon>
+              <n-icon size="16">
+                <i class="mgc_folder_open_line" />
+              </n-icon>
+            </template>
+            更改目录
+          </n-button>
+          <n-button
+            size="small"
+            tertiary
+            @click="resetCacheDir"
+            v-if="cacheInfo && !cacheInfo.isDefault"
+          >
+            恢复默认
+          </n-button>
+          <n-button size="small" tertiary type="error" @click="clearCache">
+            <template #icon>
+              <n-icon size="16">
+                <i class="mgc_delete_2_line" />
+              </n-icon>
+            </template>
+            清空缓存
           </n-button>
         </div>
       </div>

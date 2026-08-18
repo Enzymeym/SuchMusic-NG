@@ -20,6 +20,29 @@ interface TrackInfo {
   format: string
 }
 
+// 系统媒体控制状态接口
+interface MediaControlStatus {
+  title?: string
+  artist?: string
+  album?: string
+  cover?: string // data: | http(s): | 本地文件路径 | blob:(渲染层先转 data:)
+  durationMs?: number
+  playing: boolean
+  positionMs?: number
+}
+
+// 系统媒体控制命令类型
+type MediaControlCommand =
+  | 'play'
+  | 'pause'
+  | 'toggle'
+  | 'next'
+  | 'prev'
+  | 'stop'
+  | 'seek'
+  | 'seekRelative'
+  | 'setVolume'
+
 // EQ 频段设置接口
 interface EqBandSettings {
   frequency: number
@@ -496,14 +519,36 @@ const api = {
   netease: {
     search: (keywords: string, offset = 0, limit = 30) =>
       ipcRenderer.invoke('netease:search', keywords, offset, limit),
-    songUrl: (ids: number[], quality?: string) =>
-      ipcRenderer.invoke('netease:song-url', ids, quality),
+    songUrl: (ids: number[], quality?: string, refresh?: boolean) =>
+      ipcRenderer.invoke('netease:song-url', ids, quality, refresh),
     hotSearch: () => ipcRenderer.invoke('netease:hot-search'),
     loginQr: () => ipcRenderer.invoke('netease:login-qr'),
     loginQrCheck: (unikey: string) => ipcRenderer.invoke('netease:login-qr-check', unikey),
     loginStatus: () => ipcRenderer.invoke('netease:login-status'),
     switchAccount: (userId: string) => ipcRenderer.invoke('netease:switch-account', userId),
     logout: (userId?: string) => ipcRenderer.invoke('netease:logout', userId)
+  },
+
+  // 在线音频缓存（缓存目录管理 / 统计 / 清理）
+  cache: {
+    getInfo: () => ipcRenderer.invoke('audio:get-cache-info'),
+    setDir: (dir: string) => ipcRenderer.invoke('audio:set-cache-dir', dir),
+    clear: () => ipcRenderer.invoke('audio:clear-cache')
+  },
+
+  // 系统媒体控制（三端通用：Windows SMTC / macOS Now Playing / Linux MPRIS）
+  mediaControl: {
+    update: (status: MediaControlStatus) => ipcRenderer.send('media-control:update', status),
+    getStatus: () => ipcRenderer.invoke('media-control:get-status'),
+    onCommand: (cb) => {
+      const handler = (_event: any, payload: { command: MediaControlCommand; value?: number }) => cb(payload)
+      // 保存包装后的 handler 引用，供 offCommand 精确移除对应监听器
+      ;(cb as any)._mediaControlHandler = handler
+      ipcRenderer.on('media-control:command', handler)
+    },
+    offCommand: (cb) => {
+      ipcRenderer.removeListener('media-control:command', (cb as any)._mediaControlHandler || cb)
+    }
   },
 
   updater: {

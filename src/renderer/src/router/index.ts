@@ -14,7 +14,7 @@ const SingerDetailView = () => import('../views/SingerDetailView.vue')
 const AlbumView = () => import('../views/AlbumView.vue')
 const AlbumDetailView = () => import('../views/AlbumDetailView.vue')
 const DesktopLyricView = () => import('../views/DesktopLyricView.vue')
-const TaskbarLyricView = () => import('../views/TaskbarLyricView.vue')
+const TaskbarControlView = () => import('../views/TaskbarControlView.vue')
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -86,9 +86,9 @@ const router = createRouter({
       component: DesktopLyricView
     },
     {
-      path: '/taskbar-lyric',
-      name: 'taskbar-lyric',
-      component: TaskbarLyricView
+      path: '/taskbar-control',
+      name: 'taskbar-control',
+      component: TaskbarControlView
     }
   ]
 })

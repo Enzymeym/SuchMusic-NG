@@ -60,8 +60,8 @@ export function useDownloadMusic() {
       let url = ''
       try {
         if (source === 'wy') {
-          // 网易云：直接通过网易云接口获取播放/下载地址（该接口与搜索页播放共用，已可用）
-          const urlMap = await window.api.netease.songUrl([Number(songId)], qualityLevel)
+          // 网易云：直接通过网易云接口获取播放/下载地址，每次强制刷新（服务端 URL 缓存可能返回过期地址）
+          const urlMap = await window.api.netease.songUrl([Number(songId)], qualityLevel, true)
           url = urlMap[Number(songId)] || ''
         } else {
           const res = await runSnowdropGetMusicUrl(source, musicInfo, qualityLevel)

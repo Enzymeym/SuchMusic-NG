@@ -21,7 +21,6 @@ export interface GeneralSettings {
 export interface AppearanceSettings {
   globalFont: string
   lyricsFont: string
-  taskbarLyricsFont: string
   desktopLyricsFont: string
   themeMode: 'system' | 'light' | 'dark'
   themeColorPreset: string
@@ -88,6 +87,14 @@ export interface PlaybackSettings {
   visualizerColorTheme: string // 颜色主题（default/warm/cool/neon/grayscale/follow-cover）
   visualizerIntensity: number // 显示强度（0.3-1.5）
   volumeBoost: number // 音量增强倍数（1.0-3.0，默认 1.0）
+  // 任务栏播控设置
+  taskbarControlEnabled: boolean // 是否启用任务栏播控
+  taskbarControlWidthMode: 'auto' | 'custom' // 宽度模式：自适应 / 自定义
+  taskbarControlCustomWidth: number // 自定义宽度（px）
+  taskbarControlHeight: number // 窗口高度（px）
+  taskbarControlShowCover: boolean
+  taskbarControlShowTitle: boolean
+  taskbarControlShowArtist: boolean
 }
 
 export interface LocalSettings {
@@ -111,7 +118,6 @@ export const useSettingsStore = defineStore('settings', () => {
   const appearance = ref<AppearanceSettings>({
     globalFont: 'Microsoft YaHei UI',
     lyricsFont: 'Microsoft YaHei UI',
-    taskbarLyricsFont: 'Microsoft YaHei UI',
     desktopLyricsFont: 'Microsoft YaHei UI',
     themeMode: 'system',
     themeColorPreset: 'default',
@@ -180,7 +186,15 @@ export const useSettingsStore = defineStore('settings', () => {
     visualizerSize: 1.0,
     visualizerColorTheme: 'follow-cover',
     visualizerIntensity: 0.8,
-    volumeBoost: 1.0
+    volumeBoost: 1.0,
+    // 任务栏播控
+    taskbarControlEnabled: false,
+    taskbarControlWidthMode: 'auto',
+    taskbarControlCustomWidth: 480,
+    taskbarControlHeight: 60,
+    taskbarControlShowCover: true,
+    taskbarControlShowTitle: true,
+    taskbarControlShowArtist: true
   })
 
   const local = ref<LocalSettings>({

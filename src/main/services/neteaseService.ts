@@ -205,13 +205,17 @@ const QUALITY_LEVEL_MAP: Record<string, string> = {
  */
 async function getSongUrlMap(
   ids: number[],
-  quality = '128k'
+  quality = '128k',
+  refresh = false
 ): Promise<Record<number, string>> {
   if (ids.length === 0) return {}
   const level = QUALITY_LEVEL_MAP[quality] || 'standard'
   const url =
     `${API_BASE}/song/url/v1?id=${ids.join(',')}` +
-    `&level=${level}&randomCNIP=true`
+    `&level=${level}&randomCNIP=true` +
+    // refresh=true 时附加时间戳穿透服务端 URL 缓存，用于播放失败后强制取新地址
+    // （普通重查可能返回同一已过期的 CDN 地址，导致重试无效）
+    (refresh ? `&t=${Date.now()}` : '')
   try {
     const resp = await netFetch(url, activeAccount()?.cookie)
     if (!resp.ok) {
@@ -695,10 +699,13 @@ export function registerNeteaseHandlers(): void {
     }
   )
 
-  ipcMain.handle('netease:song-url', async (_event, ids: number[], quality?: string) => {
-    if (!Array.isArray(ids)) return {}
-    return getSongUrlMap(ids.map(Number).filter((id) => Number.isFinite(id) && id > 0), quality)
-  })
+  ipcMain.handle(
+    'netease:song-url',
+    async (_event, ids: number[], quality?: string, refresh?: boolean) => {
+      if (!Array.isArray(ids)) return {}
+      return getSongUrlMap(ids.map(Number).filter((id) => Number.isFinite(id) && id > 0), quality, refresh)
+    }
+  )
 
   ipcMain.handle('netease:hot-search', async () => {
     return getHotSearch()

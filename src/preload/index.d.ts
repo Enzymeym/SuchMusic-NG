@@ -27,6 +27,30 @@ export interface NeteaseLoginProfile {
   signature?: string
 }
 
+/** 系统媒体控制状态 */
+export interface MediaControlStatus {
+  title?: string
+  artist?: string
+  album?: string
+  /** data: | http(s): | 本地文件路径 | blob:(渲染层先转 data:) */
+  cover?: string
+  durationMs?: number
+  playing: boolean
+  positionMs?: number
+}
+
+/** 系统媒体控制命令 */
+export type MediaControlCommand =
+  | 'play'
+  | 'pause'
+  | 'toggle'
+  | 'next'
+  | 'prev'
+  | 'stop'
+  | 'seek'
+  | 'seekRelative'
+  | 'setVolume'
+
 declare global {
   interface Window {
     electron: ElectronAPI
@@ -77,7 +101,7 @@ declare global {
           hasMore: boolean
           total: number
         }>
-        songUrl: (ids: number[], quality?: string) => Promise<Record<number, string>>
+        songUrl: (ids: number[], quality?: string, refresh?: boolean) => Promise<Record<number, string>>
         hotSearch: () => Promise<{ searchWord: string; iconUrl?: string }[]>
         loginQr: () => Promise<{ unikey: string; qrimg: string }>
         loginQrCheck: (unikey: string) => Promise<{
@@ -97,6 +121,23 @@ declare global {
           activeUserId: string
         }>
         logout: (userId?: string) => Promise<void>
+      }
+      cache: {
+        getInfo: () => Promise<{
+          dir: string
+          isDefault: boolean
+          fileCount: number
+          totalSize: number
+          maxSize: number
+        }>
+        setDir: (dir: string) => Promise<{ success: boolean; dir: string }>
+        clear: () => Promise<{ success: boolean; removedCount: number; removedSize: number }>
+      }
+      mediaControl: {
+        update: (status: MediaControlStatus) => void
+        getStatus: () => Promise<MediaControlStatus>
+        onCommand: (cb: (payload: { command: MediaControlCommand; value?: number }) => void) => void
+        offCommand: (cb: (payload: { command: MediaControlCommand; value?: number }) => void) => void
       }
       updater: {
         check: (channel: 'stable' | 'beta') => Promise<any>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { NCard, NSwitch, NSlider, NSelect, NButton, NButtonGroup, NAlert, NSpace } from 'naive-ui'
+import { NCard, NSwitch, NSlider, NSelect, NButton, NButtonGroup, NAlert, NSpace, NInputNumber } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import {
   AudioOutputModeManager,
@@ -449,6 +449,170 @@ const props = defineProps<{
           />
           <span class="time-text">{{ volumeBoostPercent }}%</span>
         </div>
+      </div>
+    </n-card>
+
+    <div class="section-group-title">任务栏播控</div>
+
+    <n-card
+      class="setting-item"
+      :class="{
+        'setting-item--highlight': props.highlightKey === 'playback.taskbarControlEnabled'
+      }"
+      data-setting-key="playback.taskbarControlEnabled"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">启用任务栏播控</div>
+          <div class="sub-label">在任务栏边缘显示歌曲信息与播放控制按钮</div>
+        </div>
+        <n-switch v-model:value="settingsStore.playback.taskbarControlEnabled" />
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
+      :class="{
+        'setting-item--highlight': props.highlightKey === 'playback.taskbarControlWidthMode'
+      }"
+      data-setting-key="playback.taskbarControlWidthMode"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">宽度模式</div>
+          <div class="sub-label">自适应：按封面与歌曲信息自动调整宽度；自定义：使用固定宽度</div>
+        </div>
+        <n-select
+          v-model:value="settingsStore.playback.taskbarControlWidthMode"
+          :options="[
+            { label: '自适应', value: 'auto' },
+            { label: '自定义', value: 'custom' }
+          ]"
+          style="width: 120px"
+        />
+      </div>
+    </n-card>
+
+    <n-card
+      v-if="settingsStore.playback.taskbarControlWidthMode === 'custom'"
+      class="setting-item"
+      :class="{
+        'setting-item--highlight': props.highlightKey === 'playback.taskbarControlCustomWidth'
+      }"
+      data-setting-key="playback.taskbarControlCustomWidth"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">自定义宽度</div>
+          <div class="sub-label">任务栏播控窗口的固定宽度（像素）</div>
+        </div>
+        <n-input-number
+          v-model:value="settingsStore.playback.taskbarControlCustomWidth"
+          :min="200"
+          :max="1200"
+          :step="20"
+          style="width: 120px"
+        />
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
+      :class="{
+        'setting-item--highlight': props.highlightKey === 'playback.taskbarControlHeight'
+      }"
+      data-setting-key="playback.taskbarControlHeight"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">窗口高度上限</div>
+          <div class="sub-label">播控窗口高度自动匹配任务栏高度，此值为最大上限（像素）</div>
+        </div>
+        <n-input-number
+          v-model:value="settingsStore.playback.taskbarControlHeight"
+          :min="40"
+          :max="120"
+          :step="5"
+          style="width: 120px"
+        />
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">显示封面</div>
+          <div class="sub-label">在播控中显示当前歌曲封面</div>
+        </div>
+        <n-switch v-model:value="settingsStore.playback.taskbarControlShowCover" />
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">显示标题</div>
+          <div class="sub-label">在播控中显示当前歌曲标题</div>
+        </div>
+        <n-switch v-model:value="settingsStore.playback.taskbarControlShowTitle" />
+      </div>
+    </n-card>
+
+    <n-card
+      class="setting-item"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">显示歌手</div>
+          <div class="sub-label">在播控中显示当前歌曲歌手</div>
+        </div>
+        <n-switch v-model:value="settingsStore.playback.taskbarControlShowArtist" />
       </div>
     </n-card>
   </div>
