@@ -20,7 +20,6 @@ import SettingsLocalSection from './Settings/SettingsLocalSection.vue'
 import SettingsPluginSection from './Settings/SettingsPluginSection.vue'
 // 关于页包含 markdown-it / axios 等较重依赖，懒加载以减小主包体积
 const SettingsAboutSection = defineAsyncComponent(() => import('./Settings/SettingsAboutSection.vue'))
-import SettingsMorphaeumSection from './Settings/SettingsMorphaeumSection.vue'
 
 const themeVars = useThemeVars()
 const { isDark } = useAutoNaiveTheme()
@@ -541,16 +540,8 @@ watch(
                   :highlight-key="highlightedKey"
                 />
 
-                <settings-morphaeum-section
-                  v-else-if="activeKey === 'morphaeum'"
-                  :setting-item-bg-color="settingItemBgColor"
-                  :setting-item-border-color="settingItemBorderColor"
-                  :highlight-key="highlightedKey"
-                />
-
                 <settings-about-section
                   v-else-if="activeKey === 'about'"
-                  @open-morphaeum="activeKey = 'morphaeum'"
                 />
               </div>
             </transition>

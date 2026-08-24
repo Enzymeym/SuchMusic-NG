@@ -17,16 +17,6 @@ const themeVars = useThemeVars()
 const message = useMessage()
 const settingsStore = useSettingsStore()
 
-// 双击应用名称触发打开隐藏的 Morphaeum 实验分区
-const emit = defineEmits<{
-  (e: 'open-morphaeum'): void
-}>()
-
-const handleAppNameDblClick = () => {
-  message.success('正在进入 Morphaeum 变形实验室...')
-  emit('open-morphaeum')
-}
-
 // 使用更新系统 composable
 const {
   updateInfo,
@@ -296,7 +286,7 @@ const renderedChangelog = computed(() => {
   <div class="settings-content about-root">
     <div class="about-hero">
       <img src="../../../assets/icon.png" alt="logo" class="about-logo" />
-      <div class="about-hero-title" title="Such Music" @dblclick="handleAppNameDblClick">
+      <div class="about-hero-title" title="Such Music">
         {{ appName }}
       </div>
       <div class="about-hero-meta">

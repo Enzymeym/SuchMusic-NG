@@ -2,6 +2,7 @@
 import { computed, ref, onMounted } from 'vue'
 import { NCard, NSwitch, NSlider, NSelect, NButton, NButtonGroup, NAlert, NSpace, NInputNumber } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
+import SettingsMorphaeumSection from './SettingsMorphaeumSection.vue'
 import {
   AudioOutputModeManager,
   cleanRustError,
@@ -644,6 +645,13 @@ onMounted(() => {
         <n-switch v-model:value="settingsStore.playback.taskbarControlShowArtist" />
       </div>
     </n-card>
+
+    <!-- Morphaeum（变形实验室）：智能过渡与音量平衡 -->
+    <settings-morphaeum-section
+      :setting-item-bg-color="props.settingItemBgColor"
+      :setting-item-border-color="props.settingItemBorderColor"
+      :highlight-key="props.highlightKey"
+    />
   </div>
 </template>
 

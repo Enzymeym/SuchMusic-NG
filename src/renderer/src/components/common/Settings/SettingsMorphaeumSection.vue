@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { NCard, NSwitch, NSelect, NSlider, NAlert, NButton, NProgress, useMessage } from 'naive-ui'
+import { NCard, NSwitch, NSelect, NSlider, NAlert, NButton, NProgress, NScrollbar, useMessage } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePlayerStore } from '../../../stores/playerStore'
 import { useVolumeBalanceStore } from '../../../stores/volumeBalanceStore'
@@ -258,18 +258,14 @@ const props = defineProps<{
           <!-- 结果预览：需衰减最多的歌曲 -->
           <div v-if="topAttenuated.length" class="volume-balance-results">
             <div class="time-text" style="margin-bottom: 6px">需衰减最多的歌曲</div>
-            <div class="volume-balance-result-list">
-              <div
-                v-for="(item, idx) in topAttenuated"
-                :key="item.name + item.artist + idx"
-                class="volume-balance-result-item"
-              >
+            <n-scrollbar class="volume-balance-result-list">
+              <div class="volume-balance-result-item" v-for="(item, idx) in topAttenuated" :key="item.name + item.artist + idx">
                 <span class="volume-balance-result-name">
                   {{ item.name }}<template v-if="item.artist"> - {{ item.artist }}</template>
                 </span>
                 <span class="volume-balance-result-gain">{{ item.gainDb.toFixed(1) }} dB</span>
               </div>
-            </div>
+            </n-scrollbar>
           </div>
         </template>
       </div>
