@@ -11,37 +11,9 @@ permissions:
   contents: write
 
 jobs:
-  # 检测当前 tag 对应的 release 是否已存在，用于决定是否还需要重新构建打包
-  check:
-    name: Check release exists
-    runs-on: ubuntu-latest
-    outputs:
-      release_exists: ${{ steps.check.outputs.exists }}
-    steps:
-      - name: Check existing release
-        id: check
-        shell: bash
-        run: |
-          # 通过 API 读取 release/tags/<tag>，返回 200 表示该 tag 的 release 已存在
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME")
-          echo "release_http_code=$HTTP_CODE"
-          if [ "$HTTP_CODE" = "200" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   build:
     name: Build on ${{ matrix.os }}
-    needs: check
     runs-on: ${{ matrix.os }}
-    # 非 tag 推送始终构建；tag 推送仅当其 release 尚未创建（需打包）时才构建。
-    # 若 release 已存在，则跳过打包，避免重复构建。
-    if: ${{ !startsWith(github.ref, 'refs/tags/') || needs.check.outputs.release_exists == 'false' }}
     strategy:
       fail-fast: false
       matrix:
@@ -104,13 +76,16 @@ jobs:
             dist/*.AppImage
             dist/*.snap
             dist/*.deb
+            dist/*.yml
+            dist/*.blockmap
           retention-days: 5
 
-  # 仅在推送 v* 标签时运行：汇总各平台构建产物并自动生成 release 正文。
-  # 若 release 已存在（无需重新打包），则仅更新其内容（正文），保留已有产物。
+  # 仅在推送 v* 标签时运行：汇总各平台构建产物并自动生成 release。
+  # 每次都基于最新产物全新重建 release（先删除该 tag 已存在的旧 release），
+  # 确保二进制安装包始终被挂载，避免"release 已存在则跳过上传"导致的空 release。
   release:
     name: Release
-    needs: [check, build]
+    needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
 
@@ -140,17 +115,29 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Download Artifacts
-        if: needs.check.outputs.release_exists == 'false'
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
+      # 删除该 tag 已存在的旧 release，确保重建时附件总是全新挂载
+      - name: Delete existing release for this tag
+        shell: bash
+        run: gh release delete "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --yes || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.git-cliff.outputs.content }}
-          # 仅在需要打包时上传新产物；release 已存在时留空，仅更新正文、保留已有产物
-          files: ${{ needs.check.outputs.release_exists == 'false' && 'dist/*.exe dist/*.dmg dist/*.AppImage dist/*.snap dist/*.deb dist/*.yml dist/*.blockmap' || '' }}
+          files: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.snap
+            dist/*.deb
+            dist/*.yml
+            dist/*.blockmap
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
