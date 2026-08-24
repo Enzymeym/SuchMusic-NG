@@ -56,9 +56,6 @@ declare global {
     electron: ElectronAPI
     api: {
       rustAudio: any
-      analyzer: {
-        getWasmBinary: () => Promise<Uint8Array | null>
-      }
       memory: {
         getReport: () => Promise<{
           current: {
@@ -103,6 +100,7 @@ declare global {
         }>
         songUrl: (ids: number[], quality?: string, refresh?: boolean) => Promise<Record<number, string>>
         hotSearch: () => Promise<{ searchWord: string; iconUrl?: string }[]>
+        suggest: (keywords: string) => Promise<string[]>
         loginQr: () => Promise<{ unikey: string; qrimg: string }>
         loginQrCheck: (unikey: string) => Promise<{
           code: number

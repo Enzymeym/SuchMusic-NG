@@ -47,6 +47,7 @@ try {
     $out.y = [int]$tbRect.Y
     $out.width = [Math]::Max(120, $leftmostX - $trayLeft - $margin)
     $out.height = [int]$tbRect.Height
+    $out.align = 'center'
   } else {
     # Left-aligned taskbar: fall back to the gap between app cluster and system tray
     $children = $tb.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
@@ -68,6 +69,7 @@ try {
     $out.y = [int]$tbRect.Y
     $out.width = [Math]::Max(120, $trayX - $leftEndX - 2 * $margin)
     $out.height = [int]$tbRect.Height
+    $out.align = 'left'
   }
 
   ($out | ConvertTo-Json -Compress)

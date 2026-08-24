@@ -128,9 +128,11 @@ function renderFrame(): void {
     return
   }
 
-  // 组件不可见或页面隐藏时暂停渲染
+  // 组件不可见或页面隐藏时真正暂停循环（取消帧请求），由可见性监听器负责重启，
+  // 避免以 60fps 空转消耗 CPU/GPU
   if (!isVisible || document.hidden) {
-    animationId = requestAnimationFrame(renderFrame)
+    renderActive = false
+    animationId = null
     return
   }
 
@@ -184,6 +186,21 @@ function ensureRenderLoop(): void {
   animationId = requestAnimationFrame(renderFrame)
 }
 
+/** 有内容可绘制时恢复渲染循环（页面重新可见 / 组件重新进入视口） */
+function resumeRenderIfNeeded(): void {
+  if (isUnmounted || !ctx || renderActive || document.hidden || !isVisible) return
+  if (playerStore.isPlaying || decayLevel > 0.01) {
+    ensureRenderLoop()
+  }
+}
+
+/** 标签页可见性变化：重新可见且有内容时恢复渲染循环 */
+function handleVisibilityChange(): void {
+  if (!document.hidden) {
+    resumeRenderIfNeeded()
+  }
+}
+
 let resizeTimer: ReturnType<typeof setTimeout> | null = null
 
 function debouncedHandleResize(): void {
@@ -220,16 +237,22 @@ onMounted(() => {
       }
     }
 
-    // 可见性检测：离开视口时暂停渲染
+    // 可见性检测：离开视口时暂停渲染，重新进入时按需恢复
     observer = new IntersectionObserver(
       (entries) => {
         isVisible = entries[0]?.isIntersecting ?? true
+        if (isVisible) {
+          resumeRenderIfNeeded()
+        }
       },
       { threshold: 0 }
     )
     if (canvasRef.value) {
       observer.observe(canvasRef.value)
     }
+
+    // 页面标签页隐藏/恢复时暂停/恢复渲染循环
+    document.addEventListener('visibilitychange', handleVisibilityChange)
 
     window.addEventListener('resize', debouncedHandleResize)
   })
@@ -238,6 +261,7 @@ onMounted(() => {
 onUnmounted(() => {
   isUnmounted = true
   renderActive = false
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   window.removeEventListener('resize', debouncedHandleResize)
   if (resizeTimer) {
     clearTimeout(resizeTimer)

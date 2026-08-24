@@ -74,9 +74,20 @@ export function useTaskbarControl() {
   )
 
   // 同步播放进度（位置 + 总时长），用于播控窗口的进度条与时间显示
+  // 节流：常规播放进度最多每 500ms 同步一次（2Hz，足够进度条平滑）；
+  // 位置回退/大幅跳变（seek、切歌重置）时立即同步，保证拖拽跳转即时反馈
+  let lastSentProgressMs = -1
+  let lastProgressSendTime = 0
   watch(
     () => playerStore.positionMs,
     (pos) => {
+      const now = Date.now()
+      const timeSinceLast = now - lastProgressSendTime
+      const isSeekBackward = pos < lastSentProgressMs
+      const largeJump = Math.abs(pos - lastSentProgressMs) > 2000
+      if (timeSinceLast < 500 && !isSeekBackward && !largeJump) return
+      lastSentProgressMs = pos
+      lastProgressSendTime = now
       const dur = playerStore.currentSong?.durationMs ?? 0
       window.electron.ipcRenderer.send('taskbar-control:set-progress', {
         positionMs: pos,
@@ -86,12 +97,13 @@ export function useTaskbarControl() {
     { immediate: true }
   )
 
-  // 同步设置（宽度模式 / 自定义宽度 / 高度 / 显示项）
+  // 同步设置（宽度模式 / 自定义宽度 / 小组件偏移 / 位置偏移 / 显示项）
   watch(
     () => [
       settingsStore.playback.taskbarControlWidthMode,
       settingsStore.playback.taskbarControlCustomWidth,
-      settingsStore.playback.taskbarControlHeight,
+      settingsStore.playback.taskbarControlWidgetOffset,
+      settingsStore.playback.taskbarControlOffsetX,
       settingsStore.playback.taskbarControlShowCover,
       settingsStore.playback.taskbarControlShowTitle,
       settingsStore.playback.taskbarControlShowArtist
@@ -101,7 +113,8 @@ export function useTaskbarControl() {
       window.electron.ipcRenderer.send('taskbar-control:set-settings', {
         widthMode: p.taskbarControlWidthMode,
         customWidth: p.taskbarControlCustomWidth,
-        height: p.taskbarControlHeight,
+        widgetOffset: p.taskbarControlWidgetOffset,
+        offsetX: p.taskbarControlOffsetX,
         showCover: p.taskbarControlShowCover,
         showTitle: p.taskbarControlShowTitle,
         showArtist: p.taskbarControlShowArtist

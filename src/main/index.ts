@@ -7,7 +7,6 @@ import { monitorEvent } from './monitorEvent'
 import { createWindow } from './windows/mainWindow'
 import { getMainWindow } from './windows/mainWindow'
 import { registerAudioHandlers } from './ipc/audio'
-import { registerAnalyzerHandlers } from './ipc/analyzer'
 import { registerVolumeBalanceHandlers } from './ipc/volumeBalance'
 import { registerLocalMusicHandlers } from './ipc/localMusic'
 import { registerSystemHandlers } from './ipc/system'
@@ -30,15 +29,34 @@ import {
   dispatchMediaCommand
 } from './services/mediaControlService'
 
-// 修复 PowerShell 中中文显示错误的问题
+// ====== 修复 Windows 控制台中文乱码 ======
+// 两层保障：
+// 1) chcp 65001 将当前 conhost 代码页切为 UTF-8，终端按 UTF-8 解码后续输出；
+// 2) stdout/stderr 非 TTY（被 npm/electron-vite 以管道转发）时，Node 默认按系统
+//    ANSI 编码写出中文，终端按 GBK 解码即乱码——这里强制将字符串转 UTF-8 字节写出。
+//    TTY 场景 Node 原生走 WriteConsoleW(UTF-16) 不会乱码，故无需补丁。
 if (process.platform === 'win32') {
-  // 尝试设置控制台代码页为 UTF-8
   try {
-    const { execSync } = require('child_process')
     execSync('chcp 65001', { stdio: 'ignore' })
   } catch (e) {
     // 忽略错误
   }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const forceUtf8 = (stream: NodeJS.WriteStream & { _utf8Patched?: boolean }): void => {
+    if (!stream || stream._utf8Patched) return
+    stream._utf8Patched = true
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const original = stream.write.bind(stream)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    stream.write = ((chunk: any, encoding?: any, cb?: any): boolean => {
+      if (typeof chunk === 'string') {
+        return original(Buffer.from(chunk, 'utf8'), typeof encoding === 'function' ? encoding : cb)
+      }
+      return original(chunk, encoding, cb)
+    }) as typeof stream.write
+  }
+  if (!process.stdout.isTTY) forceUtf8(process.stdout)
+  if (!process.stderr.isTTY) forceUtf8(process.stderr)
 }
 
 // This method will be called when Electron has finished
@@ -58,6 +76,10 @@ app.commandLine.appendSwitch(
 // 使用 appendArgument 替代 appendSwitch，确保下划线格式的 flag 被正确传递。
 // 注意：若本机 NPU 驱动不稳定，DirectML 可能异常；届时移除本行即可恢复默认行为。
 app.commandLine.appendArgument('--disable_webnn_for_npu=0')
+
+// 限制 Chromium 磁盘缓存（默认上限 1GB，其内存映射页会计入任务管理器 Working Set，
+// 对音乐应用这类以本地文件为主的产品贡献有限却虚增占用）。128MB 足以缓存封面等网络资源。
+app.commandLine.appendSwitch('disk-cache-size', '134217728')
 
 // 设置应用名称，解决 SMTC（系统媒体传输控制）中显示未知应用或 electron 的问题
 app.name = 'Such Music'
@@ -200,7 +222,6 @@ app.whenReady().then(() => {
 
   // Register IPC handlers
   registerAudioHandlers()
-  registerAnalyzerHandlers()
   registerVolumeBalanceHandlers()
   registerLocalMusicHandlers()
   registerSystemHandlers()
@@ -224,12 +245,29 @@ app.whenReady().then(() => {
       const report = mainMemoryMonitor.getReport()
       const s = report.current
       if (!s) return
+
+      // 按进程类型聚合 RSS，输出全应用内存分布（定位 1300MB 的构成）
+      // getAppMetrics 已包含主进程（type: 'Browser'），此处只统计子进程
+      const byType = new Map<string, { count: number; rss: number }>()
+      let childrenRss = 0
+      for (const p of s.processes) {
+        if (p.type === 'Browser') continue
+        childrenRss += p.rss
+        const key = p.type || 'unknown'
+        const agg = byType.get(key) ?? { count: 0, rss: 0 }
+        agg.count++
+        agg.rss += p.rss
+        byType.set(key, agg)
+      }
+      const parts = [...byType.entries()]
+        .sort((a, b) => b[1].rss - a[1].rss)
+        .map(([type, agg]) => `${type}×${agg.count}=${mainMemoryMonitor.toMB(agg.rss)}`)
+        .join(' ')
+
       console.log(
         `[内存监控] 主进程 rss=${mainMemoryMonitor.toMB(s.rss)} heapUsed=${mainMemoryMonitor.toMB(
           s.heapUsed
-        )} 进程数=${s.totalProcesses} (min=${mainMemoryMonitor.toMB(report.min)}, max=${mainMemoryMonitor.toMB(
-          report.max
-        )})`
+        )} | 子进程: ${parts || '无'} | 合计=${mainMemoryMonitor.toMB(s.rss + childrenRss)}`
       )
     }, 30000)
   }

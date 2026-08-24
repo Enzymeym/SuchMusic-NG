@@ -8,7 +8,7 @@ import {
   BackgroundRender as CoreBackgroundRender,
   MeshGradientRenderer,
 } from "@applemusic-like-lyrics/core";
-import { useTemplateRef, shallowRef, onMounted, onBeforeUnmount, onUnmounted, watch } from "vue";
+import { useTemplateRef, shallowRef, onMounted, onBeforeUnmount, watch } from "vue";
 
 
 export interface BackgroundRenderProps {
@@ -92,25 +92,14 @@ onMounted(() => {
   }
 });
 
-let disposeTimer: ReturnType<typeof setTimeout> | null = null;
-
 onBeforeUnmount(() => {
   const renderer = bgRenderRef.value;
   if (renderer) {
-    renderer.pause();
     bgRenderRef.value = undefined;
-    // 延迟销毁
-    disposeTimer = setTimeout(() => {
-      renderer.dispose();
-      disposeTimer = null;
-    }, 500);
-  }
-});
-
-onUnmounted(() => {
-  if (disposeTimer) {
-    clearTimeout(disposeTimer);
-    disposeTimer = null;
+    // 立即销毁：释放渲染器内部的 rAF 循环与 WebGL/Canvas 资源。
+    // 原实现将 dispose 放入 500ms 延时定时器，但 onUnmounted 会同步把它 clearTimeout，
+    // 导致 dispose() 永远不会执行，rAF 资源在页面切换后持续泄漏。
+    renderer.dispose();
   }
 });
 

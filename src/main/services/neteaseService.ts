@@ -72,16 +72,22 @@ interface WySongUrlResponse {
   }[]
 }
 
-/** 热搜接口响应 */
+/** 热搜接口响应（/search/hot/detail 的 data 为直接数组） */
 interface WyHotSearchResponse {
   code: number
   data?: {
-    list?: {
-      searchWord: string
-      score?: number
-      iconUrl?: string
-      content?: string
-    }[]
+    searchWord: string
+    score?: number
+    iconUrl?: string
+    content?: string
+  }[]
+}
+
+/** 搜索建议接口响应（/search/suggest 的 allMatch 关键字联想） */
+interface WySuggestResponse {
+  code: number
+  result?: {
+    allMatch?: { keyword?: string; type?: number; alg?: string }[]
   }
 }
 
@@ -246,7 +252,7 @@ async function getSongUrlMap(
 async function getHotSearch(): Promise<{ searchWord: string; iconUrl?: string }[]> {
   const url = `${API_BASE}/search/hot/detail`
   try {
-    const resp = await fetch(url)
+    const resp = await netFetch(url)
     if (!resp.ok) {
       console.error(`[neteaseService] HTTP ${resp.status} fetching hot search`)
       return []
@@ -256,12 +262,45 @@ async function getHotSearch(): Promise<{ searchWord: string; iconUrl?: string }[
       console.error(`[neteaseService] API error code ${data.code} fetching hot search`)
       return []
     }
-    return (data.data?.list || []).map((item) => ({
+    return (data.data || []).map((item) => ({
       searchWord: item.searchWord,
       iconUrl: item.iconUrl
     }))
   } catch (e) {
     console.error('[neteaseService] Failed to fetch hot search:', e)
+    return []
+  }
+}
+
+/**
+ * 获取网易云搜索建议（关键字联想）
+ * 基于 /search/suggest 返回的 allMatch 关键字列表，去重后截断
+ */
+async function getSearchSuggest(keywords: string): Promise<string[]> {
+  const url = `${API_BASE}/search/suggest?keywords=${encodeURIComponent(keywords)}&type=mobile`
+  try {
+    const resp = await netFetch(url)
+    if (!resp.ok) {
+      console.error(`[neteaseService] HTTP ${resp.status} fetching suggest for "${keywords}"`)
+      return []
+    }
+    const data: WySuggestResponse = await resp.json()
+    if (data.code !== 200) {
+      console.error(`[neteaseService] API error code ${data.code} fetching suggest for "${keywords}"`)
+      return []
+    }
+    const seen = new Set<string>()
+    const list: string[] = []
+    for (const item of data.result?.allMatch || []) {
+      const keyword = item.keyword?.trim()
+      if (!keyword || seen.has(keyword)) continue
+      seen.add(keyword)
+      list.push(keyword)
+      if (list.length >= 8) break
+    }
+    return list
+  } catch (e) {
+    console.error(`[neteaseService] Failed to fetch suggest for "${keywords}":`, e)
     return []
   }
 }
@@ -709,6 +748,11 @@ export function registerNeteaseHandlers(): void {
 
   ipcMain.handle('netease:hot-search', async () => {
     return getHotSearch()
+  })
+
+  ipcMain.handle('netease:suggest', async (_event, keywords: string) => {
+    if (!keywords || !keywords.trim()) return []
+    return getSearchSuggest(keywords.trim())
   })
 
   ipcMain.handle('netease:login-qr', async () => {

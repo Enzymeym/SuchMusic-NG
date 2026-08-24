@@ -541,7 +541,6 @@ const navigateToAlbum = (albumName: string) => {
 }
 
 .np-placeholder {
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
   min-height: 200px;
   display: flex;
   align-items: center;
@@ -656,10 +655,6 @@ const navigateToAlbum = (albumName: string) => {
   color: rgba(0, 0, 0, 0.699);
   text-shadow: none;
   opacity: 0.9;
-}
-
-:root[data-theme='light'] .np-placeholder {
-  background: linear-gradient(135deg, #e8e8f0 0%, #dce0f0 50%, #cfd8f0 100%);
 }
 
 :root[data-theme='light'] .np-empty {

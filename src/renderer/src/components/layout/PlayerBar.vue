@@ -36,6 +36,8 @@ import { useRouter } from 'vue-router'
 import { getTransitionController } from '../../audio/transition-controller'
 import { mixHexColor } from '../../utils/color'
 import { formatTime } from '../../utils/format'
+import { parseLyricsToCore } from '../../utils/lyric/lyricParser'
+import type { LyricLine as CoreLyricLine } from '@applemusic-like-lyrics/core'
 
 const themeVars = useThemeVars()
 const message = useMessage()
@@ -759,6 +761,46 @@ const progressPercent = computed(() => {
   return (player.positionMs / player.currentSong.durationMs) * 100
 })
 
+// ===== 悬停提示：跟随鼠标位置的时长 + 对应歌词 =====
+const progressHovered = ref(false)
+// 鼠标在进度条上的横向位置（0-100，映射为滑块手柄位置）
+const progressHoverRatio = ref(0)
+const hoveredLyricLines = ref<CoreLyricLine[]>([])
+watch(
+  () => [player.currentSong?.id, player.currentSong?.lyrics] as const,
+  () => {
+    // 使用与应用歌词页一致的解析器，兼容 LRC / YRC / 纯文本等多种格式
+    const lyrics = player.currentSong?.lyrics
+    hoveredLyricLines.value = lyrics ? parseLyricsToCore(lyrics) : []
+  },
+  { immediate: true }
+)
+// 悬停位置对应当前鼠标在滑块上的进度
+const handleProgressHover = (e: MouseEvent) => {
+  const el = e.currentTarget as HTMLElement
+  const rect = el.getBoundingClientRect()
+  if (rect.width <= 0) return
+  const ratio = Math.min(Math.max(((e.clientX - rect.left) / rect.width) * 100, 0), 100)
+  progressHoverRatio.value = ratio
+}
+// 悬停位置对应的时间（毫秒）
+const hoverTimeMs = computed(() => {
+  if (!player.currentSong || player.currentSong.durationMs <= 0) return 0
+  return (player.currentSong.durationMs * progressHoverRatio.value) / 100
+})
+// 悬停位置对应的歌词行 / 翻译
+const hoverLyricLine = computed(() => {
+  const lines = hoveredLyricLines.value
+  if (!lines.length) return null
+  const pos = hoverTimeMs.value
+  let cur = lines[0]
+  for (const l of lines) {
+    if (pos >= l.startTime) cur = l
+    else break
+  }
+  return cur
+})
+
 /**
  * 中断过渡流程后再执行 seek：seek 会改变播放位置并可能打断引擎交叉淡化
  * （触发 onended），先放弃当前过渡避免状态错乱。
@@ -1098,10 +1140,14 @@ watch(
 </script>
 
 <template>
-  <div class="player-bar">
-    <PlayerPage @open-playlist="openPlaylist" />
-    <!-- Progress Bar (Top) -->
-    <div class="progress-wrapper">
+  <!-- 进度条区：与底栏内容容器并列，作为独立根节点，绝对定位浮于底栏顶部 -->
+  <div class="progress-wrapper">
+    <div
+      class="progress-hover-area"
+      @mouseenter="progressHovered = true"
+      @mousemove="handleProgressHover"
+      @mouseleave="progressHovered = false"
+    >
       <n-slider
         :value="progressPercent"
         :tooltip="false"
@@ -1113,7 +1159,30 @@ watch(
       />
     </div>
 
-    <!-- Song Info -->
+    <!-- 悬停提示：跟随滑块位置，显示对应时长与歌词 -->
+    <Transition name="progress-tip">
+      <div
+        v-if="progressHovered"
+        class="progress-tooltip"
+        :style="{ left: progressHoverRatio + '%' }"
+      >
+        <span class="tip-time">
+          {{ formatTime(Math.floor(hoverTimeMs / 1000), { padMinutes: true }) }}
+        </span>
+        <span class="tip-text">{{
+          hoverLyricLine?.words?.map((w) => w.word).join('') ||
+          hoverLyricLine?.translatedLyric ||
+          '暂无歌词'
+        }}</span>
+      </div>
+    </Transition>
+  </div>
+
+  <div class="player-bar-root">
+    <PlayerPage @open-playlist="openPlaylist" />
+    <!-- 底栏内容：歌曲信息 / 控制按钮 / 右侧操作 -->
+    <div class="player-bar">
+      <!-- Song Info -->
     <div class="song-info">
       <img
         :src="player.currentSong?.cover || defaultCover"
@@ -1198,7 +1267,6 @@ watch(
         :options="moreMenuOptions"
         :show="showMoreMenu"
         :to="drawerTarget"
-        class="player-page-dropdown"
         @select="handleMoreMenuSelect"
         @update:show="(val: boolean) => (showMoreMenu = val)"
       >
@@ -1351,7 +1419,6 @@ watch(
               trigger="click"
               :options="batchActionOptions"
               @select="handleBatchActionSelect"
-              class="player-page-dropdown"
             >
               <n-button size="small" quaternary :disabled="selectedIds.size === 0">
                 <template #icon
@@ -1394,30 +1461,36 @@ watch(
     >
       <AudioVisualizerControls />
     </n-modal>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.player-bar {
+.player-bar-root {
   position: relative;
-  /* 三栏 grid：左右 1fr 等宽，中间 auto，使中间控制按钮严格水平居中 */
+  height: 100%;
+  background-color: #fff;
+  overflow: hidden;
+}
+
+/* 底栏内容容器：三栏 grid，左右 1fr 等宽，中间 auto，使中间控制按钮严格水平居中 */
+.player-bar {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
   height: 100%;
-  padding: 18px 16px 12px 13px;
-  background-color: #fff;
+  padding: 10px 16px 8px 13px;
   gap: 16px;
-  overflow: hidden;
 }
 
-html[data-theme='dark'] .player-bar {
+html[data-theme='dark'] .player-bar-root {
   background-color: #18181c !important;
 }
 
+/* 进度条容器：从底栏内容中移出，绝对定位悬浮于底栏顶部 */
 .progress-wrapper {
   position: absolute;
-  top: 0; /* 紧贴 .player-bar 顶部，不再向上溢出也不侵入内容区（内容从 padding-top 12px 开始） */
+  top: -5px;
   left: 0;
   width: 100%;
   height: 12px; /* 恰好容纳 12px 圆形手柄完整落入可视区（rail 居中），避免 hover 时手柄被裁成半圆 */
@@ -1427,7 +1500,68 @@ html[data-theme='dark'] .player-bar {
   cursor: pointer;
 }
 
-/* Ensure the slider wrapper spans the full width of the absolute container */
+.progress-hover-area {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+/* 悬停提示：跟随滑块位置，显示当前时长 + 对应歌词 */
+.progress-tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  /* left 由鼠标悬停位置驱动（progressHoverRatio），通过 translateX(-50%) 居中于滑块手柄上方 */
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(30, 30, 36, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  color: #fff;
+  line-height: 1.4;
+  white-space: nowrap;
+  max-width: 60vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  z-index: 2000;
+  pointer-events: none;
+}
+
+html[data-theme='light'] .progress-tooltip {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(0, 0, 0, 0.12);
+  color: #333;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+
+.tip-time {
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+.tip-text {
+  font-size: 12px;
+}
+
+.progress-tip-enter-active,
+.progress-tip-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.progress-tip-enter-from,
+.progress-tip-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(4px);
+}
+
+/* Ensure the slider wrapper spans the full width of the top progress strip */
 .progress-wrapper :deep(.n-slider) {
   width: 100% !important;
 }
@@ -1878,69 +2012,4 @@ html[data-theme='dark'] .item-cover {
   height: 14px;
 }
 
-/* ===== 播放页下拉菜单（半透明磨砂玻璃） ===== */
-.player-page-dropdown.n-dropdown {
-  /* 覆盖 naive-ui 主题变量（其以 inline style 注入，需 !important 提升优先级）：
-     半透明深色底 + 播放页强调色文字 */
-  --n-color: transparent !important; /* 根菜单背景交由 ::before 磨砂层承载 */
-  --n-box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4) !important;
-  --n-border-radius: 12px !important;
-  --n-padding: 4px 2px !important; /* 垂直内边距不变，水平内边距收紧 */
-  --n-option-color-hover: rgba(255, 255, 255, 0.1) !important;
-  --n-option-color-active: rgba(255, 255, 255, 0.16) !important;
-  --n-option-text-color: var(--player-accent-color, rgba(255, 255, 255, 0.88)) !important;
-  --n-option-text-color-hover: #fff !important;
-  --n-option-text-color-active: #fff !important;
-  --n-option-text-color-child-active: #fff !important;
-  --n-prefix-color: var(--player-accent-color, rgba(255, 255, 255, 0.72)) !important;
-  --n-suffix-color: var(--player-accent-color, rgba(255, 255, 255, 0.72)) !important;
-  --n-divider-color: rgba(255, 255, 255, 0.12) !important;
-
-  border: 1px solid rgba(255, 255, 255, 0.08);
-
-  /* 磨砂玻璃层：用伪元素承载，避免根元素成为 backdrop root 而阻断子菜单的模糊 */
-  &::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-    border-radius: inherit;
-    background: rgba(12, 12, 18, 0.4);
-    backdrop-filter: blur(20px) saturate(1.3);
-    -webkit-backdrop-filter: blur(20px) saturate(1.3);
-  }
-
-  /* 选项与分隔线绘制在磨砂层之上 */
-  .n-dropdown-option,
-  .n-dropdown-divider {
-    position: relative;
-    z-index: 1;
-  }
-
-  /* 子菜单：独立磨砂玻璃（根元素无 backdrop-filter，子菜单可直接模糊页面背景） */
-  .n-dropdown-menu {
-    background-color: rgba(12, 12, 18, 0.4);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    backdrop-filter: blur(20px) saturate(1.3);
-    -webkit-backdrop-filter: blur(20px) saturate(1.3);
-  }
-
-  /* 选项主体：透出磨砂背景 */
-  .n-dropdown-option-body {
-    border-radius: 8px;
-  }
-
-  /* 悬停高亮：内缩圆角药丸，保持半透明不遮挡磨砂质感 */
-  .n-dropdown-option-body::before {
-    top: 2px;
-    bottom: 2px;
-    left: 6px;
-    right: 6px;
-    border-radius: 8px;
-  }
-
-  .n-dropdown-divider {
-    margin: 2px 8px;
-  }
-}
 </style>

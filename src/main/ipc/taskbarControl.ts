@@ -3,7 +3,8 @@ import {
   createTaskbarControlWindow,
   closeTaskbarControlWindow,
   getTaskbarControlWindow,
-  updateTaskbarControlSettings
+  updateTaskbarControlSettings,
+  getCachedAlign
 } from '../windows/taskbarControlWindow'
 import { getMainWindow } from '../windows/mainWindow'
 
@@ -34,6 +35,11 @@ export function registerTaskbarControlHandlers(): void {
   ipcMain.handle('taskbar-control:is-open', () => {
     const win = getTaskbarControlWindow()
     return !!(win && !win.isDestroyed())
+  })
+
+  // 查询当前任务栏对齐方式（供设置页条件显示「预留小组件入口」开关）
+  ipcMain.handle('taskbar-control:get-align', () => {
+    return getCachedAlign()
   })
 
   // 转发歌曲信息（标题 / 歌手 / 封面）到播控窗口
@@ -105,6 +111,7 @@ export function registerTaskbarControlHandlers(): void {
     event.sender.send('taskbar-control:set-info', cachedInfo)
     event.sender.send('taskbar-control:set-progress', cachedProgress)
     event.sender.send('taskbar-control:set-lyrics', cachedLyrics)
+    event.sender.send('taskbar-control:set-align', getCachedAlign())
   })
 
   // 播控按钮 / 拖动进度 → 主窗口 player:control（action 为字符串按钮，或 {action:'seek', positionMs}）

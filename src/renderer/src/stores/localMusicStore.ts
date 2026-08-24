@@ -19,6 +19,61 @@ async function batchPromiseAll<T, R>(
   return results
 }
 
+/**
+ * 元数据批量更新队列：fillMeta 期间每条 IPC 返回都会修改多个响应式字段，
+ * 逐条立即应用会让 SongList 行与 artistList/albumList 等 getter 反复重算。
+ * 将变更聚合并定时批量应用（同一微任务内合并为一次渲染/重算）。
+ */
+let metaUpdateQueue: Array<() => void> = []
+let metaFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+function flushMetaUpdates(): void {
+  if (metaFlushTimer) {
+    clearTimeout(metaFlushTimer)
+    metaFlushTimer = null
+  }
+  const queue = metaUpdateQueue
+  metaUpdateQueue = []
+  for (const fn of queue) fn()
+}
+
+function queueMetaUpdate(fn: () => void): void {
+  metaUpdateQueue.push(fn)
+  if (!metaFlushTimer) {
+    metaFlushTimer = setTimeout(flushMetaUpdates, 40)
+  }
+}
+
+/**
+ * 将图片 Blob URL 缩小为正方形缩略图 Blob URL（128px WebP）。
+ * 列表封面显示仅几十像素，若直接用原图（可能 1000×1000+）按原尺寸解码，
+ * 每张位图可达数 MB；缩略图后仅 ~128×128，滚动数百首也仅占用几十 MB。
+ * 失败时返回空字符串（调用方回退到原图）。
+ */
+async function createThumbnailBlobUrl(src: string, size = 128, quality = 0.82): Promise<string> {
+  try {
+    const res = await fetch(src)
+    const blob = await res.blob()
+    const bmp = await createImageBitmap(blob)
+    try {
+      const canvas = document.createElement('canvas')
+      canvas.width = size
+      canvas.height = size
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return ''
+      const side = Math.min(bmp.width, bmp.height)
+      ctx.drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size)
+      return await new Promise<string>((resolve) => {
+        canvas.toBlob((b) => resolve(b ? URL.createObjectURL(b) : ''), 'image/webp', quality)
+      })
+    } finally {
+      bmp.close()
+    }
+  } catch {
+    return ''
+  }
+}
+
 export interface LocalSong {
   id: number | string
   name: string
@@ -27,6 +82,8 @@ export interface LocalSong {
   filePath?: string
   dt?: number
   picUrl?: string
+  /** 列表小图缩略图（128px WebP），避免大封面按原尺寸解码占用内存 */
+  thumbUrl?: string
   lyrics?: string
   quality?: string
   bitrate?: number
@@ -309,14 +366,26 @@ export const useLocalMusicStore = defineStore('localMusic', {
                 }
 
                 if (result.lyrics) {
-                  song.lyrics = result.lyrics
-                  if (playerStore.currentSong?.id === song.id && !playerStore.currentSong.lyrics) {
-                    playerStore.setLyrics(result.lyrics)
-                  }
+                  const lyrics = result.lyrics
+                  queueMetaUpdate(() => {
+                    song.lyrics = lyrics
+                    if (
+                      playerStore.currentSong?.id === song.id &&
+                      !playerStore.currentSong.lyrics
+                    ) {
+                      playerStore.setLyrics(lyrics)
+                    }
+                  })
                 }
 
-                if (typeof result.durationMs === 'number' && result.durationMs > 0 && !song.dt) {
-                  song.dt = result.durationMs
+                if (
+                  typeof result.durationMs === 'number' &&
+                  result.durationMs > 0 &&
+                  !song.dt
+                ) {
+                  queueMetaUpdate(() => {
+                    song.dt = result.durationMs
+                  })
                 }
 
                 if (result.cover && result.cover.base64 && !song.picUrl) {
@@ -328,36 +397,67 @@ export const useLocalMusicStore = defineStore('localMusic', {
                     bytes[i] = binaryStr.charCodeAt(i)
                   }
                   const blob = new Blob([bytes], { type: result.cover.mimeType })
-                  song.picUrl = URL.createObjectURL(blob)
-                }
-
-                if (result.title) song.name = result.title
-
-                if (result.artists && result.artists.length > 0) {
-                  song.ar = result.artists.map((n) => ({ name: n }))
-                }
-
-                if (result.album) {
-                  if (!song.al) {
-                    song.al = { name: result.album }
-                  } else {
-                    song.al.name = result.album
+                  const coverUrl = URL.createObjectURL(blob)
+                  queueMetaUpdate(() => {
+                    song.picUrl = coverUrl
+                  })
+                  // 原图较大时异步生成 128px 缩略图供列表小图使用（后台执行，不阻塞 fillMeta）
+                  if (result.cover.base64.length > 16000) {
+                    void createThumbnailBlobUrl(coverUrl, 128).then((thumbUrl) => {
+                      if (thumbUrl) {
+                        queueMetaUpdate(() => {
+                          song.thumbUrl = thumbUrl
+                        })
+                      }
+                    })
                   }
                 }
 
+                if (result.title) {
+                  const title = result.title
+                  queueMetaUpdate(() => {
+                    song.name = title
+                  })
+                }
+
+                if (result.artists && result.artists.length > 0) {
+                  const artists = result.artists.map((n) => ({ name: n }))
+                  queueMetaUpdate(() => {
+                    song.ar = artists
+                  })
+                }
+
+                if (result.album) {
+                  const album = result.album
+                  queueMetaUpdate(() => {
+                    if (!song.al) {
+                      song.al = { name: album }
+                    } else {
+                      song.al.name = album
+                    }
+                  })
+                }
+
                 if (typeof result.bitrate === 'number' && result.bitrate > 0) {
-                  song.bitrate = result.bitrate
+                  queueMetaUpdate(() => {
+                    song.bitrate = result.bitrate
+                  })
                 }
 
                 if (typeof result.sampleRate === 'number' && result.sampleRate > 0) {
-                  song.sampleRate = result.sampleRate
+                  queueMetaUpdate(() => {
+                    song.sampleRate = result.sampleRate
+                  })
                 }
 
                 if (
                   (typeof result.bitrate === 'number' && result.bitrate > 0) ||
                   (typeof result.sampleRate === 'number' && result.sampleRate > 0)
                 ) {
-                  song.quality = formatQuality(result.bitrate, result.sampleRate)
+                  const quality = formatQuality(result.bitrate, result.sampleRate)
+                  queueMetaUpdate(() => {
+                    song.quality = quality
+                  })
                 }
               } catch (error) {
                 console.error('读取歌曲 meta 失败', song.filePath, error)
@@ -365,6 +465,9 @@ export const useLocalMusicStore = defineStore('localMusic', {
             }
           , 3)
         }
+
+        // 批量应用所有待处理的元数据更新，确保后续封面恢复读到最新状态
+        flushMetaUpdates()
 
         // 本地音乐元数据补全后，把封面同步回播放器状态和用户歌单
         playerStore.restoreCoversFromLocalSongs(this.songs)
@@ -382,6 +485,9 @@ export const useLocalMusicStore = defineStore('localMusic', {
       this.songs.forEach((song) => {
         if (song.picUrl && song.picUrl.startsWith('blob:')) {
           URL.revokeObjectURL(song.picUrl)
+        }
+        if (song.thumbUrl && song.thumbUrl.startsWith('blob:')) {
+          URL.revokeObjectURL(song.thumbUrl)
         }
       })
     },

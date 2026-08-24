@@ -32,8 +32,10 @@ const POSITION_THROTTLE_MS = 1000
  * blob: 封面 URL → data: URL 转换缓存
  * 主进程的 SMTC 无法直接消费 blob: URL，需先转为 data: URL；
  * 同一 blob URL 只转换一次，避免重复 fetch/读取。
+ * data URL 单条可达数 MB，限制条数防止长会话内存无限增长（简单 LRU）。
  */
 const blobCoverCache = new Map<string, string>()
+const BLOB_COVER_CACHE_MAX = 20
 
 /**
  * 将 blob: URL 封面转换为 data: URL
@@ -41,7 +43,12 @@ const blobCoverCache = new Map<string, string>()
  */
 async function convertBlobCoverToDataUrl(cover: string): Promise<string | undefined> {
   const cached = blobCoverCache.get(cover)
-  if (cached) return cached
+  if (cached) {
+    // 命中时刷新为最近使用，维持 LRU 顺序
+    blobCoverCache.delete(cover)
+    blobCoverCache.set(cover, cached)
+    return cached
+  }
   try {
     const res = await fetch(cover)
     const blob = await res.blob()
@@ -51,6 +58,10 @@ async function convertBlobCoverToDataUrl(cover: string): Promise<string | undefi
       reader.onerror = () => reject(reader.error)
       reader.readAsDataURL(blob)
     })
+    if (blobCoverCache.size >= BLOB_COVER_CACHE_MAX) {
+      const oldest = blobCoverCache.keys().next().value
+      if (oldest !== undefined) blobCoverCache.delete(oldest)
+    }
     blobCoverCache.set(cover, dataUrl)
     return dataUrl
   } catch {

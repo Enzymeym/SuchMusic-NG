@@ -127,8 +127,12 @@ const fillMissingCoversFromMeta = async () => {
   const targets = songs.value.filter((song) => !song.picUrl && song.filePath)
   if (!targets.length) return
 
-  await Promise.all(
-    targets.map(async (song) => {
+  // 限制并发数量，避免一次性发起上百个 IPC 请求造成主进程/磁盘 I/O 拥塞
+  const CONCURRENCY = 5
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < targets.length) {
+      const song = targets[cursor++]
       try {
         const result = (await window.electron.ipcRenderer.invoke(
           'local-music:get-meta',
@@ -144,8 +148,9 @@ const fillMissingCoversFromMeta = async () => {
       } catch (error) {
         console.error('加载最近播放封面失败:', error)
       }
-    })
-  )
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker))
 }
 
 const filteredSongs = computed(() => {

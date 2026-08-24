@@ -45,7 +45,9 @@ class MainMemoryMonitor {
       processes = app.getAppMetrics().map((m) => ({
         pid: m.pid,
         type: m.type,
-        rss: m.memory ? m.memory.workingSetSize : 0,
+        // 注意：getAppMetrics 的 workingSetSize 单位是 KB（与 process.memoryUsage 的字节不同），
+        // 统一换算为字节，避免子进程内存被缩小 1024 倍
+        rss: m.memory ? m.memory.workingSetSize * 1024 : 0,
         cpu: m.cpu ? m.cpu.percentCPUUsage : 0
       }))
     } catch {

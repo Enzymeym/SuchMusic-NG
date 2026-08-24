@@ -31,15 +31,24 @@ app.use(pinia).use(router).mount('#app')
 // 启动渲染进程内存监控（用于验证内存优化效果）
 rendererMemoryMonitor.start()
 if (import.meta.env.DEV) {
+  // 统计当前 DOM 元素数量（辅助判断 DOM/图片位图占用）
+  const countDomNodes = (): number => {
+    let count = 0
+    const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT)
+    while (walker.nextNode()) count++
+    return count
+  }
   setInterval(() => {
     const report = rendererMemoryMonitor.getReport()
     if (report.count === 0) return
     console.log(
       `[内存监控] 渲染进程 JS堆 used=${rendererMemoryMonitor.toMB(
         report.current
-      )} (min=${rendererMemoryMonitor.toMB(report.min)}, max=${rendererMemoryMonitor.toMB(
-        report.max
-      )}, avg=${rendererMemoryMonitor.toMB(report.avg)}, 样本=${report.count})`
+      )} DOM节点=${countDomNodes().toLocaleString()} (min=${rendererMemoryMonitor.toMB(
+        report.min
+      )}, max=${rendererMemoryMonitor.toMB(report.max)}, avg=${rendererMemoryMonitor.toMB(
+        report.avg
+      )}, 样本=${report.count})`
     )
   }, 60000)
 }

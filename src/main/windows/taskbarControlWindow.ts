@@ -3,6 +3,7 @@ import { join } from 'path'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { promisify } from 'util'
 import { is } from '@electron-toolkit/utils'
+import { getMainWindow } from './mainWindow'
 
 const execFileAsync = promisify(execFile)
 
@@ -32,13 +33,51 @@ let taskbarControlWindow: BrowserWindow | undefined
 // 模块级窗口配置状态
 let currentWidthMode: 'auto' | 'custom' = 'auto'
 let customWidth = 480
-let height = 60
+let widgetOffsetEnabled = false
+let manualOffsetX = 0
 
 // 通过 UI Automation 动态测得的任务栏空白区域（像素坐标）
-let cachedBlankArea: { x: number; y: number; width: number; height: number } | null = null
+let cachedBlankArea: { x: number; y: number; width: number; height: number; align?: string } | null = null
+
+/** 当前任务栏对齐方式（'center' 居中 / 'left' 居左），供渲染进程决定内容翻转 */
+let cachedAlign: 'center' | 'left' = 'center'
+
+export function getCachedAlign(): 'center' | 'left' {
+  return cachedAlign
+}
+
+/** 将当前对齐方式发送到播控窗口及主窗口渲染进程 */
+function sendAlignToRenderer(): void {
+  if (taskbarControlWindow && !taskbarControlWindow.isDestroyed()) {
+    taskbarControlWindow.webContents.send('taskbar-control:set-align', cachedAlign)
+  }
+  const main = getMainWindow()
+  if (main && !main.isDestroyed()) {
+    main.webContents.send('taskbar-control:set-align', cachedAlign)
+  }
+}
 
 // 长驻监视进程：任务栏内容变化时推送新的空白区域测量值
 let areaWatcher: ChildProcessWithoutNullStreams | null = null
+
+// 周期性重新断言置顶级别，防止 Windows 在窗口重新显示/失焦后把播控窗压到任务栏之下
+let topTimer: NodeJS.Timeout | null = null
+
+function assertAlwaysOnTop(): void {
+  if (!taskbarControlWindow || taskbarControlWindow.isDestroyed()) return
+  try {
+    taskbarControlWindow.setAlwaysOnTop(true, 'screen-saver')
+  } catch {
+    // 窗口销毁瞬间的偶发设置错误可忽略
+  }
+}
+
+// 屏幕缩放/任务栏边变化监听（命名函数，便于销毁时精确移除，避免重复创建窗口时累积监听器）
+let metricsWatchBound = false
+function onDisplayMetricsChanged(): void {
+  if (!taskbarControlWindow || taskbarControlWindow.isDestroyed()) return
+  void refreshTaskbarBlankArea().then(() => applyBounds())
+}
 
 /**
  * 运行 PowerShell 脚本动态测量任务栏空白区域，并缓存结果。
@@ -46,9 +85,12 @@ let areaWatcher: ChildProcessWithoutNullStreams | null = null
  */
 export async function refreshTaskbarBlankArea(): Promise<void> {
   try {
+    // 前置设置 UTF-8 输出编码，避免中文系统下 PowerShell 错误消息按 GBK 输出导致乱码
+    const psSetup = '$OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8; '
+    const scriptPath = getTaskbarAreaScriptPath().replace(/'/g, "''")
     const { stdout, stderr } = await execFileAsync(
       'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', getTaskbarAreaScriptPath()],
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `${psSetup}& '${scriptPath}'`],
       { timeout: 8000, windowsHide: true, maxBuffer: 1024 * 1024 }
     )
     console.log('[taskbar-area] raw stdout:', JSON.stringify(stdout.trim()))
@@ -59,7 +101,14 @@ export async function refreshTaskbarBlankArea(): Promise<void> {
         x: parsed.x,
         y: parsed.y,
         width: parsed.width,
-        height: parsed.height
+        height: parsed.height,
+        align: parsed.align
+      }
+      // 对齐方式变化时通知渲染进程翻转布局
+      const newAlign = parsed.align === 'left' ? 'left' : 'center'
+      if (newAlign !== cachedAlign) {
+        cachedAlign = newAlign
+        sendAlignToRenderer()
       }
       console.log('[taskbar-area] measured:', JSON.stringify(cachedBlankArea))
     } else {
@@ -79,9 +128,12 @@ export async function refreshTaskbarBlankArea(): Promise<void> {
 function startAreaWatcher(): void {
   if (areaWatcher) return
 
+  // 前置设置 UTF-8 输出编码（与 refreshTaskbarBlankArea 保持一致）
+  const psSetup = '$OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8; '
+  const watchScript = getWatchScriptPath().replace(/'/g, "''")
   const watcher = spawn(
     'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', getWatchScriptPath()],
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `${psSetup}& '${watchScript}'`],
     { windowsHide: true }
   )
   areaWatcher = watcher
@@ -101,7 +153,13 @@ function startAreaWatcher(): void {
             x: parsed.x,
             y: parsed.y,
             width: parsed.width,
-            height: parsed.height
+            height: parsed.height,
+            align: parsed.align
+          }
+          const newAlign = parsed.align === 'left' ? 'left' : 'center'
+          if (newAlign !== cachedAlign) {
+            cachedAlign = newAlign
+            sendAlignToRenderer()
           }
           console.log('[taskbar-area] watch updated:', JSON.stringify(cachedBlankArea))
           applyBounds()
@@ -184,13 +242,13 @@ function getPrimaryScaleFactor(): number {
 
 /**
  * 播控窗口高度：优先使用实测的任务栏高度（换算为 DIP），使其与任务栏对齐；
- * 实测失败时回退为「用户设定高度上限」与任务栏厚度的较小值。
+ * 实测失败时回退为任务栏厚度。
  */
 export function getTaskbarControlHeight(): number {
   if (cachedBlankArea) {
     return Math.max(1, Math.round(cachedBlankArea.height / getPrimaryScaleFactor()))
   }
-  return Math.min(height, getTaskbarThickness())
+  return getTaskbarThickness()
 }
 
 /**
@@ -205,11 +263,19 @@ export function getAutoLayout(): { x: number; y: number; width: number } {
   if (cachedBlankArea) {
     // 物理像素 → DIP 换算，确保窗口落在主屏可见区域
     const scale = getPrimaryScaleFactor()
-    return {
-      x: Math.round(cachedBlankArea.x / scale),
-      y: Math.round(cachedBlankArea.y / scale),
-      width: Math.max(120, Math.round(cachedBlankArea.width / scale))
+    let x = Math.round(cachedBlankArea.x / scale)
+    const y = Math.round(cachedBlankArea.y / scale)
+    let width = Math.max(120, Math.round(cachedBlankArea.width / scale))
+
+    // 居中对齐时：开启小组件入口预留后向右偏移，并应用手动位置偏移
+    if (cachedAlign === 'center' && widgetOffsetEnabled) {
+      x += 48 // 预留 Windows 小组件入口宽度
+      width = Math.max(120, width - 48)
     }
+    // 手动偏移：正数右移，负数左移
+    x += manualOffsetX
+
+    return { x, y, width }
   }
 
   // 回退估算：仅用于实测失败时的兜底，不再使用固定预留值
@@ -353,15 +419,15 @@ function applyBounds(): void {
 export function updateTaskbarControlSettings(settings: {
   widthMode?: 'auto' | 'custom'
   customWidth?: number
-  height?: number
+  widgetOffset?: boolean
+  offsetX?: number
 }): void {
   if (settings.widthMode !== undefined) currentWidthMode = settings.widthMode
   if (typeof settings.customWidth === 'number' && settings.customWidth > 0) {
     customWidth = settings.customWidth
   }
-  if (typeof settings.height === 'number' && settings.height > 0) {
-    height = settings.height
-  }
+  if (typeof settings.widgetOffset === 'boolean') widgetOffsetEnabled = settings.widgetOffset
+  if (typeof settings.offsetX === 'number') manualOffsetX = settings.offsetX
   if (!taskbarControlWindow || taskbarControlWindow.isDestroyed()) return
 
   if (currentWidthMode === 'custom') {
@@ -416,7 +482,7 @@ export async function createTaskbarControlWindow(): Promise<void> {
     }
   })
 
-  taskbarControlWindow.setAlwaysOnTop(true, 'screen-saver')
+  assertAlwaysOnTop()
   console.log('[taskbar-control] created at', pos.x, pos.y, initialWidth, effectiveHeight)
   if (cachedBlankArea) {
     console.log('[taskbar-control] blankArea =', JSON.stringify(cachedBlankArea))
@@ -426,8 +492,13 @@ export async function createTaskbarControlWindow(): Promise<void> {
   taskbarControlWindow.on('ready-to-show', () => {
     console.log('[taskbar-control] ready-to-show')
     taskbarControlWindow?.show()
+    // 显示后立即重新断言置顶，防止被任务栏/其他窗口覆盖
+    assertAlwaysOnTop()
     console.log('[taskbar-control] shown, bounds =', JSON.stringify(taskbarControlWindow?.getBounds()))
   })
+
+  // 周期性重新断言置顶，保证任意场景下播控窗始终悬浮于任务栏之上
+  topTimer = setInterval(assertAlwaysOnTop, 1000)
 
   taskbarControlWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
     console.error('[taskbar-control] did-fail-load', code, desc, url)
@@ -438,17 +509,28 @@ export async function createTaskbarControlWindow(): Promise<void> {
       clearInterval(boundsAnimTimer)
       boundsAnimTimer = null
     }
+    if (topTimer) {
+      clearInterval(topTimer)
+      topTimer = null
+    }
     taskbarControlWindow = undefined
     stopAreaWatcher()
+    // 销毁时移除全局 screen 监听，防止窗口反复关闭/打开时累积监听器泄漏
+    if (metricsWatchBound) {
+      screen.removeListener('display-metrics-changed', onDisplayMetricsChanged)
+      metricsWatchBound = false
+    }
   })
 
   // 长驻监视任务栏内容变化，实时调整窗口宽度
   startAreaWatcher()
 
-  // 任务栏位置变化（如系统设置切换任务栏边）时重新测量并吸附
-  screen.on('display-metrics-changed', () => {
-    void refreshTaskbarBlankArea().then(() => applyBounds())
-  })
+  // 任务栏位置变化（如系统设置切换任务栏边 / 显示缩放）时重新测量并吸附。
+  // 采用脚本级去重 + 销毁时移除，避免重复创建窗口导致监听器累积
+  if (!metricsWatchBound) {
+    screen.on('display-metrics-changed', onDisplayMetricsChanged)
+    metricsWatchBound = true
+  }
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     taskbarControlWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/#/taskbar-control`)
@@ -466,7 +548,11 @@ export function closeTaskbarControlWindow(): void {
   }
 }
 
-// 应用退出时确保监视进程被终止，避免残留 PowerShell 进程
+// 应用退出时确保监视进程被终止、置顶定时器被清理，避免残留 PowerShell 进程和定时器
 app.on('will-quit', () => {
   stopAreaWatcher()
+  if (topTimer) {
+    clearInterval(topTimer)
+    topTimer = null
+  }
 })

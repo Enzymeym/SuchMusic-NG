@@ -125,8 +125,8 @@ onUnmounted(() => {
             <router-view v-slot="{ Component, route }">
               <PageTransition>
                 <keep-alive
-                  :include="['home', 'statistics', 'local', 'playlist', 'recent', 'singer', 'album']"
-                  :max="5">
+                  :include="['local', 'playlist', 'recent', 'singer', 'album']"
+                  :max="3">
                   <component :is="Component" :key="route.fullPath" />
                 </keep-alive>
               </PageTransition>
@@ -258,5 +258,8 @@ html[data-theme='dark'] .header {
   flex-shrink: 0;
   /* Prevent shrinking */
   position: relative;
+  /* n-layout-footer 没有 height prop，height="80" 会被忽略；
+     显式固定固定高度，避免底栏内容高度波动导致内容区离底栏差一点 */
+  height: 72px;
 }
 </style>

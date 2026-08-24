@@ -1,15 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed } from 'vue'
 import { NCard, NSwitch, NSelect, NSlider, NAlert, NButton, NProgress, useMessage } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePlayerStore } from '../../../stores/playerStore'
 import { useVolumeBalanceStore } from '../../../stores/volumeBalanceStore'
 import { useLocalMusicStore } from '../../../stores/localMusicStore'
-import {
-  getAnalyzerBackend,
-  detectAnalyzerBackend,
-  type AnalyzerBackend
-} from '../../../audio/webnn-analyzer'
 
 // 使用设置仓库，驱动播放设置选项
 const settingsStore = useSettingsStore()
@@ -77,32 +72,10 @@ const startAnalyze = async () => {
   }
 }
 
-// 实时过渡点分析后端（CPU / WebNN-NPU 等，探测失败静默回退 CPU）
-const analyzerBackend = ref<AnalyzerBackend>('cpu')
-
-// 分析后端展示名称
-const analyzerBackendLabel = computed(() => {
-  switch (analyzerBackend.value) {
-    case 'webnn-npu':
-      return 'NPU（WebNN 加速）'
-    case 'webnn-gpu':
-      return 'GPU（WebNN 加速）'
-    case 'webnn-cpu':
-      return 'CPU（WebNN）'
-    default:
-      return 'CPU（实时流式计算）'
-  }
-})
-
 // 当前输出模式是否支持完整智能过渡（仅 Web Audio 支持交叉淡化/智能过渡）
 const isFullTransitionSupported = computed(
   () => settingsStore.playback.audioOutputMode === 'webaudio'
 )
-
-// 组件挂载时探测实时过渡点分析后端（NPU/GPU/CPU，全程容错静默降级）
-onMounted(async () => {
-  analyzerBackend.value = await detectAnalyzerBackend().catch(() => getAnalyzerBackend())
-})
 
 const props = defineProps<{
   settingItemBgColor: string
@@ -179,11 +152,6 @@ const props = defineProps<{
             （先淡出当前曲，再淡入下一曲）。完整的「智能过渡 / 交叉淡化」效果需切换到
             <strong>Web Audio</strong> 模式。
           </n-alert>
-
-          <!-- 实时过渡点分析后端 -->
-          <div class="time-text" style="margin-top: 12px">
-            实时过渡点分析后端：{{ analyzerBackendLabel }}
-          </div>
         </div>
       </div>
     </n-card>

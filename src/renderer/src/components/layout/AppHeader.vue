@@ -178,6 +178,10 @@ const handleSwitchAccount = async (userId: string) => {
 
 // Search Suggestion State
 const showSuggestions = ref(false)
+const isFocused = ref(false)
+const hotSearches = ref<{ searchWord: string; iconUrl?: string }[]>([])
+const neteaseSuggestions = ref<string[]>([])
+let hotSearchLoaded = false
 const suggestions = ref<{
   localSongs: any[]
   localPlaylists: any[]
@@ -190,14 +194,30 @@ const suggestions = ref<{
 const suggestionLoading = ref(false)
 let searchTimer: NodeJS.Timeout | null = null
 
+// 加载网易云热搜榜（仅加载一次）
+const loadHotSearch = async () => {
+  if (hotSearchLoaded) return
+  try {
+    hotSearches.value = (await window.api.netease.hotSearch()) || []
+    hotSearchLoaded = true
+  } catch (e) {
+    console.error('[AppHeader] 加载热搜榜失败:', e)
+  }
+}
+
 // Watch search text for suggestions
 watch(searchText, (newVal) => {
   if (searchTimer) clearTimeout(searchTimer)
+  neteaseSuggestions.value = []
 
   if (!newVal.trim()) {
-    showSuggestions.value = false
+    // 清空输入：聚焦时显示热搜榜
+    showSuggestions.value = isFocused.value
+    if (isFocused.value) loadHotSearch()
     return
   }
+
+  showSuggestions.value = true
 
   searchTimer = setTimeout(async () => {
     suggestionLoading.value = true
@@ -227,6 +247,13 @@ watch(searchText, (newVal) => {
         localPlaylists,
         recent
       }
+
+      // 4. 网易云搜索建议（关键字联想）
+      try {
+        neteaseSuggestions.value = (await window.api.netease.suggest(newVal.trim())) || []
+      } catch (e) {
+        console.error('[AppHeader] 获取网易云搜索建议失败:', e)
+      }
       showSuggestions.value = true
     } catch (e) {
       console.error('Fetch suggestions failed', e)
@@ -241,6 +268,12 @@ const handleSearch = () => {
     showSuggestions.value = false
     router.push({ name: 'search', query: { q: searchText.value } })
   }
+}
+
+// 点击热搜词 / 搜索建议：填入关键词并跳转搜索页
+const handleKeywordClick = (word: string) => {
+  searchText.value = word
+  handleSearch()
 }
 
 const handleSuggestionClick = (type: string, item: any) => {
@@ -287,6 +320,7 @@ const handleSuggestionClick = (type: string, item: any) => {
 }
 
 const handleBlur = () => {
+  isFocused.value = false
   // Delay hiding to allow click event to propagate
   setTimeout(() => {
     showSuggestions.value = false
@@ -294,16 +328,21 @@ const handleBlur = () => {
 }
 
 const handleFocus = () => {
-  if (searchText.value.trim()) {
-    showSuggestions.value = true
+  isFocused.value = true
+  showSuggestions.value = true
+  // 聚焦且未输入时显示热搜榜
+  if (!searchText.value.trim()) {
+    loadHotSearch()
   }
 }
 
 onMounted(() => {
+  const handleWinSizeChange = (_: unknown, type: { size: 'max' | 'min' }) => {
+    sizeType.value = type.size
+  }
+
   if (window.electron && window.electron.ipcRenderer) {
-    window.electron.ipcRenderer.on('winSizeChange', (_, type) => {
-      sizeType.value = type.size
-    })
+    window.electron.ipcRenderer.on('winSizeChange', handleWinSizeChange)
   }
 
   const handleOpenSettings = (event: Event) => {
@@ -324,6 +363,8 @@ onMounted(() => {
   loadLoginStatus()
 
   onBeforeUnmount(() => {
+    // 仅移除自身监听器，避免 removeAllListeners 误删其他组件对同一事件的监听
+    window.electron?.ipcRenderer?.removeListener('winSizeChange', handleWinSizeChange)
     window.removeEventListener('open-settings', handleOpenSettings as EventListener)
     window.removeEventListener('close-settings', handleCloseSettings)
     stopQrPolling()
@@ -430,7 +471,7 @@ const headerPaddingStyle = computed(() => {
         trigger="manual"
         :show="showSuggestions"
         placement="bottom-start"
-        style="padding: 0; width: 350px; border-radius: 10px; overflow: hidden; border: 1px solid rgba(0,0,0,0.15);"
+        style="padding: 0; width: 350px; border-radius: 14px; overflow: hidden;"
         :show-arrow="false"
       >
         <template #trigger>
@@ -449,63 +490,104 @@ const headerPaddingStyle = computed(() => {
         </template>
         <div class="search-suggestions">
           <n-scrollbar style="max-height: 400px">
-            <!-- Local & Recent (Merged) -->
-            <template v-if="suggestions.recent.length || suggestions.localSongs.length">
-              <div class="suggestion-header">本地&最近</div>
-
-              <!-- Local Songs -->
+            <!-- 热搜榜：聚焦且未输入时显示 -->
+            <template v-if="!searchText.trim()">
+              <div class="suggestion-header">热搜榜</div>
               <div
-                v-for="item in suggestions.localSongs"
-                :key="'local-'+item.id"
+                v-for="(item, i) in hotSearches"
+                :key="'hot-'+item.searchWord"
                 class="suggestion-item"
-                @click="handleSuggestionClick('local-song', item)"
+                @click="handleKeywordClick(item.searchWord)"
               >
-                <div class="suggestion-icon-wrapper">
-                  <n-icon><i class="mgc_music_fill"></i></n-icon>
-                </div>
+                <span class="hot-rank" :class="{ 'hot-rank-top': i < 3 }">{{ i + 1 }}</span>
                 <div class="suggestion-info">
-                  <div class="suggestion-title">{{ item.name }}</div>
-                  <div class="suggestion-desc">{{ item.ar?.[0]?.name }}</div>
+                  <div class="suggestion-title">{{ item.searchWord }}</div>
                 </div>
               </div>
-
-              <!-- Recent Play -->
-              <div
-                v-for="item in suggestions.recent"
-                :key="'recent-'+item.songId"
-                class="suggestion-item"
-                @click="handleSuggestionClick('recent', item)"
-              >
-                <img :src="item.cover" class="suggestion-cover" />
-                <div class="suggestion-info">
-                  <div class="suggestion-title">{{ item.title }}</div>
-                  <div class="suggestion-desc">{{ item.artist }}</div>
-                </div>
-              </div>
+              <div v-if="!hotSearches.length" class="no-suggestions">热搜加载失败</div>
             </template>
 
-            <!-- Playlists (Local) -->
-            <template v-if="suggestions.localPlaylists.length">
-              <div class="suggestion-header">歌单</div>
-              <div class="playlist-grid">
-                <!-- Local Playlists -->
+            <!-- 输入内容：搜索建议 -->
+            <template v-else>
+              <!-- 网易云搜索建议 -->
+              <template v-if="neteaseSuggestions.length">
+                <div class="suggestion-header">网易云搜索建议</div>
                 <div
-                  v-for="item in suggestions.localPlaylists"
-                  :key="'lp-'+item.id"
-                  class="playlist-item"
-                  @click="handleSuggestionClick('local-playlist', item)"
+                  v-for="kw in neteaseSuggestions"
+                  :key="'wy-'+kw"
+                  class="suggestion-item"
+                  @click="handleKeywordClick(kw)"
                 >
-                  <div class="playlist-cover-wrapper">
-                    <n-icon size="40"><i class="mgc_playlist_fill"></i></n-icon>
+                  <div class="suggestion-icon-wrapper">
+                    <n-icon><i class="mgc_search_line"></i></n-icon>
                   </div>
-                  <div class="playlist-title">{{ item.name }}</div>
+                  <div class="suggestion-info">
+                    <div class="suggestion-title">{{ kw }}</div>
+                  </div>
                 </div>
+              </template>
+
+              <!-- Local & Recent (Merged) -->
+              <template v-if="suggestions.recent.length || suggestions.localSongs.length">
+                <div class="suggestion-header">本地&最近</div>
+
+                <!-- Local Songs -->
+                <div
+                  v-for="item in suggestions.localSongs"
+                  :key="'local-'+item.id"
+                  class="suggestion-item"
+                  @click="handleSuggestionClick('local-song', item)"
+                >
+                  <div class="suggestion-icon-wrapper">
+                    <n-icon><i class="mgc_music_fill"></i></n-icon>
+                  </div>
+                  <div class="suggestion-info">
+                    <div class="suggestion-title">{{ item.name }}</div>
+                    <div class="suggestion-desc">{{ item.ar?.[0]?.name }}</div>
+                  </div>
+                </div>
+
+                <!-- Recent Play -->
+                <div
+                  v-for="item in suggestions.recent"
+                  :key="'recent-'+item.songId"
+                  class="suggestion-item"
+                  @click="handleSuggestionClick('recent', item)"
+                >
+                  <img :src="item.cover" class="suggestion-cover" />
+                  <div class="suggestion-info">
+                    <div class="suggestion-title">{{ item.title }}</div>
+                    <div class="suggestion-desc">{{ item.artist }}</div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Playlists (Local) -->
+              <template v-if="suggestions.localPlaylists.length">
+                <div class="suggestion-header">歌单</div>
+                <div class="playlist-grid">
+                  <!-- Local Playlists -->
+                  <div
+                    v-for="item in suggestions.localPlaylists"
+                    :key="'lp-'+item.id"
+                    class="playlist-item"
+                    @click="handleSuggestionClick('local-playlist', item)"
+                  >
+                    <div class="playlist-cover-wrapper">
+                      <n-icon size="40"><i class="mgc_playlist_fill"></i></n-icon>
+                    </div>
+                    <div class="playlist-title">{{ item.name }}</div>
+                  </div>
+                </div>
+              </template>
+
+              <div
+                v-if="!neteaseSuggestions.length && !suggestions.recent.length && !suggestions.localSongs.length && !suggestions.localPlaylists.length"
+                class="no-suggestions"
+              >
+                  未找到相关结果
               </div>
             </template>
-
-            <div v-if="!suggestions.recent.length && !suggestions.localSongs.length && !suggestions.localPlaylists.length" class="no-suggestions">
-                未找到相关结果
-            </div>
           </n-scrollbar>
         </div>
       </n-popover>
@@ -1000,6 +1082,24 @@ html[data-theme='dark'] .suggestion-item:hover {
   font-size: 20px;
   color: var(--n-text-color-3);
   flex-shrink: 0;
+}
+
+/* 热搜榜排名序号 */
+.hot-rank {
+  width: 32px;
+  flex-shrink: 0;
+  text-align: center;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--n-text-color-3);
+}
+
+.hot-rank-top {
+  color: #e03131;
+}
+
+html[data-theme='dark'] .hot-rank-top {
+  color: #ff6b6b;
 }
 
 .suggestion-info {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { useMessage } from 'naive-ui'
+import { NDropdown, useMessage } from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import { usePlayerStore } from '../stores/playerStore'
 import { useLocalMusicStore } from '../stores/localMusicStore'
@@ -13,9 +13,27 @@ const message = useMessage()
 
 const keywords = ref('')
 
-// ===== 标签页 =====
+// ===== 平台下拉菜单 =====
 type SearchTab = 'local' | 'netease'
 const activeTab = ref<SearchTab>('local')
+
+// 平台选项（作为下拉菜单放入标题中）
+const platformOptions = [
+  { label: '本地', key: 'local' },
+  { label: '网易云', key: 'netease' }
+]
+
+const platformLabel = computed(() =>
+  activeTab.value === 'netease' ? '网易云' : '本地'
+)
+
+const platformIcon = computed(() =>
+  activeTab.value === 'netease' ? 'mgc_netease_music_line' : 'mgc_computer_line'
+)
+
+const onPlatformSelect = (key: string | number) => {
+  activeTab.value = String(key) as SearchTab
+}
 
 // ===== 本地搜索 =====
 // 从歌曲对象提取歌手名
@@ -216,6 +234,18 @@ watch(activeTab, (tab) => {
     }
   }
 })
+
+// 简化后的搜索结果数量文案（本地/网易云统一为「共 X 首」）
+const resultCountText = computed(() => {
+  if (activeTab.value === 'local') {
+    if (!keywords.value.trim() || searchResults.value.length === 0) return ''
+    return `共 ${searchResults.value.length} 首`
+  }
+  if (activeTab.value === 'netease' && neteaseSearched.value) {
+    return `共 ${neteaseTotal.value} 首`
+  }
+  return ''
+})
 </script>
 
 <template>
@@ -223,28 +253,23 @@ watch(activeTab, (tab) => {
     <div class="search-header">
       <div class="header-top">
         <div class="header-title-row">
-          <h1>搜索"{{ keywords }}"</h1>
-          <span v-if="activeTab === 'local' && keywords && searchResults.length" class="result-count">
-            找到 {{ searchResults.length }} 首本地歌曲
-          </span>
-          <span v-else-if="activeTab === 'netease' && neteaseSearched" class="result-count">
-            找到 {{ neteaseTotal }} 首网易云歌曲
-          </span>
+          <h1 class="title-with-platform">
+            <n-dropdown
+              trigger="click"
+              placement="bottom-start"
+              :options="platformOptions"
+              @select="onPlatformSelect"
+            >
+              <span class="platform-trigger">
+                <i :class="['platform-icon', platformIcon]"></i>
+                <span class="platform-label">{{ platformLabel }}</span>
+                <i class="mgc_selector_vertical_line platform-arrow"></i>
+              </span>
+            </n-dropdown>
+            <span class="title-suffix">搜索"{{ keywords }}"的结果</span>
+          </h1>
+          <span v-if="resultCountText" class="result-count">{{ resultCountText }}</span>
         </div>
-      </div>
-
-      <!-- 标签切换 -->
-      <div class="tab-switch">
-        <button
-          class="tab-btn"
-          :class="{ active: activeTab === 'local' }"
-          @click="activeTab = 'local'"
-        >本地</button>
-        <button
-          class="tab-btn"
-          :class="{ active: activeTab === 'netease' }"
-          @click="activeTab = 'netease'"
-        >网易云</button>
       </div>
     </div>
 
@@ -336,55 +361,77 @@ watch(activeTab, (tab) => {
   display: flex;
   align-items: baseline;
   gap: 16px;
+  min-width: 0;
 }
 
-.header-title-row h1 {
+.title-with-platform {
+  display: flex;
+  align-items: center;
+  gap: 0;
   font-weight: 900;
   margin: 0;
   font-size: 24px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* 平台下拉触发器：默认纯文字无背景，悬停时呈现背景效果 */
+.platform-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transform: translateZ(0);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.platform-icon {
+  font-size: 17px;
+  font-style: normal;
+  line-height: 1;
+}
+
+.platform-label {
+  font-weight: 900;
+}
+
+.platform-arrow {
+  font-size: 28px;
+  font-style: normal;
+  line-height: 0.6;
+  transition: transform 0.2s ease;
+}
+
+.platform-trigger:hover {
+  color: #3d889b;
+  background-color: rgba(61, 136, 155, 0.12);
+}
+
+:root[data-theme='dark'] .platform-trigger:hover {
+  color: #7fc4d0;
+  background-color: rgba(61, 136, 155, 0.22);
+}
+
+/* 触发下拉展开时箭头反转 */
+.n-dropdown:focus-visible .platform-arrow {
+  transform: translateY(1px) rotate(180deg);
+}
+
+.title-suffix {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .result-count {
   font-size: 14px;
   color: #888;
-}
-
-/* 标签切换 */
-.tab-switch {
-  display: inline-flex;
-  gap: 4px;
-  padding: 3px;
-  border-radius: 8px;
-  background-color: rgba(128, 128, 128, 0.12);
-  align-self: flex-start;
-}
-
-.tab-btn {
-  border: none;
-  background: transparent;
-  padding: 5px 18px;
-  border-radius: 6px;
-  font-size: 14px;
-  color: #888;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.tab-btn:hover {
-  color: #555;
-}
-
-.tab-btn.active {
-  background-color: #fff;
-  color: #333;
-  font-weight: 600;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
-}
-
-:root[data-theme='dark'] .tab-btn.active {
-  background-color: rgba(255, 255, 255, 0.14);
-  color: #fff;
-  box-shadow: none;
+  white-space: nowrap;
 }
 
 .search-content {

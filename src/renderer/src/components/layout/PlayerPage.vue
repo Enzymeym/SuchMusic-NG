@@ -373,7 +373,7 @@ watch(
               :playing="player.isPlaying"
               :has-lyric="!!lyricsData"
               :flow-speed="2"
-              :render-scale="0.6"
+              :render-scale="0.45"
             />
             <div class="bg-mask"></div>
           </template>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { NCard, NIcon, useThemeVars, NAlert, NSpin, NButton, NProgress, useMessage, NModal, NScrollbar } from 'naive-ui'
+import { NCard, NIcon, useThemeVars, NAlert, NSpin, NButton, NProgress, NTag, useMessage, NModal, NScrollbar } from 'naive-ui'
 import MarkdownIt from 'markdown-it'
 import { full as emoji } from 'markdown-it-emoji'
 import markdownItGitHubAlerts from 'markdown-it-github-alerts'
@@ -81,12 +81,30 @@ try {
   console.error('Failed to initialize MarkdownIt:', e)
 }
 
-// 应用名称与版本信息（构建时从 package.json 注入，见 electron.vite.config.ts）
-const appName = computed(() => __APP_NAME__ || 'Such Music')
+// 应用名称固定显示为产品名 Such Music（package.json 的 name 字段为内部包名，不用于展示）
+const appName = 'Such Music'
 const appDescription = __APP_DESCRIPTION__
-const appHomepage = __APP_HOMEPAGE__
 // 优先使用注入的真实版本号，IPC 未返回时也无需硬编码回退
 const appVersion = computed(() => currentVersion.value || __APP_VERSION__)
+
+// 预发布标签：跟随版本号后缀自动识别（canary/beta/alpha/rc），正式版返回空串不显示标签
+const releaseTag = computed(() => {
+  const v = appVersion.value.toLowerCase()
+  if (v.includes('canary')) return 'Canary'
+  if (v.includes('beta')) return 'Beta'
+  if (v.includes('alpha')) return 'Alpha'
+  if (v.includes('rc')) return 'RC'
+  return ''
+})
+
+// 是否预发布版本：驱动 Beta 提示与标签显示
+const isPrerelease = computed(() => !!releaseTag.value)
+
+// 去掉预发布后缀的基础版本号，用于版本徽章展示（后缀由 releaseTag 单独显示）
+const baseVersion = computed(() => {
+  const match = appVersion.value.match(/\d+\.\d+\.\d+/)
+  return match ? match[0] : appVersion.value
+})
 
 // 更新日志相关
 const showChangelog = ref(false)
@@ -157,7 +175,7 @@ const fetchDeveloperInfo = async () => {
 
 // 打开 GitHub 项目地址
 const openGithub = () => {
-  const url = appHomepage || 'https://github.com/Enzymeym/SuchMusic-NG'
+  const url = 'https://github.com/Enzymeym/SuchMusic-NG'
   if ((window as any).electron?.shell) {
     ; (window as any).electron.shell.openExternal(url)
   } else {
@@ -277,21 +295,36 @@ const renderedChangelog = computed(() => {
 <template>
   <div class="settings-content about-root">
     <div class="about-hero">
+      <img src="../../../assets/icon.png" alt="logo" class="about-logo" />
       <div class="about-hero-title" title="Such Music" @dblclick="handleAppNameDblClick">
         {{ appName }}
       </div>
-      <div class="about-hero-version">
-        {{ appVersion }}
+      <div class="about-hero-meta">
+        <n-tag size="small" :bordered="false" round>v{{ baseVersion }}</n-tag>
+        <n-tag v-if="releaseTag" size="small" :bordered="false" round type="warning">{{ releaseTag }}</n-tag>
       </div>
       <div v-if="appDescription" class="about-hero-desc">
         {{ appDescription }}
       </div>
-      <div class="about-hero-toolbar">
-        <button class="about-hero-github" type="button" @click="openGithub" title="GitHub">
-          <n-icon size="22">
-            <i class="mgc_github_line" />
-          </n-icon>
-        </button>
+      <div class="about-hero-actions">
+        <n-button size="small" secondary @click="openGithub">
+          <template #icon>
+            <n-icon><i class="mgc_github_line" /></n-icon>
+          </template>
+          项目主页
+        </n-button>
+        <n-button size="small" secondary class="about-sponsor-btn" @click="openSponsor">
+          <template #icon>
+            <n-icon><i class="mgc_heart_line" style="color: #d03050" /></n-icon>
+          </template>
+          赞助
+        </n-button>
+        <n-button size="small" type="primary" @click="handleCheckUpdate">
+          <template #icon>
+            <n-icon><i class="mgc_refresh_1_line" /></n-icon>
+          </template>
+          检查更新
+        </n-button>
       </div>
 
       <!-- 更新状态卡片 -->
@@ -330,38 +363,30 @@ const renderedChangelog = computed(() => {
         </div>
       </div>
 
-      <div v-else class="update-check-row">
-        <n-button size="small" secondary @click="handleCheckUpdate">
-          <template #icon>
-            <i class="mgc_refresh_1_line" />
-          </template>
-          检查更新
-        </n-button>
-      </div>
     </div>
 
+    <!-- 预发布提示：跟随版本号后缀，正式版不显示 -->
+    <n-alert
+      v-if="isPrerelease"
+      type="warning"
+      :bordered="false"
+      class="beta-notice"
+    >
+      <template #icon>
+        <n-icon><i class="mgc_alert_line" /></n-icon>
+      </template>
+      当前为 {{ releaseTag }} 版本（v{{ baseVersion }}），功能可能不完善，请谨慎使用
+    </n-alert>
+
     <div class="about-cards">
-      <n-alert type="info" title="Beta 版本">
-        功能不完善，请谨慎使用
-      </n-alert>
-
-      <n-alert title="赞助本项目" type="error" class="sponsor-alert">
-        <template #icon>
-          <i class="mgc_heart_line" style="color: #d03050;" />
-        </template>
-        <div class="sponsor-content">
-          <span class="sponsor-text">如果喜欢这个项目，欢迎赞助支持开发者</span>
-          <n-button size="small" tertiary @click="openSponsor">
-            前往赞助
-          </n-button>
-        </div>
-      </n-alert>
-
       <n-card class="about-card" :bordered="false" :style="{
         backgroundColor: themeVars.cardColor
       }">
         <template #header>
-          <div>开发者</div>
+          <div class="about-card-header">
+            <span class="about-card-icon"><n-icon><i class="mgc_user_3_line" /></n-icon></span>
+            <span>开发者</span>
+          </div>
         </template>
 
         <div v-if="developerLoading" class="about-card-row" style="justify-content: center">
@@ -372,8 +397,14 @@ const renderedChangelog = computed(() => {
           <img :src="developerInfo.avatar_url" class="developer-avatar" alt="avatar" />
           <div class="developer-details">
             <div class="developer-name">{{ developerInfo.name || developerInfo.login }}</div>
-            <a :href="developerInfo.html_url" target="_blank" class="developer-link">@{{ developerInfo.login }}</a>
+            <div class="developer-handle">@{{ developerInfo.login }}</div>
           </div>
+          <n-button size="small" secondary @click="openGithub">
+            GitHub
+            <template #icon>
+              <n-icon size="14"><i class="mgc_arrow_right_line" /></n-icon>
+            </template>
+          </n-button>
         </div>
 
         <div v-else class="about-card-row">
@@ -387,7 +418,10 @@ const renderedChangelog = computed(() => {
         backgroundColor: themeVars.cardColor
       }">
         <template #header>
-          <div>法律信息</div>
+          <div class="about-card-header">
+            <span class="about-card-icon"><n-icon><i class="mgc_shield_line" /></n-icon></span>
+            <span>法律信息</span>
+          </div>
         </template>
         <div class="about-card-row legal-row">
           <span class="about-card-label">隐私政策与在线服务声明</span>
@@ -400,8 +434,10 @@ const renderedChangelog = computed(() => {
         backgroundColor: themeVars.cardColor
       }">
         <template #header>
-          <div class="changelog-header">
+          <div class="about-card-header">
+            <span class="about-card-icon"><n-icon><i class="mgc_history_line" /></n-icon></span>
             <span>更新日志</span>
+            <n-tag v-if="currentChangelogVersion" size="small" :bordered="false" round>{{ currentChangelogVersion }}</n-tag>
           </div>
         </template>
 
@@ -439,99 +475,72 @@ const renderedChangelog = computed(() => {
 </template>
 
 <style scoped>
-/* 关于页根容器，模拟 HyperOS 中居中布局 */
 .about-root {
   position: relative;
-  padding-top: 32px;
-  overflow: hidden;
+  width: 100%;
+  padding: 24px 4px 0 0;
 }
-
 
 .about-hero {
   position: relative;
+  z-index: 1;
   text-align: center;
-  margin-bottom: 24px;
-  padding: 32px 16px 24px;
+  margin-bottom: 16px;
+  padding: 24px 16px 20px;
+}
+
+.about-logo {
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  margin: 0 auto 12px;
+  display: block;
+  object-fit: cover;
 }
 
 .about-hero-title {
-  font-size: 30px;
-  font-weight: 600;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
   position: relative;
   z-index: 1;
 }
 
-.about-hero-version {
-  margin-top: 6px;
-  font-size: 13px;
-  opacity: 0.7;
+.about-hero-meta {
+  margin-top: 8px;
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  align-items: center;
   position: relative;
   z-index: 1;
 }
 
 .about-hero-desc {
-  margin-top: 4px;
-  font-size: 12px;
-  opacity: 0.5;
+  margin-top: 8px;
+  font-size: 13px;
+  opacity: 0.55;
   position: relative;
   z-index: 1;
 }
 
-.about-hero-toolbar {
+.about-hero-actions {
   position: relative;
-  margin-top: 12px;
+  margin-top: 16px;
   display: flex;
   justify-content: center;
-  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
   z-index: 1;
 }
 
-.about-hero-github {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 999px;
-  border: none;
-  cursor: pointer;
-  background-color: rgba(0, 0, 0, 0.06);
-  color: inherit;
-  transition:
-    background-color 0.2s,
-    transform 0.15s;
-}
-
-.about-hero-github:hover {
-  background-color: rgba(0, 0, 0, 0.12);
-  transform: translateY(-1px);
-}
-
-.about-hero-update {
-  position: absolute;
-  right: 0;
-  padding: 4px 12px;
-  border-radius: 999px;
-  border: none;
-  cursor: pointer;
-  font-size: 12px;
-  background-color: rgba(255, 255, 255, 0.85);
-  color: rgba(0, 0, 0, 0.75);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.04);
-  backdrop-filter: blur(10px);
-  transition:
-    background-color 0.2s,
-    transform 0.15s,
-    box-shadow 0.2s;
-}
-
-.about-hero-update:hover {
-  background-color: rgba(255, 255, 255, 0.98);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
-  transform: translateY(-1px);
+.about-sponsor-btn :deep(.n-icon) {
+  color: #d03050;
 }
 
 .about-cards {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -541,11 +550,25 @@ const renderedChangelog = computed(() => {
   backdrop-filter: blur(18px);
 }
 
-.about-card-title {
-  font-size: 13px;
-  font-weight: 500;
-  margin-bottom: 6px;
-  opacity: 0.85;
+.about-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.about-card-icon {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  align-items: center;
+  justify-content: center;
+  background: rgba(127, 127, 127, 0.1);
+  font-size: 15px;
+  color: v-bind('themeVars.primaryColor');
+  flex-shrink: 0;
 }
 
 .about-card-row {
@@ -564,14 +587,40 @@ const renderedChangelog = computed(() => {
   margin-left: 24px;
 }
 
-.about-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+.beta-notice {
+  position: relative;
+  z-index: 1;
+  margin-bottom: 16px;
 }
 
-.about-link-icon {
+.developer-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.developer-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
   flex-shrink: 0;
+}
+
+.developer-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.developer-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.developer-handle {
+  font-size: 12px;
+  color: v-bind('themeVars.textColor3');
+  margin-top: 2px;
 }
 
 .loading-container,
@@ -673,41 +722,10 @@ const renderedChangelog = computed(() => {
   padding: 0;
 }
 
-.developer-info {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.developer-avatar {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  object-fit: cover;
-}
-
-.developer-details {
-  display: flex;
-  flex-direction: column;
-}
-
-.developer-name {
-  font-weight: 600;
-  font-size: 15px;
-}
-
-.developer-link {
-  font-size: 13px;
-  color: var(--n-text-color-3);
-  text-decoration: none;
-}
-
-.developer-link:hover {
-  text-decoration: underline;
-}
-
 /* 更新状态卡片 */
 .update-status-card {
+  position: relative;
+  z-index: 1;
   margin-top: 16px;
   padding: 12px 16px;
   border-radius: 10px;
@@ -742,29 +760,5 @@ const renderedChangelog = computed(() => {
 .update-download-detail {
   font-size: 11px;
   opacity: 0.7;
-}
-
-.update-check-row {
-  margin-top: 16px;
-  display: flex;
-  justify-content: center;
-}
-
-.sponsor-alert {
-  margin-top: 0;
-}
-
-.sponsor-content {
-  display: flex;
-  flex-direction: column;
-  align-items: start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.sponsor-text {
-  margin: 0;
-  font-size: 13px;
-  opacity: 0.85;
 }
 </style>

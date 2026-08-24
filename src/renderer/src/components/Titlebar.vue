@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useSettingsStore } from '../stores/settingsStore'
 
 const appName = ref('Such PC')
@@ -8,8 +8,14 @@ const settingsStore = useSettingsStore()
 //当前窗口尺寸的类型
 const sizeType = ref<'max' | 'min'>('min')
 onMounted(() => {
-  window.electron.ipcRenderer.on('winSizeChange', (_, type) => {
+  const handleWinSizeChange = (_: unknown, type: { size: 'max' | 'min' }) => {
     sizeType.value = type.size
+  }
+  window.electron.ipcRenderer.on('winSizeChange', handleWinSizeChange)
+
+  onBeforeUnmount(() => {
+    // 仅移除自身监听器，避免 removeAllListeners 误删其他组件对同一事件的监听
+    window.electron.ipcRenderer.removeListener('winSizeChange', handleWinSizeChange)
   })
 })
 

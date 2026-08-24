@@ -107,7 +107,11 @@
     <Transition name="fade">
       <div v-if="!loading || loadMore" class="song-list-scroll-wrapper">
         <n-scrollbar class="song-list-scroll-container" @scroll="(e) => emit('scroll', e)">
-          <transition-group name="song-fade" tag="div">
+          <transition-group
+            name="song-fade"
+            tag="div"
+            :class="{ 'song-list-rows--large': isLargeList }"
+          >
             <div
               v-for="(song, index) in songs"
               :key="song.id || `s-${index}`"
@@ -142,7 +146,7 @@
                   </div>
                   <img
                     class="song-cover"
-                    :src="song.picUrl || song.al?.picUrl || defaultCover"
+                    :src="song.thumbUrl || song.picUrl || song.al?.picUrl || defaultCover"
                     alt=""
                     referrerpolicy="no-referrer"
                     loading="lazy"
@@ -151,15 +155,19 @@
                   <div class="song-info">
                     <div style="display: flex; align-items: center; gap: 10px">
                       <div style="display: flex; flex-direction: column; min-width: 0; flex: 1">
-                        <n-ellipsis style="font-weight: bold; font-size: 16.5px; max-width: 200px">
-                          {{ songTitleCache.get(song.name)?.mainTitle || song.name || '未知歌曲' }}
-                        </n-ellipsis>
-                        <n-ellipsis
-                          v-if="songTitleCache.get(song.name)?.subTitle"
-                          style="font-size: 12.5px; color: #818181; max-width: 200px"
+                        <div
+                          class="song-title-ellipsis"
+                          :title="getSongTitle(song).mainTitle"
                         >
-                          {{ songTitleCache.get(song.name)?.subTitle }}
-                        </n-ellipsis>
+                          {{ getSongTitle(song).mainTitle }}
+                        </div>
+                        <div
+                          v-if="getSongTitle(song).subTitle"
+                          class="song-subtitle-ellipsis"
+                          :title="getSongTitle(song).subTitle"
+                        >
+                          {{ getSongTitle(song).subTitle }}
+                        </div>
                       </div>
                       <n-tag
                         v-if="song.isOriginal"
@@ -186,9 +194,9 @@
                       >
                     </div>
                     <div style="display: flex; align-items: center; max-width: 200px">
-                      <template v-if="filterPlatforms(song.platforms).length > 0">
+                      <template v-if="filterPlatformsCached(song.platforms).length > 0">
                         <n-tag
-                          v-for="p in filterPlatforms(song.platforms)"
+                          v-for="p in filterPlatformsCached(song.platforms)"
                           :key="p.source"
                           :type="getSourceType(p.source)"
                           size="small"
@@ -211,28 +219,32 @@
                       </n-tag>
                       <n-tag
                         v-if="song.quality"
-                        :type="getQualityTag(song.quality).type"
+                        :type="getQualityTagCached(song.quality).type"
                         size="small"
                         round
                         :bordered="false"
                         style="transform: scale(0.8); margin-right: 2px; flex-shrink: 0"
                       >
-                        {{ getQualityTag(song.quality).label }}
+                        {{ getQualityTagCached(song.quality).label }}
                       </n-tag>
-                      <n-ellipsis style="font-size: 14px; color: #818181; flex: 1; min-width: 0">
+                      <div
+                        class="song-artist-ellipsis"
+                        :title="getArtistsFormatted(song)"
+                      >
                         {{ getArtistsFormatted(song) }}
-                      </n-ellipsis>
+                      </div>
                     </div>
                   </div>
                 </div>
                 <div class="song-meta">
                   <div class="album-info">
-                    <n-ellipsis
+                    <div
+                      class="song-album-ellipsis"
+                      :title="getAlbumName(song)"
                       @click.stop="handleAlbumClick(song)"
-                      style="font-size: 14px; color: #818181; cursor: pointer; max-width: 32vh"
                     >
                       {{ getAlbumName(song) }}
-                    </n-ellipsis>
+                    </div>
                   </div>
                   <div v-if="!hideDuration" class="duration-info">
                     {{ formatDuration(song.dt) }}
@@ -267,7 +279,6 @@ import {
   NFlex,
   NSpin,
   NText,
-  NEllipsis,
   useThemeVars,
   NSkeleton,
   NDivider,
@@ -284,6 +295,61 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useDownloadMusic } from '../../composables/useDownloadMusic'
 import defaultCover from '../../assets/default-cover.png'
 import { formatDuration } from '../../utils/format'
+
+/** 大列表阈值：超过该数量启用视口外渲染跳过与动画禁用，避免整库全量渲染/动画开销 */
+const LARGE_LIST_THRESHOLD = 120
+
+/** 不支持的平台列表 */
+const blockedPlatforms = ['soda', '5sing', 'bilibili', 'mg', 'migu']
+
+function processSongTitle(title: string): { mainTitle: string; subTitle: string } {
+  if (!title) return { mainTitle: '未知歌曲', subTitle: '' }
+
+  const bracketRegex = /[（(].*?[)）]/g
+  const brackets = title.match(bracketRegex)
+
+  if (brackets && brackets.length > 0) {
+    const mainTitle = title.replace(bracketRegex, '').trim()
+    const subTitle = brackets.join(' ')
+    return { mainTitle, subTitle }
+  }
+  return { mainTitle: title, subTitle: '' }
+}
+
+// 歌曲标题解析结果缓存（WeakMap，随歌曲对象生命周期自动回收；name 变化时自动失效）
+const songTitleResultCache = new WeakMap<
+  object,
+  { rawName: string; value: { mainTitle: string; subTitle: string } }
+>()
+function getSongTitle(song: Song): { mainTitle: string; subTitle: string } {
+  const entry = songTitleResultCache.get(song)
+  if (entry && entry.rawName === song.name) return entry.value
+  const value = processSongTitle(song.name)
+  songTitleResultCache.set(song, { rawName: song.name, value })
+  return value
+}
+
+// 平台过滤结果缓存（按 platforms 数组引用复用，避免每行每次渲染重复 filter）
+const platformsResultCache = new WeakMap<object, any[]>()
+function filterPlatformsCached(platforms?: any[]): any[] {
+  if (!platforms || platforms.length === 0) return []
+  const cached = platformsResultCache.get(platforms)
+  if (cached) return cached
+  const result = platforms.filter((p) => !blockedPlatforms.includes(p.source))
+  platformsResultCache.set(platforms, result)
+  return result
+}
+
+// 音质标签纯函数结果缓存（质量字符串重复出现频率高）
+const qualityTagCache = new Map<string, { label: string; type: TagType }>()
+function getQualityTagCached(quality: string): { label: string; type: TagType } {
+  let cached = qualityTagCache.get(quality)
+  if (!cached) {
+    cached = getQualityTag(quality)
+    qualityTagCache.set(quality, cached)
+  }
+  return cached
+}
 
 // Define interfaces
 interface Artist {
@@ -312,6 +378,7 @@ interface Song {
   quality?: string
   isPreloaded?: boolean
   picUrl?: string
+  thumbUrl?: string
   mp3Url?: string
   [key: string]: any
 }
@@ -770,19 +837,6 @@ function getQualityTag(quality: string): { label: string; type: TagType } {
   }
 }
 
-// 不支持的平台列表
-const blockedPlatforms = ['soda', '5sing', 'bilibili', 'mg', 'migu']
-
-/**
- * 过滤掉不支持的平台
- * @param platforms - 平台列表
- * @returns 过滤后的平台列表
- */
-function filterPlatforms(platforms?: any[]) {
-  if (!platforms || platforms.length === 0) return []
-  return platforms.filter((p) => !blockedPlatforms.includes(p.source))
-}
-
 /* 辅助函数：根据 source 返回对应的标签类型 */
 function getSourceType(source?: string) {
   if (!source) return 'default'
@@ -834,30 +888,8 @@ function getDisplayIndex(idx: number): number {
   return Number(props.startIndex ?? 0) + Number(idx) + 1
 }
 
-function processSongTitle(title: string): { mainTitle: string; subTitle: string } {
-  if (!title) return { mainTitle: '未知歌曲', subTitle: '' }
-
-  const bracketRegex = /[（(].*?[)）]/g
-  const brackets = title.match(bracketRegex)
-
-  if (brackets && brackets.length > 0) {
-    const mainTitle = title.replace(bracketRegex, '').trim()
-    const subTitle = brackets.join(' ')
-    return { mainTitle, subTitle }
-  }
-  return { mainTitle: title, subTitle: '' }
-}
-
-// 缓存歌曲标题处理结果，避免每行重复调用 processSongTitle
-const songTitleCache = computed(() => {
-  const cache = new Map<string, { mainTitle: string; subTitle: string }>()
-  for (const song of props.songs) {
-    if (!cache.has(song.name)) {
-      cache.set(song.name, processSongTitle(song.name))
-    }
-  }
-  return cache
-})
+/** 是否为大列表：启用视口外渲染跳过与动画禁用 */
+const isLargeList = computed(() => props.songs.length > LARGE_LIST_THRESHOLD)
 </script>
 
 <style scoped>
@@ -1035,6 +1067,61 @@ const songTitleCache = computed(() => {
 .song-item-wrapper {
   transition: all 0.3s ease;
   contain: layout style;
+}
+
+/* 轻量 CSS 省略（替代每行 4 个 n-ellipsis，消除每行 4 个 ResizeObserver 实例） */
+.song-title-ellipsis,
+.song-subtitle-ellipsis,
+.song-artist-ellipsis,
+.song-album-ellipsis {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.song-title-ellipsis {
+  font-weight: bold;
+  font-size: 16.5px;
+  max-width: 200px;
+}
+
+.song-subtitle-ellipsis {
+  font-size: 12.5px;
+  color: #818181;
+  max-width: 200px;
+}
+
+.song-artist-ellipsis {
+  font-size: 14px;
+  color: #818181;
+  flex: 1;
+  min-width: 0;
+}
+
+.song-album-ellipsis {
+  font-size: 14px;
+  color: #818181;
+  cursor: pointer;
+  max-width: 32vh;
+}
+
+/* 大列表：跳过视口外行的渲染/绘制，并禁用昂贵的 blur/位移动画 */
+.song-list-rows--large .song-item-wrapper {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 80px;
+}
+
+.song-list-rows--large .song-fade-enter-active,
+.song-list-rows--large .song-fade-leave-active,
+.song-list-rows--large .song-fade-move {
+  transition: none !important;
+}
+
+.song-list-rows--large .song-fade-enter-from,
+.song-list-rows--large .song-fade-leave-to {
+  opacity: 1;
+  filter: none;
+  transform: none;
 }
 
 .song-fade-enter-active,

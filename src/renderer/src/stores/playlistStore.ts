@@ -36,6 +36,34 @@ const STORAGE_KEY = 'user_playlists'
 /** localStorage 安全存储上限（保守估计，实际限制因浏览器/环境而异） */
 const STORAGE_SAFE_LIMIT_BYTES = 3 * 1024 * 1024 // 3MB
 
+/** 防抖写入：批量操作（批量收藏/删除/拖拽排序）时合并为一次序列化，避免高频全量 JSON.stringify */
+let saveTimer: ReturnType<typeof setTimeout> | null = null
+let pendingSave: (() => void) | null = null
+const SAVE_DEBOUNCE_MS = 300
+
+function scheduleSave(saveFn: () => void): void {
+  if (saveTimer) clearTimeout(saveTimer)
+  pendingSave = saveFn
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    pendingSave = null
+    saveFn()
+  }, SAVE_DEBOUNCE_MS)
+}
+
+// 页面卸载前兜底：把防抖中待写入的歌单数据立即落盘，避免丢失最后一次变更
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+      const fn = pendingSave
+      pendingSave = null
+      fn?.()
+    }
+  })
+}
+
 export const usePlaylistStore = defineStore('playlist', {
   state: (): PlaylistState => {
     // 在 state 初始化时同步从 localStorage 加载歌单数据
@@ -94,38 +122,40 @@ export const usePlaylistStore = defineStore('playlist', {
       }
     },
     saveToStorage(): void {
-      try {
-        // 本地音乐封面使用 blob URL，进程重启后即失效，持久化时剥离，
-        // 避免 localStorage 中残留指向已失效 URL 的封面（与 playerStore 持久化策略一致）。
-        // 相关封面会在本地音乐扫描补全后由 restoreCoversFromLocalSongs 重新恢复。
-        const persisted = this.playlists.map((pl) => ({
-          ...pl,
-          cover: pl.cover?.startsWith('blob:') ? undefined : pl.cover,
-          tracks: pl.tracks.map((t) => ({
-            ...t,
-            cover: t.cover?.startsWith('blob:') ? undefined : t.cover
-          }))
-        }))
-        const json = JSON.stringify(persisted)
-        const sizeBytes = new Blob([json]).size
-
-        if (sizeBytes > STORAGE_SAFE_LIMIT_BYTES) {
-          console.warn(
-            `[playlistStore] 歌单数据过大 (${(sizeBytes / 1024).toFixed(2)} KB)，` +
-            `接近 localStorage 限制。建议清理不常用的歌单。`
-          )
-        }
-
-        localStorage.setItem(STORAGE_KEY, json)
-      } catch (e) {
-        console.error('Failed to save playlists to storage', e)
+      scheduleSave(() => {
         try {
-          const size = JSON.stringify(this.playlists).length
-          console.error(`Playlists data size: ${(size / 1024).toFixed(2)} KB`)
-        } catch {
-          /* ignore secondary error */
+          // 本地音乐封面使用 blob URL，进程重启后即失效，持久化时剥离，
+          // 避免 localStorage 中残留指向已失效 URL 的封面（与 playerStore 持久化策略一致）。
+          // 相关封面会在本地音乐扫描补全后由 restoreCoversFromLocalSongs 重新恢复。
+          const persisted = this.playlists.map((pl) => ({
+            ...pl,
+            cover: pl.cover?.startsWith('blob:') ? undefined : pl.cover,
+            tracks: pl.tracks.map((t) => ({
+              ...t,
+              cover: t.cover?.startsWith('blob:') ? undefined : t.cover
+            }))
+          }))
+          const json = JSON.stringify(persisted)
+          const sizeBytes = new Blob([json]).size
+
+          if (sizeBytes > STORAGE_SAFE_LIMIT_BYTES) {
+            console.warn(
+              `[playlistStore] 歌单数据过大 (${(sizeBytes / 1024).toFixed(2)} KB)，` +
+              `接近 localStorage 限制。建议清理不常用的歌单。`
+            )
+          }
+
+          localStorage.setItem(STORAGE_KEY, json)
+        } catch (e) {
+          console.error('Failed to save playlists to storage', e)
+          try {
+            const size = JSON.stringify(this.playlists).length
+            console.error(`Playlists data size: ${(size / 1024).toFixed(2)} KB`)
+          } catch {
+            /* ignore secondary error */
+          }
         }
-      }
+      })
     },
     /**
      * 根据本地歌曲已加载的封面恢复用户歌单中缺失的封面

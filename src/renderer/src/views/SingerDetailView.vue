@@ -120,10 +120,16 @@ const artist = computed<ArtistInfo | null>(() => {
     songs: []
   }
 
+  // 已收录歌曲 ID 集合：将 Array.find 去重（O(n²)）降为 Set 查询（O(1)），
+  // 避免大曲库 + 播放历史下每次播放触发全库重算时退化
+  const seenSongIds = new Set<string>()
+
   // 先处理本地音乐（元数据更完整：封面、时长等）
   localMusicStore.songs.forEach((song) => {
     const songArtist = song.ar?.[0]?.name || '未知歌手'
     if (songArtist !== name) return
+    if (seenSongIds.has(String(song.id))) return
+    seenSongIds.add(String(song.id))
 
     if (!result.cover && song.picUrl) {
       result.cover = song.picUrl
@@ -131,17 +137,15 @@ const artist = computed<ArtistInfo | null>(() => {
     if (!result.cover && song.al?.picUrl) {
       result.cover = song.al.picUrl
     }
-    if (!result.songs.find(s => s.id === song.id)) {
-      result.songs.push({
-        id: song.id,
-        title: song.name,
-        artist: name,
-        cover: song.picUrl || song.al?.picUrl || '',
-        album: song.al?.name,
-        filePath: song.filePath,
-        durationMs: song.dt
-      })
-    }
+    result.songs.push({
+      id: song.id,
+      title: song.name,
+      artist: name,
+      cover: song.picUrl || song.al?.picUrl || '',
+      album: song.al?.name,
+      filePath: song.filePath,
+      durationMs: song.dt
+    })
   })
 
   // 再用播放历史补充（主要是 playCount，以及本地没有的歌曲）
@@ -153,7 +157,8 @@ const artist = computed<ArtistInfo | null>(() => {
     if (!result.cover && record.cover) {
       result.cover = record.cover
     }
-    if (!result.songs.find(s => s.id === record.songId)) {
+    if (!seenSongIds.has(String(record.songId))) {
+      seenSongIds.add(String(record.songId))
       result.songs.push({
         id: record.songId,
         title: record.title,

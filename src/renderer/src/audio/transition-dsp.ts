@@ -1,18 +1,17 @@
 /**
- * 实时过渡点分析核心 DSP（纯函数，无 DOM 依赖）
+ * 智能过渡核心 DSP（纯函数，无 DOM / Worker / ML 依赖）
  *
- * 本模块被两个执行环境复用：
- * 1. Web Worker（transition-analyzer.worker.ts）—— 流式实时分析
- * 2. 主线程降级（transition-analyzer.ts）—— Worker 不可用时直接调用
+ * 扁平化设计：移除 onnxruntime 起始点模型与 Web Worker 架构，
+ * 所有分析在主线程分块异步执行（yieldMainThread 让出），对外暴露一致的
+ * 同步版本（测试 / 小窗口）与分块异步版本（播放路径，避免 UI 卡死）。
  *
- * 分析思路（与 audio-analyzer.ts 的离线分析理念一致，但按帧流式处理）：
- * - 滚动 RMS 能量包络：每帧（AnalyserNode fftSize=256）计算 RMS，EMA 平滑抑制波动
- * - 起始点检测：能量相对前一帧突增（倍数阈值）
- * - 尾部衰减检测：最近 ~15s 窗口内峰值之后能量下降到 70% 以下，判定自然衰减起点
- * - 决策产出：尾部衰减起点 + 下一首头部特征 → TransitionDecision
+ * 「完美过渡」三要素：
+ * 1. 节奏（Rhythm）：能量包络 → BPM 估计，两曲节奏不一致时对下一曲做
+ *    WSOLA 变速不变调；过渡执行在拍点（实时能量起始点）上对齐
+ * 2. 调性（Key）：色度向量 + Krumhansl-Kessler 键位轮廓相关 → 调性检测，
+ *    经 Camelot Wheel 判定和谐兼容性；不兼容时对下一曲做相位声码器变调对齐
+ * 3. 能量（Energy）：当前曲尾部衰减 / 下一曲头部攻击，决定过渡起点与时长
  */
-
-import { computeMagnitudeSpectrum } from './onset-model'
 
 // ====== 常量 ======
 
@@ -24,106 +23,41 @@ export const ONSET_RATIO_THRESHOLD = 2.5
 export const ONSET_MIN_RMS = 0.05
 /** RMS EMA 平滑系数（帧间波动抑制） */
 export const ONSET_EMA = 0.4
-/** 尾部衰减检测窗口（秒） */
-export const TAIL_WINDOW_SEC = 15
-/** 峰值能量下降到该比例判定为衰减起点 */
-export const TAIL_DECAY_RATIO = 0.7
 /** 最小过渡时长（毫秒） */
 export const MIN_TRANSITION_MS = 400
 /** 最大过渡时长（毫秒） */
 export const MAX_TRANSITION_MS = 8000
 /** 智能模式兜底过渡时长（毫秒） */
 export const DEFAULT_TRANSITION_MS = 3000
+/** 尾部衰减分析 / 结尾触发窗口（秒）：过渡不得早于结尾前该窗口开始 */
+export const TAIL_ANALYSIS_SEC = 30
+/** 过渡触发提前量（毫秒）：最晚触发点 = 结尾前 过渡时长 + 该提前量，为节拍对齐等待与完整淡化预留时间 */
+export const BEAT_TRIGGER_MARGIN_MS = 1200
 /** 头部特征分析范围（秒） */
 export const HEAD_ANALYSIS_SEC = 5
-/** 头部能量分析窗口大小（秒） */
-export const WINDOW_SIZE_SEC = 0.05
 /** 前奏分析范围（秒）：用于计算"跳过前奏"的下一曲起始偏移 */
 export const CONTENT_ANALYSIS_SEC = 30
 /** 头部"内容起点"认定：距歌曲开头超过该秒数才视为存在可跳过的前奏 */
 export const CONTENT_START_MIN_SEC = 1.5
-/** 节拍量化：过渡起点与最近拍点的最大偏移（毫秒），超出则保持原起点 */
-export const BEAT_MAX_SHIFT_MS = 500
-/** 拍点（起始点）历史保留时长（秒），供节拍量化使用 */
-export const BEAT_HISTORY_SEC = 60
-/** 距歌曲结束多少秒内必然产出决策（过渡时机限制在结尾 30s 窗口内） */
-export const EARLY_DECIDE_SEC = 30
-/** 结尾人声分析范围（秒）：从歌曲结尾向前扫描该窗口内最后一个持续人声段 */
-export const VOCAL_END_ANALYSIS_SEC = 90
-/** 结尾无人声段分析窗口（秒）：与 EARLY_DECIDE_SEC 一致，仅在结尾窗口内寻找过渡用无人声段 */
-export const VOCAL_GAP_ANALYSIS_SEC = EARLY_DECIDE_SEC
-/** 无人声段最小可用时长（秒）：结尾 30s 内无人声段不足该时长时沿用老逻辑过渡 */
-export const MIN_VOCAL_GAP_SEC = 10
-/** 两次决策产出的最小间隔（秒） */
-export const DECIDE_MIN_INTERVAL_SEC = 0.5
-/** 尾部分析所需最少历史时长（秒），数据不足不产出决策 */
-export const MIN_TAIL_DATA_SEC = 2
-/** 能量包络额外保留时长（秒）：用于区分"结尾静音尾奏"与"开篇静音"，静音窗口之前是否有实质内容 */
-export const SILENT_HISTORY_MARGIN_SEC = 45
+/** BPM 端点分析窗口（秒）：上一曲结尾 / 下一曲开头的节奏对比范围 */
+export const BPM_ANALYSIS_WINDOW_SEC = 30
+/** BPM 差异阈值：差异超过该比例时对下一曲变速对齐 */
+export const BPM_MATCH_THRESHOLD = 0.08
+/** 有效 BPM 下限 */
+export const BPM_MIN = 60
+/** 有效 BPM 上限 */
+export const BPM_MAX = 180
+/** 调性对齐最大变调量（半音）：超出该范围不强行变调，仅降低兼容评分 */
+export const MAX_PITCH_SHIFT_SEMITONES = 3
+/** BPM 对齐变速窗口（秒）：仅对下一曲开头这 N 秒做变速/变调，其余原速原调拼接 */
+export const STRETCH_HEAD_SEC = 30
 
-// ====== 类型 ======
+// ====== 基础工具 ======
 
-/** 能量包络样本（帧级） */
-export interface EnergySample {
-  /** 相对歌曲开头的播放位置（秒） */
-  positionSec: number
-  /** RMS 能量（0~1） */
-  rms: number
+/** 让出主线程的辅助函数：将 CPU 密集分析按块执行，块间让出，避免阻塞 UI */
+function yieldMainThread(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
 }
-
-/** 下一首歌曲头部特征 */
-export interface HeadFeatures {
-  /** 头部窗口内峰值能量 */
-  peakRms: number
-  /** 头部窗口平均能量 */
-  avgRms: number
-  /** 到达峰值一半所需时间（秒），-1 表示能量过低无法判定 */
-  attackTimeSec: number
-  /** 头部初始能量是否极低（适合从静音淡入） */
-  startsQuiet: boolean
-  /** 首个分析窗口的 RMS */
-  initialRms: number
-}
-
-/** 当前歌曲尾部特征 */
-export interface TailFeatures {
-  /** 尾部窗口内峰值能量 */
-  peakRms: number
-  /** 尾部窗口平均能量 */
-  avgRms: number
-  /** 尾部窗口结束时能量 */
-  endRms: number
-  /** 自然衰减起点（相对歌曲开头，秒）；未检测到衰减则为 -1 */
-  decayStartSec: number
-  /** 衰减速率（能量相对每秒下降比例，0~1） */
-  decayRate: number
-}
-
-/** 结尾无人声段（人声间隔） */
-export interface VocalGap {
-  /** 无人声段起始位置（秒，相对传入数据开头） */
-  startSec: number
-  /** 无人声段时长（秒） */
-  durationSec: number
-}
-
-/** 过渡策略 */
-export type TransitionStrategy =
-  'natural_fade' | 'short_overlap' | 'medium_blend' | 'long_blend' | 'fallback'
-
-/** 智能过渡决策 */
-export interface TransitionDecision {
-  /** 过渡开始位置（相对歌曲开头，毫秒） */
-  startPositionMs: number
-  /** 实际过渡时长（毫秒） */
-  transitionDurationMs: number
-  /** 自然过渡质量评分（0~1） */
-  quality: number
-  /** 过渡策略 */
-  strategy: TransitionStrategy
-}
-
-// ====== 纯函数 ======
 
 /** 计算一帧时域数据的 RMS 能量（0~1） */
 export function computeRms(frame: Float32Array): number {
@@ -135,76 +69,7 @@ export function computeRms(frame: Float32Array): number {
   return Math.min(1, Math.sqrt(sum / frame.length))
 }
 
-/**
- * 起始点检测：当前能量相对上一帧突增
- * - 从静音跃起且能量足够大，也视为起始点
- * - 能量过低时不判定（避免噪声抖动误报）
- */
-export function detectOnset(prevRms: number, currRms: number): boolean {
-  if (currRms <= SILENCE_THRESHOLD) return false
-  if (prevRms <= SILENCE_THRESHOLD) return currRms > ONSET_MIN_RMS
-  return currRms >= prevRms * ONSET_RATIO_THRESHOLD
-}
-
-/**
- * 尾部衰减分析：在最近 tailWindowSec 的能量包络上检测自然衰减
- *
- * 检测逻辑：
- * 1. 窗口内峰值能量低于静音阈值 → 视为静音尾部，衰减起点为窗口起点
- * 2. 否则从峰值位置向后找第一个降到峰值 TAIL_DECAY_RATIO 以下的位置作为衰减起点
- * 3. 衰减速率 = (起点能量 - 末尾能量) / 时间跨度 / 起点能量（相对每秒下降比例）
- */
-export function analyzeTail(
-  envelope: EnergySample[],
-  tailWindowSec: number = TAIL_WINDOW_SEC
-): TailFeatures {
-  const empty: TailFeatures = { peakRms: 0, avgRms: 0, endRms: 0, decayStartSec: -1, decayRate: 0 }
-  if (envelope.length === 0) return empty
-
-  const endPos = envelope[envelope.length - 1].positionSec
-  const windowStart = Math.max(0, endPos - tailWindowSec)
-  const win = envelope.filter((s) => s.positionSec >= windowStart)
-  if (win.length === 0) return empty
-
-  let peakRms = 0
-  let sum = 0
-  for (const s of win) {
-    sum += s.rms
-    if (s.rms > peakRms) peakRms = s.rms
-  }
-  const avgRms = sum / win.length
-  const endRms = win[win.length - 1].rms
-
-  // 静音尾部：整段几乎无能量，衰减起点即窗口起点
-  if (peakRms < SILENCE_THRESHOLD) {
-    return { peakRms, avgRms, endRms, decayStartSec: win[0].positionSec, decayRate: 0 }
-  }
-
-  // 峰值位置之后第一个降到阈值以下的位置即为衰减起点
-  const peakIdx = win.reduce((bestIdx, s, i) => (s.rms > win[bestIdx].rms ? i : bestIdx), 0)
-  const decayThreshold = Math.max(peakRms * TAIL_DECAY_RATIO, SILENCE_THRESHOLD * 2)
-  let decayStartSec = -1
-  for (let i = peakIdx; i < win.length; i++) {
-    if (win[i].rms <= decayThreshold) {
-      decayStartSec = win[i].positionSec
-      break
-    }
-  }
-
-  // 衰减速率
-  let decayRate = 0
-  if (decayStartSec >= 0) {
-    const startSample = win.find((s) => s.positionSec >= decayStartSec)
-    if (startSample && endPos > decayStartSec) {
-      const spanSec = endPos - decayStartSec
-      decayRate = Math.max(0, startSample.rms - endRms) / spanSec / Math.max(startSample.rms, 1e-6)
-    }
-  }
-
-  return { peakRms, avgRms, endRms, decayStartSec, decayRate }
-}
-
-/** 计算指定窗口内数据的 RMS */
+/** 计算指定窗口内数据的 RMS（0~1） */
 function computeWindowRms(data: Float32Array, start: number, length: number): number {
   let sum = 0
   const end = Math.min(start + length, data.length)
@@ -218,841 +83,119 @@ function computeWindowRms(data: Float32Array, start: number, length: number): nu
 }
 
 /**
- * 下一首歌曲头部特征分析（复用 audio-analyzer.ts 的头部分析思路）
- * @param channelData 单声道 PCM 数据
- * @param sampleRate 采样率
- * @param headSec 分析范围（秒）
+ * 起始点检测：当前能量相对上一帧突增
+ * - 从静音跃起且能量足够大，也视为起始点
+ * - 能量过低时不判定（避免噪声抖动误报）
  */
-export function analyzeHead(
-  channelData: Float32Array,
-  sampleRate: number,
-  headSec: number = HEAD_ANALYSIS_SEC
-): HeadFeatures {
-  const windowSamples = Math.floor(WINDOW_SIZE_SEC * sampleRate)
-  const length = Math.min(channelData.length, Math.floor(headSec * sampleRate))
-  const segments: Array<{ timeSec: number; rms: number }> = []
-
-  let peakRms = 0
-  let sumRms = 0
-  let segmentCount = 0
-  let attackTimeSec = -1
-  let foundAttack = false
-
-  for (let offset = 0; offset < length; offset += windowSamples) {
-    const rms = computeWindowRms(channelData, offset, windowSamples)
-    const timeSec = offset / sampleRate
-    segments.push({ timeSec, rms })
-    if (rms > peakRms) peakRms = rms
-    sumRms += rms
-    segmentCount++
-
-    if (
-      !foundAttack &&
-      rms >= Math.max(peakRms * 0.5, SILENCE_THRESHOLD) &&
-      rms > SILENCE_THRESHOLD
-    ) {
-      attackTimeSec = timeSec
-      foundAttack = true
-    }
-  }
-
-  const avgRms = segmentCount > 0 ? sumRms / segmentCount : 0
-  const startsQuiet = segments.length > 0 && segments[0].rms < SILENCE_THRESHOLD * 2
-
-  if (attackTimeSec < 0 && peakRms > SILENCE_THRESHOLD) {
-    attackTimeSec = 0
-  }
-
-  return {
-    peakRms,
-    avgRms,
-    attackTimeSec,
-    startsQuiet,
-    initialRms: segments.length > 0 ? segments[0].rms : 0
-  }
+export function detectOnset(prevRms: number, currRms: number): boolean {
+  if (currRms <= SILENCE_THRESHOLD) return false
+  if (prevRms <= SILENCE_THRESHOLD) return currRms > ONSET_MIN_RMS
+  return currRms >= prevRms * ONSET_RATIO_THRESHOLD
 }
 
-// ====== 跳过前奏分析（人声起点优先） ======
-
-/** 人声频段（Hz）：歌声基音谐波与共振峰的主要集中区，乐器前奏通常在此频段能量较弱 */
-const VOCAL_BAND_MIN_HZ = 1000
-const VOCAL_BAND_MAX_HZ = 4000
-/** 人声占比判定阈值：相对全段 70 分位水平的比例 */
-const VOCAL_LEVEL_RATIO = 0.6
-/** 频段分析窗口采样数（2 的幂，约 46ms @44.1kHz） */
-const SPECTRUM_WINDOW = 2048
-
-/** 单窗口的频谱人声占比快照 */
-interface VocalWindow {
-  /** 窗口起始时间（秒，相对歌曲开头） */
-  startSec: number
-  /** 窗口 RMS */
-  rms: number
-  /** 1k-4kHz 人声频段能量占比（0~1） */
-  vocalRatio: number
-}
-
-/**
- * 让出主线程的辅助函数：将 CPU 密集的分析/变速按块执行，块间让出，
- * 避免单次同步计算长时间阻塞 UI（播放卡死）。
- */
-function yieldMainThread(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0))
-}
-
-/** 人声频谱分析每批处理的窗口数（约 64×46ms ≈ 3s 音频，单批阻塞 < 20ms） */
-const PROFILE_CHUNK_WINDOWS = 64
-
-/** Hann 窗缓存（2048 点，只读复用，避免每首歌分析都重新分配） */
-let cachedHannWindow: Float32Array | null = null
+/** Hann 窗缓存（按需分配，只读复用） */
+let cachedHann: Float32Array | null = null
 function getHannWindow(size: number): Float32Array {
-  if (!cachedHannWindow || cachedHannWindow.length !== size) {
-    cachedHannWindow = new Float32Array(size)
+  if (!cachedHann || cachedHann.length !== size) {
+    cachedHann = new Float32Array(size)
     for (let i = 0; i < size; i++) {
-      cachedHannWindow[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (size - 1)))
+      cachedHann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (size - 1)))
     }
   }
-  return cachedHannWindow
+  return cachedHann
 }
 
 /**
- * 计算指定采样范围 [startSample, endSample) 内逐窗口的 RMS 与人声频段占比
- * Hann 窗抑制矩形窗的频谱泄漏，避免强能量音色向人声频段渗漏导致占比误判
+ * 就地基-2 FFT（迭代实现，长度必须为 2 的幂）
+ * 计算完成后 re/im 为频域复数结果
  */
-function computeVocalProfile(
-  channelData: Float32Array,
-  sampleRate: number,
-  startSample: number,
-  endSample: number = channelData.length
-): { windows: VocalWindow[]; windowSec: number } {
-  const winSamples = SPECTRUM_WINDOW
-  const hann = getHannWindow(winSamples)
-  const frame = new Float32Array(winSamples)
-  const windows: VocalWindow[] = []
-  const binFreq = sampleRate / winSamples
-  for (let offset = startSample; offset + winSamples <= endSample; offset += winSamples) {
-    const rms = computeWindowRms(channelData, offset, winSamples)
-    for (let i = 0; i < winSamples; i++) {
-      frame[i] = channelData[offset + i] * hann[i]
-    }
-    const mag = computeMagnitudeSpectrum(frame)
-    let total = 0
-    let vocal = 0
-    for (let k = 1; k < mag.length; k++) {
-      const freq = k * binFreq
-      total += mag[k]
-      if (freq >= VOCAL_BAND_MIN_HZ && freq <= VOCAL_BAND_MAX_HZ) vocal += mag[k]
-    }
-    windows.push({ startSec: offset / sampleRate, rms, vocalRatio: total > 0 ? vocal / total : 0 })
-  }
-  return { windows, windowSec: winSamples / sampleRate }
-}
-
-/**
- * 分块异步版本：逐窗口计算 RMS 与人声频段占比，每 PROFILE_CHUNK_WINDOWS 个
- * 窗口让出一次主线程，避免长时间同步 FFT 分析阻塞 UI（播放卡死）。
- * 结果与同步版本完全一致。
- */
-async function computeVocalProfileAsync(
-  channelData: Float32Array,
-  sampleRate: number,
-  startSample: number,
-  endSample: number = channelData.length
-): Promise<{ windows: VocalWindow[]; windowSec: number }> {
-  const winSamples = SPECTRUM_WINDOW
-  const hann = getHannWindow(winSamples)
-  const frame = new Float32Array(winSamples)
-  const windows: VocalWindow[] = []
-  const binFreq = sampleRate / winSamples
-  let processed = 0
-  for (let offset = startSample; offset + winSamples <= endSample; offset += winSamples) {
-    const rms = computeWindowRms(channelData, offset, winSamples)
-    for (let i = 0; i < winSamples; i++) {
-      frame[i] = channelData[offset + i] * hann[i]
-    }
-    const mag = computeMagnitudeSpectrum(frame)
-    let total = 0
-    let vocal = 0
-    for (let k = 1; k < mag.length; k++) {
-      const freq = k * binFreq
-      total += mag[k]
-      if (freq >= VOCAL_BAND_MIN_HZ && freq <= VOCAL_BAND_MAX_HZ) vocal += mag[k]
-    }
-    windows.push({ startSec: offset / sampleRate, rms, vocalRatio: total > 0 ? vocal / total : 0 })
-    processed++
-    if (processed % PROFILE_CHUNK_WINDOWS === 0) {
-      await yieldMainThread()
+function fft(re: Float32Array, im: Float32Array): void {
+  const n = re.length
+  // 位反转置换
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1
+    for (; j & bit; bit >>= 1) j ^= bit
+    j ^= bit
+    if (i < j) {
+      let t = re[i]
+      re[i] = re[j]
+      re[j] = t
+      t = im[i]
+      im[i] = im[j]
+      im[j] = t
     }
   }
-  return { windows, windowSec: winSamples / sampleRate }
-}
-
-/**
- * 从频谱窗口序列中判定"人声结尾"（纯函数，同步/异步版本共用）
- * 从结尾向前扫描最后一个持续人声活跃段（1k-4kHz 占比显著且能量达底限），
- * 返回该段结束位置；器乐曲（无人声信号）返回 -1。
- * @returns 人声结尾位置（秒，相对歌曲开头）；未检测到人声返回 -1
- */
-function findVocalEnd(windows: VocalWindow[], windowSec: number): number {
-  if (windows.length < 10) return -1
-
-  // 阈值与人声起点检测一致：全段 70 分位的 60%，能量需高于内容底限
-  const sorted = [...windows.map((w) => w.vocalRatio)].sort((a, b) => a - b)
-  const vocalLevel = sorted[Math.floor(sorted.length * 0.7)]
-  const threshold = Math.max(0.05, vocalLevel * VOCAL_LEVEL_RATIO)
-  const minContentRms = Math.max(ONSET_MIN_RMS * 0.6, SILENCE_THRESHOLD * 2)
-  const sustainCount = Math.max(1, Math.round(0.5 / windowSec))
-
-  // 从结尾往回找最后一个持续人声段；段尾（最后一个 vocal 窗口的结束位置）即"人声结尾"
-  let run = 0
-  for (let i = windows.length - 1; i >= 0; i--) {
-    const w = windows[i]
-    const active = w.vocalRatio >= threshold && w.rms >= minContentRms
-    if (active) {
-      run++
-      if (run >= Math.max(1, Math.ceil(sustainCount * 0.6))) {
-        return w.startSec + windowSec
+  // 蝶形运算
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len
+    const wRe = Math.cos(ang)
+    const wIm = Math.sin(ang)
+    for (let i = 0; i < n; i += len) {
+      let curRe = 1
+      let curIm = 0
+      const half = len >> 1
+      for (let k = 0; k < half; k++) {
+        const uRe = re[i + k]
+        const uIm = im[i + k]
+        const vRe = re[i + k + half] * curRe - im[i + k + half] * curIm
+        const vIm = re[i + k + half] * curIm + im[i + k + half] * curRe
+        re[i + k] = uRe + vRe
+        im[i + k] = uIm + vIm
+        re[i + k + half] = uRe - vRe
+        im[i + k + half] = uIm - vIm
+        const nRe = curRe * wRe - curIm * wIm
+        curIm = curRe * wIm + curIm * wRe
+        curRe = nRe
       }
-    } else {
-      run = 0
     }
   }
-  return -1
 }
 
-/**
- * 从频谱窗口序列中判定"结尾无人声段"（纯函数，同步/异步版本共用）
- * 在结尾窗口内寻找时长 ≥ minGapSec 的无人声段（人声间隔）：
- * - 复用 findVocalEnd 的 vocal 活跃判定（1k-4kHz 占比显著且能量达底限）
- * - 收集所有连续非活跃窗口段为 gap，过滤时长 ≥ minGapSec，返回最晚出现的 gap
- * - 窗口内无任何活跃窗口（无人声信号，如纯器乐曲）时返回 null，由调用方沿用老逻辑
- * @returns 最晚出现的可用无人声段；无符合条件段返回 null
- */
-function findVocalGap(windows: VocalWindow[], windowSec: number, minGapSec: number): VocalGap | null {
-  if (windows.length < 10) return null
-
-  // 阈值与人声起点/结尾检测一致：全段 70 分位的 60%，能量需高于内容底限
-  const sorted = [...windows.map((w) => w.vocalRatio)].sort((a, b) => a - b)
-  const vocalLevel = sorted[Math.floor(sorted.length * 0.7)]
-  const threshold = Math.max(0.05, vocalLevel * VOCAL_LEVEL_RATIO)
-  const minContentRms = Math.max(ONSET_MIN_RMS * 0.6, SILENCE_THRESHOLD * 2)
-
-  const active = windows.map((w) => w.vocalRatio >= threshold && w.rms >= minContentRms)
-  // 窗口内无任何人声 → 无人声段概念不适用，返回 null（沿用老逻辑）
-  if (!active.some((a) => a)) return null
-
-  // 收集连续非活跃窗口段（gap）
-  const gaps: VocalGap[] = []
-  let gapStartIdx = -1
-  for (let i = 0; i < active.length; i++) {
-    const isActive = i < active.length && active[i]
-    if (!isActive && gapStartIdx < 0) {
-      gapStartIdx = i
-    } else if (isActive && gapStartIdx >= 0) {
-      gaps.push({
-        startSec: windows[gapStartIdx].startSec,
-        durationSec: (i - gapStartIdx) * windowSec
-      })
-      gapStartIdx = -1
-    }
-  }
-  if (gapStartIdx >= 0) {
-    // 延伸到窗口末尾的 gap（最后的器乐尾奏）
-    gaps.push({
-      startSec: windows[gapStartIdx].startSec,
-      durationSec: (active.length - gapStartIdx) * windowSec
-    })
-  }
-
-  const qualifying = gaps.filter((g) => g.durationSec >= minGapSec)
-  if (qualifying.length === 0) return null
-  // 取最晚出现的可用无人声段（尽可能保留更多歌曲内容）
-  return qualifying.reduce((best, g) => (g.startSec > best.startSec ? g : best))
-}
-
-/**
- * 当前歌曲"人声结尾"分析（智能过渡触发点）
- * 过渡应从上一首"人声接近结尾处"开始：从歌曲结尾向前扫描最后一个持续
- * 人声活跃段（1k-4kHz 占比显著且能量达底限），返回该段结束位置。
- * 结尾的器乐尾奏 / 静音段不计入人声；器乐曲（无人声信号）返回 -1，由调用方回退。
- *
- * 注意：本函数为同步版本，扫描 90s 约需数百 ms，阻塞主线程；播放路径
- * 请使用 analyzeVocalEndAsync（分块让出主线程，避免 UI 卡死）。
- *
- * @param channelData 单声道 PCM 数据
- * @param sampleRate 采样率
- * @param maxSec 从歌曲结尾向前分析的范围（秒），默认 VOCAL_END_ANALYSIS_SEC
- * @returns 人声结尾位置（秒，相对歌曲开头）；未检测到人声返回 -1
- */
-export function analyzeVocalEnd(
-  channelData: Float32Array,
-  sampleRate: number,
-  maxSec: number = VOCAL_END_ANALYSIS_SEC
-): number {
-  const startSample = Math.max(0, channelData.length - Math.floor(maxSec * sampleRate))
-  const { windows, windowSec } = computeVocalProfile(channelData, sampleRate, startSample)
-  return findVocalEnd(windows, windowSec)
-}
-
-/**
- * 分块异步版本的"人声结尾"分析：与 analyzeVocalEnd 结果一致，但每批窗口
- * 处理完让出主线程，避免长时间同步 FFT 阻塞 UI（播放卡死）。
- */
-export async function analyzeVocalEndAsync(
-  channelData: Float32Array,
-  sampleRate: number,
-  maxSec: number = VOCAL_END_ANALYSIS_SEC
-): Promise<number> {
-  const startSample = Math.max(0, channelData.length - Math.floor(maxSec * sampleRate))
-  const { windows, windowSec } = await computeVocalProfileAsync(
-    channelData,
-    sampleRate,
-    startSample
-  )
-  return findVocalEnd(windows, windowSec)
-}
-
-/**
- * 当前歌曲"结尾无人声段"分析（智能过渡触发点优化）
- * 在结尾 windowSec（默认 30s）窗口内寻找最晚出现的、时长 ≥ MIN_VOCAL_GAP_SEC
- * 的无人声段（人声间隔：器乐尾奏 / 器乐间奏），返回其起点，使过渡在无人声段内进行，
- * 避免与歌声重叠产生突兀听感；窗口内无人声段不足 10s 或无任何人声时返回 null，
- * 由调用方沿用老逻辑（人声结尾 / 实时决策 / 最晚兜底）。
- *
- * 注意：本函数为同步版本，扫描 30s 需数百 ms，阻塞主线程；播放路径
- * 请使用 analyzeVocalGapAsync（分块让出主线程，避免 UI 卡死）。
- *
- * @param channelData 单声道 PCM 数据
- * @param sampleRate 采样率
- * @param windowSec 从歌曲结尾向前分析的范围（秒），默认 VOCAL_GAP_ANALYSIS_SEC
- * @returns 无人声段 { startSec, durationSec }（相对 channelData 开头）；无符合条件段返回 null
- */
-export function analyzeVocalGap(
-  channelData: Float32Array,
-  sampleRate: number,
-  windowSec: number = VOCAL_GAP_ANALYSIS_SEC
-): VocalGap | null {
-  const startSample = Math.max(0, channelData.length - Math.floor(windowSec * sampleRate))
-  const { windows, windowSec: winSec } = computeVocalProfile(channelData, sampleRate, startSample)
-  return findVocalGap(windows, winSec, MIN_VOCAL_GAP_SEC)
-}
-
-/**
- * 分块异步版本的"结尾无人声段"分析：与 analyzeVocalGap 结果一致，但每批
- * 窗口处理完让出主线程，避免长时间同步 FFT 阻塞 UI（播放卡死）。
- */
-export async function analyzeVocalGapAsync(
-  channelData: Float32Array,
-  sampleRate: number,
-  windowSec: number = VOCAL_GAP_ANALYSIS_SEC
-): Promise<VocalGap | null> {
-  const startSample = Math.max(0, channelData.length - Math.floor(windowSec * sampleRate))
-  const { windows, windowSec: winSec } = await computeVocalProfileAsync(
-    channelData,
-    sampleRate,
-    startSample
-  )
-  return findVocalGap(windows, winSec, MIN_VOCAL_GAP_SEC)
-}
-
-/**
- * 从频谱窗口序列中判定"内容起点"（纯函数，同步/异步版本共用）
- * 主歌通常从人声开始，优先检测"人声进入"（1k-4kHz 占比显著持续升高）；
- * 无人声信号（器乐/纯音）时回退到能量跃升检测。
- * @returns 应跳过的前奏长度（秒），无前奏返回 0
- */
-function findContentStart(windows: VocalWindow[], windowSec: number): number {
-  const rmsValues = windows.map((w) => w.rms)
-  const vocalRatios = windows.map((w) => w.vocalRatio)
-  if (rmsValues.length < 10) return 0
-
-  // 全曲近静音 → 无内容可跳
-  let peak = 0
-  for (const r of rmsValues) {
-    if (r > peak) peak = r
-  }
-  if (peak < SILENCE_THRESHOLD) return 0
-
-  const sustainCount = Math.max(1, Math.round(0.5 / windowSec))
-  const minContentRms = Math.max(ONSET_MIN_RMS * 0.6, SILENCE_THRESHOLD * 2)
-
-  // 1) 人声起点（主歌从人声开始）：1k-4kHz 占比相对之前基线显著跃升
-  const vocalStart = detectVocalRise(vocalRatios, rmsValues, windowSec, sustainCount, minContentRms)
-  if (vocalStart >= 0) {
-    // 开头即有人声（< CONTENT_START_MIN_SEC）视为无前奏
-    return vocalStart >= CONTENT_START_MIN_SEC ? vocalStart : 0
-  }
-
-  // 2) 能量跃升兜底（无人声信号的器乐曲 / 纯音）
-  const energyStart = detectEnergyJump(rmsValues, windowSec, sustainCount, minContentRms)
-  if (energyStart >= CONTENT_START_MIN_SEC) return energyStart
-  return 0
-}
-
-/**
- * 下一首歌曲"内容起点"分析（跳过前奏）
- * 主歌通常从人声开始，因此优先检测"人声进入"：以 2048 点窗口计算频谱，
- * 取 1k-4kHz 人声频段能量占比（歌声谐波/共振峰集中区），首个占比显著
- * 持续升高且能量达底限的窗口即内容起点；无人声信号（器乐/纯音）时
- * 回退到能量跃升检测。
- *
- * 注意：本函数为同步版本，扫描 30s 约需数百 ms，阻塞主线程；播放路径
- * 请使用 analyzeContentStartAsync（分块让出主线程，避免 UI 卡死）。
- *
- * @param channelData 单声道 PCM 数据
- * @param sampleRate 采样率
- * @param maxSec 分析范围（秒），默认 CONTENT_ANALYSIS_SEC
- * @returns 应跳过的前奏长度（秒），无前奏返回 0
- */
-export function analyzeContentStart(
-  channelData: Float32Array,
-  sampleRate: number,
-  maxSec: number = CONTENT_ANALYSIS_SEC
-): number {
-  const length = Math.min(channelData.length, Math.floor(maxSec * sampleRate))
-  const { windows, windowSec } = computeVocalProfile(channelData, sampleRate, 0, length)
-  return findContentStart(windows, windowSec)
-}
-
-/**
- * 分块异步版本的"内容起点"分析：与 analyzeContentStart 结果一致，但每批
- * 窗口处理完让出主线程，避免长时间同步 FFT 阻塞 UI（播放卡死）。
- */
-export async function analyzeContentStartAsync(
-  channelData: Float32Array,
-  sampleRate: number,
-  maxSec: number = CONTENT_ANALYSIS_SEC
-): Promise<number> {
-  const length = Math.min(channelData.length, Math.floor(maxSec * sampleRate))
-  const { windows, windowSec } = await computeVocalProfileAsync(channelData, sampleRate, 0, length)
-  return findContentStart(windows, windowSec)
-}
-
-/**
- * 下一首"人声起点"分析（gap 过渡落点优化）
- * 无人声段过渡时，下一首应从其"人声起点"（第一个显著人声进入点）开始淡入，
- * 使衔接呈现"器乐 → 人声"的自然过渡。扫描数据前 maxSec 秒，复用
- * detectVocalRise（1k-4kHz 占比相对基线显著跃升且持续）检测人声起点；
- * 检测不到（纯器乐 / 前奏过长 / 数据过短）返回 -1，由调用方沿用内容起点逻辑。
- *
- * @param channelData 单声道 PCM 数据
- * @param sampleRate 采样率
- * @param maxSec 从数据开头向后扫描的范围（秒），默认 CONTENT_ANALYSIS_SEC
- * @returns 人声起点（秒，相对数据开头，≥ 0）；未检测到返回 -1
- */
-export function analyzeVocalStart(
-  channelData: Float32Array,
-  sampleRate: number,
-  maxSec: number = CONTENT_ANALYSIS_SEC
-): number {
-  const dataLenSec = channelData.length / sampleRate
-  if (dataLenSec < 1) return -1
-  const scanLen = Math.floor(Math.min(maxSec, dataLenSec) * sampleRate)
-  const { windows, windowSec } = computeVocalProfile(channelData, sampleRate, 0, scanLen)
-  if (windows.length < 10) return -1
-  const vocalRatios = windows.map((w) => w.vocalRatio)
-  const rmsValues = windows.map((w) => w.rms)
-  const sustainCount = Math.max(1, Math.round(0.5 / windowSec))
-  const minContentRms = Math.max(ONSET_MIN_RMS * 0.6, SILENCE_THRESHOLD * 2)
-  return detectVocalRise(vocalRatios, rmsValues, windowSec, sustainCount, minContentRms)
-}
-
-/**
- * 分块异步版本的"人声起点"分析：与 analyzeVocalStart 结果一致，但每批
- * 窗口处理完让出主线程，避免长时间同步 FFT 阻塞 UI（播放卡死）。
- */
-export async function analyzeVocalStartAsync(
-  channelData: Float32Array,
-  sampleRate: number,
-  maxSec: number = CONTENT_ANALYSIS_SEC
-): Promise<number> {
-  const dataLenSec = channelData.length / sampleRate
-  if (dataLenSec < 1) return -1
-  const scanLen = Math.floor(Math.min(maxSec, dataLenSec) * sampleRate)
-  const { windows, windowSec } = await computeVocalProfileAsync(channelData, sampleRate, 0, scanLen)
-  if (windows.length < 10) return -1
-  const vocalRatios = windows.map((w) => w.vocalRatio)
-  const rmsValues = windows.map((w) => w.rms)
-  const sustainCount = Math.max(1, Math.round(0.5 / windowSec))
-  const minContentRms = Math.max(ONSET_MIN_RMS * 0.6, SILENCE_THRESHOLD * 2)
-  return detectVocalRise(vocalRatios, rmsValues, windowSec, sustainCount, minContentRms)
-}
-
-/**
- * 人声起点检测（相对跃升）：首个"1k-4kHz 占比相对之前约 2s 基线显著跃升
- * 且持续约 0.5s"的窗口。人声进入的标志是频段占比突然上升——器乐前奏
- * 即使本身含高频成分（吉他扫弦 / 镲片等），只要占比没有显著跃升，
- * 就不会被误判为人声起点（避免前奏被当作主歌、偏移错误归零）。
- * @returns 人声起点（秒）；未检测到显著人声跃升返回 -1
- */
-function detectVocalRise(
-  ratios: number[],
-  rmsValues: number[],
-  windowSec: number,
-  sustainCount: number,
-  minContentRms: number
-): number {
-  const lookbackCount = Math.max(1, Math.round(2 / windowSec))
-  for (let i = lookbackCount; i <= ratios.length - sustainCount; i++) {
-    if (rmsValues[i] < minContentRms) continue
-    let prevSum = 0
-    for (let j = i - lookbackCount; j < i; j++) prevSum += ratios[j]
-    const prevLevel = prevSum / lookbackCount
-    // 相对跃升（≥1.5 倍）且绝对提升 ≥ 0.05：占比显著上升才算人声进入
-    const rise = ratios[i] - prevLevel
-    if (ratios[i] < Math.max(prevLevel * 1.5, prevLevel + 0.05)) continue
-    // 后续窗口占比保持在接近跃升后的水平，避免孤立尖峰误判
-    let sustained = 0
-    const sustainFloor = prevLevel + Math.max(0.03, rise * 0.5)
-    for (let j = i; j < i + sustainCount; j++) {
-      if (ratios[j] >= sustainFloor) sustained++
-    }
-    if (sustained >= Math.ceil(sustainCount * 0.6)) {
-      return i * windowSec
-    }
-  }
-  return -1
-}
-
-/**
- * 能量跃升检测：首个"后续约 0.5s 持续能量显著高于之前约 2s"的窗口。
- * @returns 内容起点（秒）；无显著跃升返回 -1
- */
-function detectEnergyJump(
-  rmsValues: number[],
-  windowSec: number,
-  sustainCount: number,
-  minContentRms: number
-): number {
-  const lookbackCount = Math.max(1, Math.round(2 / windowSec))
-  for (let i = lookbackCount; i <= rmsValues.length - sustainCount; i++) {
-    let prevSum = 0
-    for (let j = i - lookbackCount; j < i; j++) prevSum += rmsValues[j]
-    const prevLevel = prevSum / lookbackCount
-    let nextSum = 0
-    for (let j = i; j < i + sustainCount; j++) nextSum += rmsValues[j]
-    const nextLevel = nextSum / sustainCount
-    if (nextLevel < minContentRms) continue
-    const ratio = nextLevel / Math.max(prevLevel, 1e-4)
-    if (ratio >= 1.6) {
-      return i * windowSec
-    }
-  }
-  return -1
-}
-
-/**
- * 根据当前歌曲尾部特征与下一首头部特征计算智能过渡决策
- * @param tail 当前歌曲尾部特征
- * @param head 下一首头部特征（可为 null，此时用兜底策略）
- * @param totalDurationMs 当前歌曲总时长（毫秒）
- */
-export function decideTransition(
-  tail: TailFeatures,
-  head: HeadFeatures | null,
-  totalDurationMs: number
-): TransitionDecision {
-  const clampDuration = (ms: number, upperBound?: number): number => {
-    const max =
-      upperBound !== undefined ? Math.min(MAX_TRANSITION_MS, upperBound) : MAX_TRANSITION_MS
-    return Math.max(MIN_TRANSITION_MS, Math.min(max, ms))
-  }
-
-  // 过渡起点统一钳制在"结尾 30s 窗口"内：衰减点 / 静音起点早于结尾前 30s 时，
-  // 也等进入窗口再过渡（同时避免歌曲中途静音段落触发提前切换）
-  const minStartMs = Math.max(0, totalDurationMs - EARLY_DECIDE_SEC * 1000)
-  const finalize = (
-    startPositionMs: number,
-    transitionDurationMs: number,
-    quality: number,
-    strategy: TransitionStrategy
-  ): TransitionDecision => {
-    const s = Math.max(startPositionMs, minStartMs)
-    const remainingMs = Math.max(0, totalDurationMs - s)
-    return {
-      startPositionMs: s,
-      transitionDurationMs: Math.min(
-        transitionDurationMs,
-        Math.max(remainingMs, MIN_TRANSITION_MS)
-      ),
-      quality,
-      strategy
-    }
-  }
-
-  // 1. 尾部几乎静音 → 快速切换
-  // 过渡起点取静音起点（decayStartSec），配合上方钳制保证不早于结尾前 30s
-  if (tail.peakRms < SILENCE_THRESHOLD) {
-    const transitionMs = Math.min(DEFAULT_TRANSITION_MS * 0.5, 1500)
-    const startPositionMs =
-      tail.decayStartSec >= 0
-        ? Math.max(0, Math.round(tail.decayStartSec * 1000))
-        : Math.max(0, totalDurationMs - transitionMs)
-    return finalize(startPositionMs, clampDuration(transitionMs), 0.9, 'short_overlap')
-  }
-
-  // 2. 检测到明显自然衰减 → 在衰减点处开始交叉过渡
-  if (tail.decayStartSec >= 0 && tail.decayRate > 0.02) {
-    const remainingMs = Math.max(0, totalDurationMs - tail.decayStartSec * 1000)
-    let transitionMs: number
-    if (head) {
-      if (head.startsQuiet) {
-        transitionMs = remainingMs
-      } else if (head.attackTimeSec >= 0 && head.attackTimeSec < 0.5) {
-        transitionMs = remainingMs * 0.7
-      } else {
-        transitionMs = Math.min(remainingMs, Math.max(0, head.attackTimeSec) * 3000)
-      }
-    } else {
-      transitionMs = remainingMs * 0.8
-    }
-
-    return finalize(
-      Math.max(0, totalDurationMs - remainingMs),
-      clampDuration(transitionMs, remainingMs),
-      Math.min(1, 0.5 + tail.decayRate * 5),
-      'natural_fade'
-    )
-  }
-
-  // 3. 无自然衰减，根据头部特征决定
-  if (head) {
-    if (head.startsQuiet && head.attackTimeSec > 1) {
-      const transitionMs = head.attackTimeSec * 2500
-      return finalize(
-        Math.max(0, totalDurationMs - transitionMs),
-        clampDuration(transitionMs),
-        0.6,
-        'long_blend'
-      )
-    }
-
-    if (head.attackTimeSec >= 0 && head.attackTimeSec < 0.3 && head.peakRms > 0.1) {
-      const transitionMs = Math.min(DEFAULT_TRANSITION_MS * 0.6, 2000)
-      return finalize(
-        Math.max(0, totalDurationMs - transitionMs),
-        clampDuration(transitionMs),
-        0.7,
-        'medium_blend'
-      )
-    }
-  }
-
-  // 4. 兜底
-  return finalize(
-    Math.max(0, totalDurationMs - DEFAULT_TRANSITION_MS),
-    clampDuration(DEFAULT_TRANSITION_MS),
-    0.3,
-    'fallback'
-  )
-}
-
-/**
- * 智能过渡触发提前量（毫秒）
- * 触发点最晚为"结尾前 过渡时长 + 该提前量"：为节拍对齐等待与完整淡化预留时间，
- * 保证淡化在歌曲自然结束前完成，避免淡化被截断而失去丝滑感。
- */
-export const BEAT_TRIGGER_MARGIN_MS = 1200
-
-/** 智能过渡触发点计算参数 */
-export interface SmartTriggerParams {
-  /** 当前曲总时长（毫秒） */
-  durationMs: number
-  /** 配置的过渡（淡化）时长（毫秒） */
-  transitionMs: number
-  /** 结尾 30s 内无人声段触发点（毫秒，相对歌曲开头）；<= 0 表示未检测到合适的无人声段 */
-  vocalGapStartMs: number
-  /** 人声结尾触发点（毫秒，相对歌曲开头）；<= 0 表示未检测到人声 */
-  vocalEndTriggerMs: number
-  /** 实时分析决策的过渡起点（毫秒）；<= 0 表示无决策 */
-  decisionStartMs: number
-}
-
-/**
- * 计算智能过渡的触发点（毫秒）
- *
- * 过渡必须限制在"歌曲结尾 30s 窗口"内开始（EARLY_DECIDE_SEC），窗口外提前
- * 过渡会让歌曲中途就被切走（如人声结束很早、后半段是长器乐尾声时，人声结尾
- * 分析点会落在歌曲中间）。
- * 分析点优先级：结尾无人声段 > 人声结尾 > 实时决策——若结尾 30s 内检测到
- * 时长 ≥ 10s 的无人声段（器乐尾奏 / 器乐间奏），过渡从该无人声段起点开始，
- * 淡入淡出完全落在无人声段内，避免与歌声重叠产生突兀听感；无人声段不足 10s
- * 或无任何人声（纯器乐曲）时回退到人声结尾 / 实时决策：
- * - 分析点在窗口内且早于最晚触发点 → 按分析点触发
- *   （过渡从上一首"人声接近结尾处"开始，衔接最自然）
- * - 分析点早于窗口起点 → 钳制到窗口起点（结尾前 30s），歌曲结束前 30s 内才开始
- * - 分析点缺失或过晚（歌曲以人声/镲片收尾、人声几乎持续到结尾）→ 回退到最晚
- *   触发点——结尾前"过渡时长 + 节拍提前量"，保证节拍对齐等待与完整淡化在
- *   歌曲自然结束前完成，避免淡化被截断而失去丝滑感
- */
-export function computeSmartTriggerMs(params: SmartTriggerParams): number {
-  const latestStartMs = Math.max(
-    0,
-    params.durationMs - params.transitionMs - BEAT_TRIGGER_MARGIN_MS
-  )
-  // 最早触发点：过渡不得早于"结尾前 30s"窗口，避免歌曲中途被切走
-  const earliestStartMs = Math.max(0, params.durationMs - EARLY_DECIDE_SEC * 1000)
-  const analyticalMs =
-    params.vocalGapStartMs > 0
-      ? params.vocalGapStartMs
-      : params.vocalEndTriggerMs > 0
-        ? params.vocalEndTriggerMs
-        : params.decisionStartMs > 0
-          ? params.decisionStartMs
-          : -1
-  if (analyticalMs <= 0) return latestStartMs
-  return Math.min(Math.max(analyticalMs, earliestStartMs), latestStartMs)
-}
-
-// ====== 流式分析器（Worker 与主线程降级共用） ======
-
-/** 流式分析单帧结果 */
-export interface StreamingFrameResult {
-  /** 是否检测到起始点 */
-  onset: boolean
-  /** 本帧对应的播放位置（秒） */
-  positionSec: number
-  /** 是否产出（或更新）了过渡决策；无变化时为 null */
-  decision: TransitionDecision | null
-}
-
-/**
- * 流式能量分析器
- *
- * 纯计算、无 DOM 依赖，可在 Web Worker 内运行，也可在主线程降级运行：
- * - update()：逐帧喂入时域数据，维护滚动能量包络，检测起始点与尾部衰减
- * - 到达歌曲结尾窗口（EARLY_DECIDE_SEC）或检测到自然衰减时自动产出决策
- * - setHeadFeatures()：下一首头部特征就绪后触发一次重新评估
- */
-export class StreamingAnalyzer {
-  private history: EnergySample[] = []
-  private lastSmoothedRms = 0
-  private headFeatures: HeadFeatures | null = null
-  private lastEmitAt = -1
-  private lastDecisionKey = ''
-  private _latestDecision: TransitionDecision | null = null
-
-  readonly trackId: string
-  readonly durationMs: number
-  readonly sampleRate: number
-
-  constructor(trackId: string, durationMs: number, sampleRate: number = 44100) {
-    this.trackId = trackId
-    this.durationMs = durationMs
-    this.sampleRate = sampleRate
-  }
-
-  /** 最近一次产出的决策（可能为 null） */
-  get latestDecision(): TransitionDecision | null {
-    return this._latestDecision
-  }
-
-  /** 当前能量包络（快照拷贝） */
-  getEnvelope(): EnergySample[] {
-    return [...this.history]
-  }
-
-  /** 逐帧分析 */
-  update(frame: Float32Array, positionSec: number): StreamingFrameResult {
-    const rawRms = computeRms(frame)
-    const smoothedRms = ONSET_EMA * rawRms + (1 - ONSET_EMA) * this.lastSmoothedRms
-    const onset = detectOnset(this.lastSmoothedRms, smoothedRms)
-    this.lastSmoothedRms = smoothedRms
-
-    const sample: EnergySample = { positionSec, rms: smoothedRms }
-    this.history.push(sample)
-
-    // 裁剪历史：仅保留尾部窗口 + 足够余量（用于静音尾奏的"音乐已结束"判定），避免长曲内存膨胀
-    const cutoff = positionSec - (TAIL_WINDOW_SEC + SILENT_HISTORY_MARGIN_SEC)
-    if (cutoff > 0) {
-      this.history = this.history.filter((s) => s.positionSec >= cutoff)
-    }
-
-    // 决策产出频率限制（0.5s 一次）
-    let decision: TransitionDecision | null = null
-    if (positionSec - this.lastEmitAt >= DECIDE_MIN_INTERVAL_SEC) {
-      decision = this.evaluate()
-      if (decision) this.lastEmitAt = positionSec
-    }
-
-    return { onset, positionSec, decision }
-  }
-
-  /** 投递下一首头部特征，并触发一次重新评估 */
-  setHeadFeatures(head: HeadFeatures): void {
-    this.headFeatures = head
-    this.evaluate()
-  }
-
-  /**
-   * 基于当前状态重新评估决策
-   * - 数据不足（少于 MIN_TAIL_DATA_SEC）时返回 null
-   * - 未接近结尾且未检测到衰减时不产出
-   * - 决策无变化时返回 null（避免重复下发）
-   */
-  evaluate(): TransitionDecision | null {
-    if (this.history.length === 0) return null
-    const endPos = this.history[this.history.length - 1].positionSec
-    if (endPos < MIN_TAIL_DATA_SEC) return null
-
-    const tail = analyzeTail(this.history, TAIL_WINDOW_SEC)
-    const nearEnd = endPos >= this.durationMs / 1000 - EARLY_DECIDE_SEC
-    const silentTail = tail.peakRms < SILENCE_THRESHOLD
-    // 静音尾部仅在"音乐已实质结束"（分析窗口之前存在内容）或接近歌曲结尾时才判定，
-    // 避免歌曲开篇静音 / 无内容的静音段提前产出决策
-    const musicEnded =
-      silentTail &&
-      this.history.some((s) => s.positionSec < endPos - TAIL_WINDOW_SEC && s.rms >= ONSET_MIN_RMS)
-    const hasDecay = tail.decayStartSec >= 0 && (!silentTail || musicEnded)
-    if (!nearEnd && !hasDecay) return null
-
-    const decision = decideTransition(tail, this.headFeatures, this.durationMs)
-    const key = `${decision.startPositionMs}|${decision.transitionDurationMs}|${decision.strategy}`
-    if (key === this.lastDecisionKey) return null
-    this.lastDecisionKey = key
-    this._latestDecision = decision
-    return decision
-  }
-
-  /** 清空全部状态（切歌/中断时调用） */
-  reset(): void {
-    this.history = []
-    this.lastSmoothedRms = 0
-    this.headFeatures = null
-    this.lastEmitAt = -1
-    this.lastDecisionKey = ''
-    this._latestDecision = null
+/** 就地逆 FFT（结果放大 1/n） */
+function ifft(re: Float32Array, im: Float32Array): void {
+  const n = re.length
+  for (let i = 0; i < n; i++) im[i] = -im[i]
+  fft(re, im)
+  for (let i = 0; i < n; i++) {
+    re[i] /= n
+    im[i] /= -n
   }
 }
 
-// ====== BPM 匹配与变速（变速不变调） ======
+/** 计算帧的幅度谱（|X[k]|，k = 0..N/2），内部做 FFT */
+function magnitudeSpectrum(frame: Float32Array): Float32Array {
+  const n = frame.length
+  const re = new Float32Array(n)
+  const im = new Float32Array(n)
+  re.set(frame)
+  fft(re, im)
+  const half = (n >> 1) + 1
+  const mag = new Float32Array(half)
+  for (let k = 0; k < half; k++) {
+    mag[k] = Math.sqrt(re[k] * re[k] + im[k] * im[k])
+  }
+  return mag
+}
 
-/** BPM 端点分析窗口（秒）：上一曲结尾 / 下一曲开头的节奏对比范围 */
-export const BPM_ANALYSIS_WINDOW_SEC = 30
-/** BPM 差异阈值：差异超过该比例时对下一曲变速对齐 */
-export const BPM_MATCH_THRESHOLD = 0.08
-/** 有效 BPM 下限 */
-export const BPM_MIN = 60
-/** 有效 BPM 上限 */
-export const BPM_MAX = 180
+/** 相位展开到 [-π, π) */
+function princarg(x: number): number {
+  let y = x % (2 * Math.PI)
+  if (y >= Math.PI) y -= 2 * Math.PI
+  if (y < -Math.PI) y += 2 * Math.PI
+  return y
+}
+
+// ====== BPM 估计 ======
+
 /** 能量包络窗口（秒），用于 BPM 的 onset 检测 */
 const BPM_ENVELOPE_WINDOW_SEC = 0.05
 /** onset 间隔有效范围（毫秒）：对应 30-300 BPM 区间 */
 const ONSET_INTERVAL_MIN_MS = 200
 const ONSET_INTERVAL_MAX_MS = 2000
-/** WSOLA 分析窗（采样数，约 46ms @44.1kHz） */
-const WSOLA_ANALYSIS_WINDOW = 2048
-/** WSOLA 合成步进（采样数） */
-const WSOLA_SYNTH_HOP = 512
-/** WSOLA 相关搜索步长（性能：大值更快但对齐精度下降） */
-const WSOLA_SEARCH_STEP = 2
-/** WSOLA 相关性计算降采样倍数 */
-const WSOLA_CORRELATION_DECIMATION = 4
 
 /**
  * 估计音频片段的 BPM
  * 能量包络 → 相对跃升 onset 检测 → onset 间隔中位数 → BPM（归一化到 60-180）。
- * 用于对比上一曲结尾 30s 与下一曲开头 30s 的节奏。
  * @param channelData 单声道 PCM 数据
  * @param sampleRate 采样率
  * @param startSec 分析起点（秒，相对音频开头）
@@ -1110,6 +253,710 @@ export function estimateBpm(
   return Math.round(bpm)
 }
 
+// ====== 调性（Key）检测与和谐兼容 ======
+
+/** Krumhansl-Kessler 键位轮廓（C 大调 / A 小调，12 个音级的相对权重） */
+const KK_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+const KK_MINOR = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+
+const KEY_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+/** Camelot 轮盘编号（大调，根音 0..11 → 编号 1..12） */
+const CAMELOT_MAJOR = [8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1]
+/** Camelot 轮盘编号（小调，根音 0..11 → 编号 1..12） */
+const CAMELOT_MINOR = [5, 12, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10]
+
+/** 调性（音乐键） */
+export interface MusicKey {
+  /** 根音（0=C, 1=C# ... 11=B） */
+  root: number
+  /** 调式 */
+  mode: 'major' | 'minor'
+  /** 显示名，如 "C" / "Am" */
+  name: string
+  /** Camelot 轮盘编号，如 "8B" / "8A" */
+  camelot: string
+  /** 检测置信度（0~1） */
+  confidence: number
+}
+
+/** 色度分析窗口大小（采样数，约 186ms @44.1kHz） */
+const CHROMA_WINDOW = 8192
+/** 色度分析步进（采样数） */
+const CHROMA_HOP = 2048
+/** 色度映射的频段范围（Hz），滤除次低频噪声与高频混叠 */
+const CHROMA_MIN_HZ = 60
+const CHROMA_MAX_HZ = 5000
+/** 参与调性检测的频点需达到的最小幅度（相对全曲峰值的比例） */
+const CHROMA_MIN_MAG_RATIO = 0.01
+
+/** 计算 12 维色度向量（音级能量分布），数据过短返回 null */
+function computeChroma(
+  channelData: Float32Array,
+  sampleRate: number,
+  maxSec: number
+): Float32Array | null {
+  const length = Math.min(channelData.length, Math.floor(maxSec * sampleRate))
+  if (length < CHROMA_WINDOW) return null
+  const hann = getHannWindow(CHROMA_WINDOW)
+  const frame = new Float32Array(CHROMA_WINDOW)
+  const chroma = new Float32Array(12)
+  let peakMag = 0
+  let windows = 0
+  const binFreq = sampleRate / CHROMA_WINDOW
+
+  for (let offset = 0; offset + CHROMA_WINDOW <= length; offset += CHROMA_HOP) {
+    for (let i = 0; i < CHROMA_WINDOW; i++) {
+      frame[i] = channelData[offset + i] * hann[i]
+    }
+    const mag = magnitudeSpectrum(frame)
+    // 能量最大的前 1/4 频点（基音与谐波通常在此区间）
+    for (let k = 1; k < mag.length; k++) {
+      const freq = k * binFreq
+      if (freq < CHROMA_MIN_HZ || freq > CHROMA_MAX_HZ) continue
+      if (mag[k] > peakMag) peakMag = mag[k]
+    }
+    for (let k = 1; k < mag.length; k++) {
+      const freq = k * binFreq
+      if (freq < CHROMA_MIN_HZ || freq > CHROMA_MAX_HZ) continue
+      if (peakMag > 0 && mag[k] < peakMag * CHROMA_MIN_MAG_RATIO) continue
+      // 频率 → 音级：12*log2(f/440) + 9（A4=440Hz，音级 9）
+      const exact = 12 * Math.log2(freq / 440) + 9
+      const idx = Math.floor(exact)
+      const frac = exact - idx
+      const i0 = ((idx % 12) + 12) % 12
+      const i1 = (i0 + 1) % 12
+      chroma[i0] += mag[k] * (1 - frac)
+      chroma[i1] += mag[k] * frac
+    }
+    windows++
+  }
+
+  if (windows === 0) return null
+  return chroma
+}
+
+/** 分块异步版本：与 computeChroma 结果一致，每批窗口让出主线程（FFT 密集） */
+async function computeChromaAsync(
+  channelData: Float32Array,
+  sampleRate: number,
+  maxSec: number
+): Promise<Float32Array | null> {
+  const length = Math.min(channelData.length, Math.floor(maxSec * sampleRate))
+  if (length < CHROMA_WINDOW) return null
+  const hann = getHannWindow(CHROMA_WINDOW)
+  const frame = new Float32Array(CHROMA_WINDOW)
+  const chroma = new Float32Array(12)
+  let peakMag = 0
+  let windows = 0
+  let processed = 0
+  const binFreq = sampleRate / CHROMA_WINDOW
+
+  for (let offset = 0; offset + CHROMA_WINDOW <= length; offset += CHROMA_HOP) {
+    for (let i = 0; i < CHROMA_WINDOW; i++) {
+      frame[i] = channelData[offset + i] * hann[i]
+    }
+    const mag = magnitudeSpectrum(frame)
+    for (let k = 1; k < mag.length; k++) {
+      const freq = k * binFreq
+      if (freq < CHROMA_MIN_HZ || freq > CHROMA_MAX_HZ) continue
+      if (mag[k] > peakMag) peakMag = mag[k]
+    }
+    for (let k = 1; k < mag.length; k++) {
+      const freq = k * binFreq
+      if (freq < CHROMA_MIN_HZ || freq > CHROMA_MAX_HZ) continue
+      if (peakMag > 0 && mag[k] < peakMag * CHROMA_MIN_MAG_RATIO) continue
+      const exact = 12 * Math.log2(freq / 440) + 9
+      const idx = Math.floor(exact)
+      const frac = exact - idx
+      const i0 = ((idx % 12) + 12) % 12
+      const i1 = (i0 + 1) % 12
+      chroma[i0] += mag[k] * (1 - frac)
+      chroma[i1] += mag[k] * frac
+    }
+    windows++
+    processed++
+    if (processed % 32 === 0) await yieldMainThread()
+  }
+
+  if (windows === 0) return null
+  return chroma
+}
+
+/** 从色度向量判定调性（与 KK 轮廓循环相关，纯计算） */
+function classifyKey(chroma: Float32Array): MusicKey {
+  // 归一化色度向量
+  let norm = 0
+  for (let i = 0; i < 12; i++) norm += chroma[i] * chroma[i]
+  const inv = norm > 0 ? 1 / Math.sqrt(norm) : 0
+  const c = new Float32Array(12)
+  for (let i = 0; i < 12; i++) c[i] = chroma[i] * inv
+
+  let bestCos = -Infinity
+  let bestRoot = 0
+  let bestMode: 'major' | 'minor' = 'major'
+
+  for (const mode of ['major', 'minor'] as const) {
+    const profile = mode === 'major' ? KK_MAJOR : KK_MINOR
+    let pNorm = 0
+    for (let i = 0; i < 12; i++) pNorm += profile[i] * profile[i]
+    const pInv = 1 / Math.sqrt(pNorm)
+    for (let shift = 0; shift < 12; shift++) {
+      let dot = 0
+      for (let i = 0; i < 12; i++) {
+        dot += c[i] * (profile[(i + shift) % 12] * pInv)
+      }
+      if (dot > bestCos) {
+        bestCos = dot
+        bestRoot = (12 - shift) % 12 // 轮廓移 shift 对应根音为 -shift
+        bestMode = mode
+      }
+    }
+  }
+
+  const camelot = bestMode === 'major' ? CAMELOT_MAJOR[bestRoot] : CAMELOT_MINOR[bestRoot]
+  return {
+    root: bestRoot,
+    mode: bestMode,
+    name: bestMode === 'major' ? KEY_NAMES[bestRoot] : `${KEY_NAMES[bestRoot]}m`,
+    camelot: `${camelot}${bestMode === 'major' ? 'B' : 'A'}`,
+    confidence: Math.max(0, Math.min(1, bestCos))
+  }
+}
+
+/**
+ * 调性检测：色度向量与 Krumhansl-Kessler 大/小调轮廓做循环相关，
+ * 取相关度最高的根音与调式。
+ * @param channelData 单声道 PCM 数据
+ * @param sampleRate 采样率
+ * @param maxSec 分析范围（秒），建议整曲或主干段落
+ * @returns 调性；数据不足返回 null
+ */
+export function analyzeKey(
+  channelData: Float32Array,
+  sampleRate: number,
+  maxSec: number = TAIL_ANALYSIS_SEC
+): MusicKey | null {
+  const chroma = computeChroma(channelData, sampleRate, maxSec)
+  return chroma ? classifyKey(chroma) : null
+}
+
+/** 分块异步版本的调性检测：FFT 密集部分块间让出主线程，结果与 analyzeKey 一致 */
+export async function analyzeKeyAsync(
+  channelData: Float32Array,
+  sampleRate: number,
+  maxSec: number = TAIL_ANALYSIS_SEC
+): Promise<MusicKey | null> {
+  const chroma = await computeChromaAsync(channelData, sampleRate, maxSec)
+  return chroma ? classifyKey(chroma) : null
+}
+
+/**
+ * Camelot 轮盘距离（调和混音兼容度）
+ * - 同编号（大小调相对 / 完全相同）→ 0（完美）
+ * - 同字母、编号相邻 → 1（顺滑）
+ * - 同字母、编号相差 N → N
+ * - 字母不同且编号不同 → 编号距离 + 1
+ */
+export function camelotDistance(a: MusicKey, b: MusicKey): number {
+  const aNum = parseInt(a.camelot)
+  const bNum = parseInt(b.camelot)
+  const aLetter = a.camelot[a.camelot.length - 1]
+  const bLetter = b.camelot[b.camelot.length - 1]
+  if (aNum === bNum) return 0
+  const diff = Math.min((aNum - bNum + 12) % 12, (bNum - aNum + 12) % 12)
+  return aLetter === bLetter ? diff : diff + 1
+}
+
+/**
+ * 调性对齐：寻找使下一曲与当前曲最和谐的最小变调量（半音）
+ * 变调只改变根音（调式不变），在 [−maxShift, +maxShift] 内枚举，
+ * 优先距离更小，同距离时取更小的变调量。找不到明显改善时返回 0。
+ * @returns shift：应用到下一曲的变调半音数（正=升调，负=降调）；distance：对齐后的 Camelot 距离
+ */
+export function findKeyAlignment(
+  current: MusicKey,
+  next: MusicKey,
+  maxShift: number = MAX_PITCH_SHIFT_SEMITONES
+): { shift: number; distance: number } {
+  let best = { shift: 0, distance: camelotDistance(current, next) }
+  for (let s = -maxShift; s <= maxShift; s++) {
+    if (s === 0) continue
+    const shiftedRoot = (((next.root + s) % 12) + 12) % 12
+    const shifted: MusicKey = {
+      root: shiftedRoot,
+      mode: next.mode,
+      name: '',
+      camelot:
+        next.mode === 'major' ? `${CAMELOT_MAJOR[shiftedRoot]}B` : `${CAMELOT_MINOR[shiftedRoot]}A`,
+      confidence: next.confidence
+    }
+    const d = camelotDistance(current, shifted)
+    if (d < best.distance || (d === best.distance && Math.abs(s) < Math.abs(best.shift))) {
+      best = { shift: s, distance: d }
+    }
+  }
+  return best
+}
+
+// ====== 尾部衰减 / 头部特征 / 跳过前奏 ======
+
+/** 当前曲尾部特征 */
+export interface TailDecay {
+  /** 尾部窗口内峰值能量 */
+  peakRms: number
+  /** 自然衰减起点（相对歌曲开头，秒）；未检测到衰减则为 -1 */
+  decayStartSec: number
+  /** 衰减速率（能量相对每秒下降比例，0~1） */
+  decayRate: number
+}
+
+/**
+ * 当前曲尾部衰减分析（在结尾 tailSec 窗口内检测自然衰减 / 静音）
+ * 过渡应在"音乐自然淡出"处开始，避免切在歌曲高潮处产生跳变。
+ */
+export function analyzeTail(
+  channelData: Float32Array,
+  sampleRate: number,
+  tailSec: number = TAIL_ANALYSIS_SEC
+): TailDecay {
+  const empty: TailDecay = { peakRms: 0, decayStartSec: -1, decayRate: 0 }
+  const durationSec = channelData.length / sampleRate
+  if (durationSec <= 0) return empty
+
+  const windowSec = 0.05
+  const winSamples = Math.floor(windowSec * sampleRate)
+  const startSample = Math.max(0, Math.floor((durationSec - tailSec) * sampleRate))
+  const endSample = channelData.length
+
+  const segments: Array<{ timeSec: number; rms: number }> = []
+  let peakRms = 0
+  for (let offset = startSample; offset + winSamples <= endSample; offset += winSamples) {
+    const rms = computeWindowRms(channelData, offset, winSamples)
+    segments.push({ timeSec: offset / sampleRate, rms })
+    if (rms > peakRms) peakRms = rms
+  }
+  if (segments.length === 0) return empty
+
+  const endRms = segments[segments.length - 1].rms
+  const windowStartSec = startSample / sampleRate
+
+  // 静音尾部：整段几乎无能量，衰减起点即窗口起点
+  if (peakRms < SILENCE_THRESHOLD) {
+    return { peakRms, decayStartSec: windowStartSec, decayRate: 0 }
+  }
+
+  // 峰值位置之后第一个降到峰值 70% 以下的位置即为衰减起点
+  const peakIdx = segments.reduce((best, s, i) => (s.rms > segments[best].rms ? i : best), 0)
+  const decayThreshold = Math.max(peakRms * 0.7, SILENCE_THRESHOLD * 2)
+  let decayStartSec = -1
+  for (let i = peakIdx; i < segments.length; i++) {
+    if (segments[i].rms <= decayThreshold) {
+      decayStartSec = segments[i].timeSec
+      break
+    }
+  }
+
+  // 衰减速率
+  let decayRate = 0
+  if (decayStartSec >= 0) {
+    const startSampleSeg = segments.find((s) => s.timeSec >= decayStartSec)
+    const spanSec = durationSec - decayStartSec
+    if (startSampleSeg && spanSec > 0) {
+      decayRate =
+        Math.max(0, startSampleSeg.rms - endRms) / spanSec / Math.max(startSampleSeg.rms, 1e-6)
+    }
+  }
+
+  return { peakRms, decayStartSec, decayRate }
+}
+
+/** 下一首头部特征 */
+export interface HeadFeatures {
+  /** 头部窗口内峰值能量 */
+  peakRms: number
+  /** 头部窗口平均能量 */
+  avgRms: number
+  /** 到达峰值一半所需时间（秒），-1 表示能量过低无法判定 */
+  attackTimeSec: number
+  /** 头部初始能量是否极低（适合从静音淡入） */
+  startsQuiet: boolean
+  /** 首个分析窗口的 RMS */
+  initialRms: number
+}
+
+/**
+ * 下一首头部特征分析：攻击速度 / 起始安静度决定过渡时长选择
+ */
+export function analyzeHead(
+  channelData: Float32Array,
+  sampleRate: number,
+  headSec: number = HEAD_ANALYSIS_SEC
+): HeadFeatures {
+  const windowSamples = Math.floor(0.05 * sampleRate)
+  const length = Math.min(channelData.length, Math.floor(headSec * sampleRate))
+  const segments: Array<{ timeSec: number; rms: number }> = []
+
+  let peakRms = 0
+  let sumRms = 0
+  let attackTimeSec = -1
+  let foundAttack = false
+
+  for (let offset = 0; offset < length; offset += windowSamples) {
+    const rms = computeWindowRms(channelData, offset, windowSamples)
+    const timeSec = offset / sampleRate
+    segments.push({ timeSec, rms })
+    if (rms > peakRms) peakRms = rms
+    sumRms += rms
+    if (
+      !foundAttack &&
+      rms >= Math.max(peakRms * 0.5, SILENCE_THRESHOLD) &&
+      rms > SILENCE_THRESHOLD
+    ) {
+      attackTimeSec = timeSec
+      foundAttack = true
+    }
+  }
+
+  const avgRms = segments.length > 0 ? sumRms / segments.length : 0
+  const startsQuiet = segments.length > 0 && segments[0].rms < SILENCE_THRESHOLD * 2
+  if (attackTimeSec < 0 && peakRms > SILENCE_THRESHOLD) attackTimeSec = 0
+
+  return {
+    peakRms,
+    avgRms,
+    attackTimeSec,
+    startsQuiet,
+    initialRms: segments.length > 0 ? segments[0].rms : 0
+  }
+}
+
+// ====== 跳过前奏（内容起点） ======
+
+/** 人声频段（Hz）：歌声基音谐波与共振峰的主要集中区，乐器前奏通常在此频段能量较弱 */
+const VOCAL_BAND_MIN_HZ = 1000
+const VOCAL_BAND_MAX_HZ = 4000
+/** 频段分析窗口采样数（2 的幂，约 46ms @44.1kHz） */
+const SPECTRUM_WINDOW = 2048
+/** 人声频谱分析每批处理的窗口数（约 64×46ms ≈ 3s 音频，单批阻塞 < 20ms） */
+const PROFILE_CHUNK_WINDOWS = 64
+
+/** 单窗口的频谱人声占比快照 */
+interface VocalWindow {
+  /** 窗口起始时间（秒，相对歌曲开头） */
+  startSec: number
+  /** 窗口 RMS */
+  rms: number
+  /** 1k-4kHz 人声频段能量占比（0~1） */
+  vocalRatio: number
+}
+
+/**
+ * 计算指定采样范围 [startSample, endSample) 内逐窗口的 RMS 与人声频段占比
+ * Hann 窗抑制矩形窗的频谱泄漏，避免强能量音色向人声频段渗漏导致占比误判
+ */
+function computeVocalProfile(
+  channelData: Float32Array,
+  sampleRate: number,
+  startSample: number,
+  endSample: number = channelData.length
+): { windows: VocalWindow[]; windowSec: number } {
+  const winSamples = SPECTRUM_WINDOW
+  const hann = getHannWindow(winSamples)
+  const frame = new Float32Array(winSamples)
+  const windows: VocalWindow[] = []
+  const binFreq = sampleRate / winSamples
+  for (let offset = startSample; offset + winSamples <= endSample; offset += winSamples) {
+    const rms = computeWindowRms(channelData, offset, winSamples)
+    for (let i = 0; i < winSamples; i++) {
+      frame[i] = channelData[offset + i] * hann[i]
+    }
+    const mag = magnitudeSpectrum(frame)
+    let total = 0
+    let vocal = 0
+    for (let k = 1; k < mag.length; k++) {
+      const freq = k * binFreq
+      total += mag[k]
+      if (freq >= VOCAL_BAND_MIN_HZ && freq <= VOCAL_BAND_MAX_HZ) vocal += mag[k]
+    }
+    windows.push({ startSec: offset / sampleRate, rms, vocalRatio: total > 0 ? vocal / total : 0 })
+  }
+  return { windows, windowSec: winSamples / sampleRate }
+}
+
+/** 分块异步版本：与 computeVocalProfile 结果一致，块间让出主线程 */
+async function computeVocalProfileAsync(
+  channelData: Float32Array,
+  sampleRate: number,
+  startSample: number,
+  endSample: number = channelData.length
+): Promise<{ windows: VocalWindow[]; windowSec: number }> {
+  const winSamples = SPECTRUM_WINDOW
+  const hann = getHannWindow(winSamples)
+  const frame = new Float32Array(winSamples)
+  const windows: VocalWindow[] = []
+  const binFreq = sampleRate / winSamples
+  let processed = 0
+  for (let offset = startSample; offset + winSamples <= endSample; offset += winSamples) {
+    const rms = computeWindowRms(channelData, offset, winSamples)
+    for (let i = 0; i < winSamples; i++) {
+      frame[i] = channelData[offset + i] * hann[i]
+    }
+    const mag = magnitudeSpectrum(frame)
+    let total = 0
+    let vocal = 0
+    for (let k = 1; k < mag.length; k++) {
+      const freq = k * binFreq
+      total += mag[k]
+      if (freq >= VOCAL_BAND_MIN_HZ && freq <= VOCAL_BAND_MAX_HZ) vocal += mag[k]
+    }
+    windows.push({ startSec: offset / sampleRate, rms, vocalRatio: total > 0 ? vocal / total : 0 })
+    processed++
+    if (processed % PROFILE_CHUNK_WINDOWS === 0) await yieldMainThread()
+  }
+  return { windows, windowSec: winSamples / sampleRate }
+}
+
+/** 人声起点检测（相对跃升）：首个"1k-4kHz 占比相对之前约 2s 基线显著跃升且持续约 0.5s"的窗口 */
+function detectVocalRise(
+  ratios: number[],
+  rmsValues: number[],
+  windowSec: number,
+  sustainCount: number,
+  minContentRms: number
+): number {
+  const lookbackCount = Math.max(1, Math.round(2 / windowSec))
+  for (let i = lookbackCount; i <= ratios.length - sustainCount; i++) {
+    if (rmsValues[i] < minContentRms) continue
+    let prevSum = 0
+    for (let j = i - lookbackCount; j < i; j++) prevSum += ratios[j]
+    const prevLevel = prevSum / lookbackCount
+    const rise = ratios[i] - prevLevel
+    if (ratios[i] < Math.max(prevLevel * 1.5, prevLevel + 0.05)) continue
+    let sustained = 0
+    const sustainFloor = prevLevel + Math.max(0.03, rise * 0.5)
+    for (let j = i; j < i + sustainCount; j++) {
+      if (ratios[j] >= sustainFloor) sustained++
+    }
+    if (sustained >= Math.ceil(sustainCount * 0.6)) return i * windowSec
+  }
+  return -1
+}
+
+/** 能量跃升检测：首个"后续约 0.5s 持续能量显著高于之前约 2s"的窗口 */
+function detectEnergyJump(
+  rmsValues: number[],
+  windowSec: number,
+  sustainCount: number,
+  minContentRms: number
+): number {
+  const lookbackCount = Math.max(1, Math.round(2 / windowSec))
+  for (let i = lookbackCount; i <= rmsValues.length - sustainCount; i++) {
+    let prevSum = 0
+    for (let j = i - lookbackCount; j < i; j++) prevSum += rmsValues[j]
+    const prevLevel = prevSum / lookbackCount
+    let nextSum = 0
+    for (let j = i; j < i + sustainCount; j++) nextSum += rmsValues[j]
+    const nextLevel = nextSum / sustainCount
+    if (nextLevel < minContentRms) continue
+    if (nextLevel / Math.max(prevLevel, 1e-4) >= 1.6) return i * windowSec
+  }
+  return -1
+}
+
+/** 从频谱窗口序列中判定"内容起点"（纯函数，同步/异步共用） */
+function findContentStart(windows: VocalWindow[], windowSec: number): number {
+  const rmsValues = windows.map((w) => w.rms)
+  const vocalRatios = windows.map((w) => w.vocalRatio)
+  if (rmsValues.length < 10) return 0
+
+  let peak = 0
+  for (const r of rmsValues) {
+    if (r > peak) peak = r
+  }
+  if (peak < SILENCE_THRESHOLD) return 0
+
+  const sustainCount = Math.max(1, Math.round(0.5 / windowSec))
+  const minContentRms = Math.max(ONSET_MIN_RMS * 0.6, SILENCE_THRESHOLD * 2)
+
+  // 1) 人声起点（主歌从人声开始）
+  const vocalStart = detectVocalRise(vocalRatios, rmsValues, windowSec, sustainCount, minContentRms)
+  if (vocalStart >= 0) return vocalStart >= CONTENT_START_MIN_SEC ? vocalStart : 0
+
+  // 2) 能量跃升兜底（无人声信号的器乐曲 / 纯音）
+  const energyStart = detectEnergyJump(rmsValues, windowSec, sustainCount, minContentRms)
+  return energyStart >= CONTENT_START_MIN_SEC ? energyStart : 0
+}
+
+/**
+ * 下一首"内容起点"分析（跳过前奏）
+ * 优先检测"人声进入"（1k-4kHz 占比显著持续升高），无人声信号时回退能量跃升。
+ * @returns 应跳过的前奏长度（秒），无前奏返回 0
+ */
+export function analyzeContentStart(
+  channelData: Float32Array,
+  sampleRate: number,
+  maxSec: number = CONTENT_ANALYSIS_SEC
+): number {
+  const length = Math.min(channelData.length, Math.floor(maxSec * sampleRate))
+  const { windows, windowSec } = computeVocalProfile(channelData, sampleRate, 0, length)
+  return findContentStart(windows, windowSec)
+}
+
+/** 分块异步版本的"内容起点"分析 */
+export async function analyzeContentStartAsync(
+  channelData: Float32Array,
+  sampleRate: number,
+  maxSec: number = CONTENT_ANALYSIS_SEC
+): Promise<number> {
+  const length = Math.min(channelData.length, Math.floor(maxSec * sampleRate))
+  const { windows, windowSec } = await computeVocalProfileAsync(channelData, sampleRate, 0, length)
+  return findContentStart(windows, windowSec)
+}
+
+// ====== 智能过渡计划（节奏 + 调性联合决策） ======
+
+/** 智能过渡计划 */
+export interface TransitionPlan {
+  /** 过渡触发点（毫秒，相对当前曲开头） */
+  triggerMs: number
+  /** 实际过渡时长（毫秒） */
+  transitionDurationMs: number
+  /** 过渡质量评分（0~1），越高表示衔接越自然 */
+  quality: number
+  /** 应用到下一曲的变速比（1 = 不变速；<1 加速、>1 减速） */
+  stretchRatio: number
+  /** 应用到下一曲的变调半音数（0 = 不变调） */
+  pitchShiftSemitones: number
+  /** 下一曲起始偏移（毫秒，变速后时间轴，跳过前奏） */
+  startOffsetMs: number
+  /** 变调对齐后的 Camelot 距离（0 = 和谐） */
+  keyDistance: number
+  /** 节奏是否匹配（差异在阈值内 / 2 倍频对齐） */
+  tempoMatch: boolean
+}
+
+/** computeTransitionPlan 入参 */
+export interface TransitionPlanParams {
+  /** 当前曲总时长（毫秒，引擎缓冲时长） */
+  durationMs: number
+  /** 当前曲尾部衰减特征 */
+  tail: TailDecay
+  /** 当前曲结尾 BPM（0 = 无法估计） */
+  currentBpm: number
+  /** 下一曲开头 BPM（0 = 无法估计） */
+  nextBpm: number
+  /** 当前曲调性（null = 无法检测） */
+  currentKey: MusicKey | null
+  /** 下一曲调性（null = 无法检测） */
+  nextKey: MusicKey | null
+  /** 下一曲内容起点偏移（秒，跳过前奏，原时间轴） */
+  contentStartSec: number
+  /** 用户配置的过渡时长（毫秒），作为基准 */
+  userTransitionMs: number
+}
+
+/**
+ * 计算智能过渡计划
+ *
+ * 决策维度：
+ * - 节奏：BPM 差异在阈值内视为匹配（tempoMatch）；超出时给出变速比（下一曲变速到当前曲节奏）
+ * - 调性：Camelot 距离判定和谐度，不和谐时给出最小变调量（对齐到和谐键位）
+ * - 能量：尾部自然衰减处触发；触发点限制在结尾 30s 窗口内，
+ *   最晚不晚于"结尾前 过渡时长 + 节拍提前量"，保证节拍对齐等待与完整淡化
+ *   在歌曲自然结束前完成，避免淡化被截断
+ * - 时长：节奏与调性越匹配 → 过渡越长（越丝滑）；越不匹配 → 过渡越短（减少冲突听感）
+ */
+export function computeTransitionPlan(p: TransitionPlanParams): TransitionPlan {
+  const { durationMs } = p
+  const userMs = Math.max(
+    MIN_TRANSITION_MS,
+    Math.min(MAX_TRANSITION_MS, p.userTransitionMs || DEFAULT_TRANSITION_MS)
+  )
+
+  // ---- 1. 节奏 ----
+  let stretchRatio = 1
+  let tempoMatch = false
+  if (p.currentBpm > 0 && p.nextBpm > 0) {
+    const rawRatio = p.nextBpm / p.currentBpm
+    if (Math.abs(rawRatio - 1) <= BPM_MATCH_THRESHOLD) {
+      tempoMatch = true // 同速
+    } else if (
+      Math.abs(rawRatio - 0.5) <= BPM_MATCH_THRESHOLD ||
+      Math.abs(rawRatio - 2) <= BPM_MATCH_THRESHOLD * 2
+    ) {
+      tempoMatch = true // 2 倍频对齐（半速 / 倍速）
+    } else if (rawRatio >= 0.8 && rawRatio <= 1.25) {
+      // 轻微差异：对下一曲变速对齐（1/比值，限 ±25%，超出不强变速）
+      stretchRatio = 1 / rawRatio
+      tempoMatch = true
+    }
+  }
+  const tempoScore = tempoMatch ? 1 : Math.max(0, 1 - Math.abs(1 - 1 / stretchRatio) * 4)
+
+  // ---- 2. 调性 ----
+  let keyDistance = 2
+  let pitchShiftSemitones = 0
+  if (p.currentKey && p.nextKey) {
+    const align = findKeyAlignment(p.currentKey, p.nextKey)
+    keyDistance = align.distance
+    pitchShiftSemitones = align.shift
+  }
+  const keyScore = Math.max(0, 1 - keyDistance / 4)
+
+  // ---- 3. 触发点 ----
+  const earliestMs = Math.max(0, durationMs - TAIL_ANALYSIS_SEC * 1000)
+  const latestMs = Math.max(0, durationMs - userMs - BEAT_TRIGGER_MARGIN_MS)
+  let triggerMs: number
+  if (p.tail.decayStartSec >= 0) {
+    triggerMs = p.tail.decayStartSec * 1000
+  } else {
+    triggerMs = earliestMs
+  }
+  triggerMs = Math.min(Math.max(triggerMs, earliestMs), latestMs)
+
+  // ---- 4. 时长与质量 ----
+  const energyScore = p.tail.peakRms > 0 ? Math.min(1, 0.4 + p.tail.decayRate * 2) : 0.5
+  const quality = 0.4 * tempoScore + 0.4 * keyScore + 0.2 * energyScore
+  // 越匹配过渡越长：基准时长 × (0.6 ~ 1.4)
+  const baseDurationMs = Math.max(
+    MIN_TRANSITION_MS,
+    Math.min(MAX_TRANSITION_MS, Math.round(userMs * (0.6 + 0.8 * quality)))
+  )
+  // 剩余时间不足以完成淡化时收窄
+  const remainingMs = Math.max(0, durationMs - triggerMs)
+  const finalDurationMs = Math.max(MIN_TRANSITION_MS, Math.min(baseDurationMs, remainingMs))
+
+  // ---- 5. 下一曲起始偏移（变速后时间轴） ----
+  let startOffsetMs = Math.round(p.contentStartSec * 1000)
+  if (stretchRatio !== 1 && p.contentStartSec < STRETCH_HEAD_SEC) {
+    startOffsetMs = Math.round(startOffsetMs * stretchRatio)
+  }
+
+  return {
+    triggerMs,
+    transitionDurationMs: finalDurationMs,
+    quality,
+    stretchRatio,
+    pitchShiftSemitones,
+    startOffsetMs,
+    keyDistance,
+    tempoMatch
+  }
+}
+
+// ====== WSOLA 变速不变调 ======
+
+/** WSOLA 分析窗（采样数，约 46ms @44.1kHz） */
+const WSOLA_ANALYSIS_WINDOW = 2048
+/** WSOLA 合成步进（采样数） */
+const WSOLA_SYNTH_HOP = 512
+/** WSOLA 相关搜索步长 */
+const WSOLA_SEARCH_STEP = 2
+/** WSOLA 相关性计算降采样倍数 */
+const WSOLA_CORRELATION_DECIMATION = 4
+/** 变速每批处理的合成帧数（每帧约 6.8 万次运算，单批阻塞 < 20ms） */
+const STRETCH_CHUNK_FRAMES = 24
+
 /**
  * WSOLA 合成单帧（同步/异步版本共用）
  * 在标称输入位置附近搜索与输出上一段尾部（重叠区）最相似的输入起点，
@@ -1126,7 +973,6 @@ function stretchSynthFrame(
   decim: number,
   ratio: number
 ): number {
-  // 1) 在标称输入位置附近搜索与输出上一段尾部（重叠区）最相似的输入起点
   const candStart = Math.max(0, readNominal - H)
   const candEnd = Math.min(input.length - N, readNominal + H)
   let bestPos = Math.min(Math.max(readNominal, candStart), candEnd)
@@ -1142,7 +988,7 @@ function stretchSynthFrame(
     }
   }
 
-  // 2) 交叉淡化合成：重叠区与前段尾部线性交叉淡化，其余直接拷贝
+  // 交叉淡化合成：重叠区与前段尾部线性交叉淡化，其余直接拷贝
   for (let k = 0; k < H; k++) {
     const gain = k / H
     output[writePos + k] = input[bestPos + k] * gain + output[writePos - H + k] * (1 - gain)
@@ -1150,106 +996,81 @@ function stretchSynthFrame(
   for (let k = H; k < N; k++) {
     output[writePos + k] = input[bestPos + k]
   }
-
-  // 下一帧标称输入位置：输出前进 H 对应输入前进 H/ratio（时间轴按比例映射）
   return bestPos + H / ratio
 }
 
 /**
- * WSOLA 变速（变速不变调）
- * 通过波形相似性重叠相加（Waveform Similarity Overlap-Add）实现 time-stretch：
- * 每个合成帧在输入中搜索与前一帧重叠区最相似的起点，交叉淡化拼接，
- * 只改变播放时长与节奏速度，音调保持不变。
- * 合成帧在输出中每帧前进 H（合成步进），对应的输入标称位置每帧前进 H/ratio：
- * ratio<1 时输入前进更快（跳过内容加速）、ratio>1 时输入前进更慢（内容重叠减速），
- * 因此输出时长 = 输入时长 × ratio。
- *
- * 注意：本函数为同步版本，整曲变速约需数十亿次运算、阻塞主线程数秒；
- * 播放路径请使用 timeStretchPcmAsync（分块让出主线程，避免 UI 卡死）。
- *
+ * WSOLA 变速（变速不变调）：只改变播放时长与节奏速度，音调保持不变。
  * @param input 单声道 PCM 数据
  * @param ratio 输出/输入时长比例（<1 加速、>1 减速、≈1 原样返回）
- * @returns 变速后的 PCM 数据
  */
-export function timeStretchPcm(
-  input: Float32Array<ArrayBufferLike>,
-  ratio: number
-): Float32Array<ArrayBufferLike> {
-  if (!isFinite(ratio) || ratio <= 0) return input
-  if (Math.abs(ratio - 1) < 0.01) return input
-
+export function timeStretchPcm(input: Float32Array, ratio: number): Float32Array {
+  if (!isFinite(ratio) || ratio <= 0 || Math.abs(ratio - 1) < 0.01) return input
   const N = WSOLA_ANALYSIS_WINDOW
   const H = WSOLA_SYNTH_HOP
-  const step = WSOLA_SEARCH_STEP
-  const decim = WSOLA_CORRELATION_DECIMATION
-  // ratio 为"输出/输入时长比例"：<1 加速、>1 减速，输出采样数 = 输入 × ratio
   const outLen = Math.max(1, Math.round(input.length * ratio))
   const output = new Float32Array(outLen)
-
-  // 过短信号：直接等比拷贝
   if (input.length <= N) {
     for (let i = 0; i < Math.min(outLen, input.length); i++) output[i] = input[i]
     return output
   }
-
-  // 第一帧直接拷贝作为输出起点
   const firstLen = Math.min(N, outLen)
   for (let i = 0; i < firstLen; i++) output[i] = input[i]
-
   let readNominal = N
   let writePos = firstLen
-
   while (writePos + N <= outLen && readNominal < input.length) {
-    readNominal = stretchSynthFrame(input, output, readNominal, writePos, N, H, step, decim, ratio)
+    readNominal = stretchSynthFrame(
+      input,
+      output,
+      readNominal,
+      writePos,
+      N,
+      H,
+      WSOLA_SEARCH_STEP,
+      WSOLA_CORRELATION_DECIMATION,
+      ratio
+    )
     writePos += H
   }
-
-  // 尾部直接拷贝填充（信号已接近结束）
   while (writePos < outLen && readNominal < input.length) {
     output[writePos] = input[Math.floor(readNominal)]
     writePos++
     readNominal++
   }
-
   return output
 }
 
-/** 变速每批处理的合成帧数（每帧约 6.8 万次运算，单批阻塞 < 20ms） */
-const STRETCH_CHUNK_FRAMES = 24
-
-/**
- * 分块异步版本的 WSOLA 变速：与 timeStretchPcm 结果完全一致，但每批
- * STRETCH_CHUNK_FRAMES 帧让出一次主线程，避免整曲变速长时间同步计算
- * 阻塞 UI（播放卡死）。
- */
+/** 分块异步版本的 WSOLA 变速：块间让出主线程，避免长时间同步计算阻塞 UI */
 export async function timeStretchPcmAsync(
-  input: Float32Array<ArrayBufferLike>,
+  input: Float32Array,
   ratio: number
-): Promise<Float32Array<ArrayBufferLike>> {
-  if (!isFinite(ratio) || ratio <= 0) return input
-  if (Math.abs(ratio - 1) < 0.01) return input
-
+): Promise<Float32Array> {
+  if (!isFinite(ratio) || ratio <= 0 || Math.abs(ratio - 1) < 0.01) return input
   const N = WSOLA_ANALYSIS_WINDOW
   const H = WSOLA_SYNTH_HOP
-  const step = WSOLA_SEARCH_STEP
-  const decim = WSOLA_CORRELATION_DECIMATION
   const outLen = Math.max(1, Math.round(input.length * ratio))
   const output = new Float32Array(outLen)
-
   if (input.length <= N) {
     for (let i = 0; i < Math.min(outLen, input.length); i++) output[i] = input[i]
     return output
   }
-
   const firstLen = Math.min(N, outLen)
   for (let i = 0; i < firstLen; i++) output[i] = input[i]
-
   let readNominal = N
   let writePos = firstLen
   let framesInChunk = 0
-
   while (writePos + N <= outLen && readNominal < input.length) {
-    readNominal = stretchSynthFrame(input, output, readNominal, writePos, N, H, step, decim, ratio)
+    readNominal = stretchSynthFrame(
+      input,
+      output,
+      readNominal,
+      writePos,
+      N,
+      H,
+      WSOLA_SEARCH_STEP,
+      WSOLA_CORRELATION_DECIMATION,
+      ratio
+    )
     writePos += H
     framesInChunk++
     if (framesInChunk >= STRETCH_CHUNK_FRAMES) {
@@ -1257,12 +1078,160 @@ export async function timeStretchPcmAsync(
       await yieldMainThread()
     }
   }
-
   while (writePos < outLen && readNominal < input.length) {
     output[writePos] = input[Math.floor(readNominal)]
     writePos++
     readNominal++
   }
-
   return output
+}
+
+// ====== 相位声码器变调（变调不变速） ======
+
+/** 相位声码器分析窗（采样数，约 46ms @44.1kHz） */
+const PV_WINDOW = 2048
+/** 相位声码器分析步进（采样数） */
+const PV_ANALYSIS_HOP = 512
+/** 相位声码器每批处理的帧数（单批阻塞 < 20ms） */
+const PV_CHUNK_FRAMES = 8
+
+/** 线性插值重采样：输出长度 = round(input.length × factor) */
+function resample(input: Float32Array, factor: number): Float32Array {
+  const outLen = Math.max(1, Math.round(input.length * factor))
+  const out = new Float32Array(outLen)
+  for (let i = 0; i < outLen; i++) {
+    const pos = i / factor
+    const i0 = Math.floor(pos)
+    const frac = pos - i0
+    const i1 = Math.min(i0 + 1, input.length - 1)
+    out[i] = input[i0] * (1 - frac) + input[i1] * frac
+  }
+  return out
+}
+
+/** 相位声码器状态（跨批次保留相位连续性） */
+interface PhaseVocoderState {
+  ratio: number
+  readPos: number
+  writePos: number
+  prevPhase: Float32Array
+  synthPhase: Float32Array
+  output: Float32Array
+  /** 重叠相加权重累积（Hann²，用于 OLA 归一化） */
+  accWin: Float32Array
+}
+
+/** 初始化相位声码器状态 */
+function initPhaseVocoder(input: Float32Array, ratio: number): PhaseVocoderState {
+  const N = PV_WINDOW
+  const outLen = Math.max(1, Math.round(input.length * ratio))
+  return {
+    ratio,
+    readPos: 0,
+    writePos: 0,
+    prevPhase: new Float32Array(N / 2 + 1),
+    synthPhase: new Float32Array(N / 2 + 1),
+    output: new Float32Array(outLen),
+    accWin: new Float32Array(outLen)
+  }
+}
+
+/**
+ * 相位声码器处理一个批次（phase propagation 保持音调，合成步进按 ratio 缩放实现时长拉伸）
+ * 处理完成后推进 readPos / writePos。
+ */
+function phaseVocoderProcess(
+  input: Float32Array,
+  state: PhaseVocoderState,
+  maxFrames: number
+): void {
+  const N = PV_WINDOW
+  const Ha = PV_ANALYSIS_HOP
+  const Hs = Math.max(1, Math.round(Ha * state.ratio))
+  const half = N / 2 + 1
+  const hann = getHannWindow(N)
+  const re = new Float32Array(N)
+  const im = new Float32Array(N)
+  const frame = new Float32Array(N)
+
+  let frames = 0
+  while (frames < maxFrames && state.writePos + N <= state.output.length) {
+    if (state.readPos + N > input.length) break
+    // 加窗 + FFT
+    for (let i = 0; i < N; i++) {
+      frame[i] = input[state.readPos + i] * hann[i]
+    }
+    re.set(frame)
+    im.fill(0)
+    fft(re, im)
+
+    // 相位传播：期望相位 = 前一帧相位 + 2π·k·Ha/N；实际与期望的差作为修正量
+    for (let k = 0; k < half; k++) {
+      const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k])
+      const phase = Math.atan2(im[k], re[k])
+      const expected = state.prevPhase[k] + (2 * Math.PI * k * Ha) / N
+      const delta = princarg(phase - expected)
+      state.synthPhase[k] += (2 * Math.PI * k * Hs) / N + delta
+      state.prevPhase[k] = phase
+      re[k] = mag * Math.cos(state.synthPhase[k])
+      im[k] = mag * Math.sin(state.synthPhase[k])
+      // 共轭对称：负频部分（超出 half 的 bin）由 IFFT 对称性自动恢复
+    }
+    for (let k = half; k < N; k++) {
+      re[k] = 0
+      im[k] = 0
+    }
+    ifft(re, im)
+    // 加窗 + 重叠相加：负频置零使输出幅度减半，×2 补偿；Hann² 权重累积用于 OLA 归一化
+    for (let i = 0; i < N; i++) {
+      const s = re[i] * 2 * hann[i]
+      state.output[state.writePos + i] += s
+      state.accWin[state.writePos + i] += hann[i] * hann[i]
+    }
+    state.readPos += Ha
+    state.writePos += Hs
+    frames++
+  }
+}
+
+/** OLA 归一化：按重叠相加权重去除幅度纹波，返回归一化后的拉伸信号 */
+function normalizePhaseVocoder(state: PhaseVocoderState): Float32Array {
+  const { output, accWin } = state
+  for (let i = 0; i < state.writePos; i++) {
+    if (accWin[i] > 1e-6) output[i] /= accWin[i]
+  }
+  return output
+}
+
+/**
+ * 相位声码器变调（变调不变速）
+ * 两步法：先相位声码器拉伸时长（ratio = 2^(半音/12)），再线性重采样
+ * 恢复原时长 → 时长不变、音调升高/降低 ratio 倍。
+ * @param input 单声道 PCM 数据
+ * @param semitones 变调量（半音，正=升调、负=降调）
+ */
+export function pitchShiftPcm(input: Float32Array, semitones: number): Float32Array {
+  if (semitones === 0 || input.length < PV_WINDOW * 2) return input
+  const ratio = Math.pow(2, semitones / 12)
+  const state = initPhaseVocoder(input, ratio)
+  phaseVocoderProcess(input, state, Number.MAX_SAFE_INTEGER)
+  return resample(normalizePhaseVocoder(state), 1 / ratio)
+}
+
+/** 分块异步版本的相位声码器变调：块间让出主线程 */
+export async function pitchShiftPcmAsync(
+  input: Float32Array,
+  semitones: number
+): Promise<Float32Array> {
+  if (semitones === 0 || input.length < PV_WINDOW * 2) return input
+  const ratio = Math.pow(2, semitones / 12)
+  const state = initPhaseVocoder(input, ratio)
+  while (
+    state.writePos + PV_WINDOW <= state.output.length &&
+    state.readPos + PV_WINDOW <= input.length
+  ) {
+    phaseVocoderProcess(input, state, PV_CHUNK_FRAMES)
+    await yieldMainThread()
+  }
+  return resample(normalizePhaseVocoder(state), 1 / ratio)
 }

@@ -9,7 +9,7 @@
 
     <div
       class="content"
-      :class="{ 'nowrap': true }"
+      :class="{ 'nowrap': true, 'align-left': taskbarAlign === 'left' }"
       @mousedown="handleMouseDown"
       @mousemove="handleMouseMove"
       @mouseup="handleMouseUp"
@@ -108,6 +108,9 @@ const dragging = ref(false)
 const lyrics = ref<any[]>([])
 const widthMode = ref<'auto' | 'custom'>('auto')
 
+/** 任务栏对齐方式：居中时内容左对齐，居左时翻转并居右对齐 */
+const taskbarAlign = ref<'center' | 'left'>('center')
+
 /** 平滑时钟：以最近一次同步的位置为基准，按播放状态逐帧推进，实现平滑逐字扫过 */
 const clockNow = ref(0)
 let lastTs = 0
@@ -158,12 +161,12 @@ watch(currentLineId, (n, o) => {
   }
 })
 
-/** 单个字的演唱进度（0~1）：以该字的时间窗 [startTime, endTime] 平滑推进，并加速 */
+/** 单个字的演唱进度（0~1）：以该字的时间窗 [startTime, endTime] 平滑推进。
+ * 按 1.0 系数，使每个字恰好在其 endTime 时整字填白，与演唱节奏对齐（避免超前）。 */
 const wordPercent = (w: any): number => {
   const s = w?.startTime ?? 0
   const e = w?.endTime ?? s
-  const base = clamp01((clockNow.value - s) / Math.max(1, e - s))
-  return clamp01(base * 1.6)
+  return clamp01((clockNow.value - s) / Math.max(1, e - s))
 }
 
 /** 歌手区域：优先显示当前行翻译；无翻译则显示「歌名 - 歌手」；无歌词时显示歌手 */
@@ -287,6 +290,10 @@ onMounted(() => {
     if (typeof settings.showArtist === 'boolean') showArtist.value = settings.showArtist
   })
 
+  window.electron.ipcRenderer.on('taskbar-control:set-align', (_, align: 'center' | 'left') => {
+    taskbarAlign.value = align === 'left' ? 'left' : 'center'
+  })
+
   window.addEventListener('mousemove', handleMouseMove)
   window.addEventListener('mouseup', handleMouseUp)
 
@@ -330,13 +337,28 @@ onUnmounted(() => {
   window.electron.ipcRenderer.removeAllListeners('taskbar-control:set-lyrics')
   window.electron.ipcRenderer.removeAllListeners('taskbar-control:set-progress')
   window.electron.ipcRenderer.removeAllListeners('taskbar-control:set-settings')
+  window.electron.ipcRenderer.removeAllListeners('taskbar-control:set-align')
   window.removeEventListener('mousemove', handleMouseMove)
   window.removeEventListener('mouseup', handleMouseUp)
 })
 </script>
 
 <style scoped>
+/* ---- 主题色变量：深色（默认）---- */
 .taskbar-control-container {
+  --tc-text: #ffffff;
+  --tc-text-dim: rgba(255, 255, 255, 0.6);
+  --tc-text-sub: rgba(255, 255, 255, 0.75);
+  --tc-text-time: rgba(255, 255, 255, 0.85);
+  --tc-btn-bg: rgba(255, 255, 255, 0.12);
+  --tc-btn-border: rgba(255, 255, 255, 0.18);
+  --tc-btn-fg: rgba(255, 255, 255, 0.92);
+  --tc-btn-hover: rgba(255, 255, 255, 0.28);
+  --tc-btn-main: rgba(255, 255, 255, 0.22);
+  --tc-hover-bg: rgba(20, 20, 20, 0.55);
+  --tc-slider-rail: rgba(255, 255, 255, 0.25);
+  --tc-slider-fill: rgba(255, 255, 255, 0.75);
+  --tc-slider-handle: #ffffff;
   width: 100vw;
   height: 100vh;
   display: flex;
@@ -351,9 +373,28 @@ onUnmounted(() => {
   transition: background-color 0.35s ease;
 }
 
-/* 悬停时黑底淡入 */
+/* 浅色模式：系统任务栏为浅色背景时，文字与控件切换为深色 */
+@media (prefers-color-scheme: light) {
+  .taskbar-control-container {
+    --tc-text: #1a1a1a;
+    --tc-text-dim: rgba(0, 0, 0, 0.42);
+    --tc-text-sub: rgba(0, 0, 0, 0.65);
+    --tc-text-time: rgba(0, 0, 0, 0.75);
+    --tc-btn-bg: rgba(0, 0, 0, 0.06);
+    --tc-btn-border: rgba(0, 0, 0, 0.12);
+    --tc-btn-fg: rgba(0, 0, 0, 0.82);
+    --tc-btn-hover: rgba(0, 0, 0, 0.14);
+    --tc-btn-main: rgba(0, 0, 0, 0.1);
+    --tc-hover-bg: rgba(255, 255, 255, 0.6);
+    --tc-slider-rail: rgba(0, 0, 0, 0.2);
+    --tc-slider-fill: rgba(0, 0, 0, 0.55);
+    --tc-slider-handle: #1a1a1a;
+  }
+}
+
+/* 悬停时底色淡入 */
 .taskbar-control-container.hovered {
-  background-color: rgba(20, 20, 20, 0.55);
+  background-color: var(--tc-hover-bg);
 }
 
 .drag-region {
@@ -375,6 +416,18 @@ onUnmounted(() => {
 
 .content:active {
   cursor: grabbing;
+}
+
+/* 任务栏居左时：内容翻转（row-reverse）并居右对齐 */
+.content.align-left {
+  flex-direction: row-reverse;
+  justify-content: flex-start;
+}
+
+/* 居左翻转时文字右对齐 */
+.content.align-left .title,
+.content.align-left .artist {
+  text-align: right;
 }
 
 .cover {
@@ -476,19 +529,19 @@ onUnmounted(() => {
 .title {
   font-size: 15px;
   font-weight: 600;
-  color: #ffffff;
+  color: var(--tc-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* 逐字左→右渐变扫过：唱过的部分按 --p 填充为白色，未唱部分保持较淡的白色过渡 */
+/* 逐字左→右渐变扫过：唱过的部分按 --p 填充为主色，未唱部分保持较淡过渡 */
 .word {
   color: transparent;
   background-image: linear-gradient(
     90deg,
-    #ffffff calc(var(--p, 0) * 100%),
-    rgba(255, 255, 255, 0.6) calc(var(--p, 0) * 100%)
+    var(--tc-text) calc(var(--p, 0) * 100%),
+    var(--tc-text-dim) calc(var(--p, 0) * 100%)
   );
   -webkit-background-clip: text;
   background-clip: text;
@@ -496,7 +549,7 @@ onUnmounted(() => {
 
 .artist {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--tc-text-sub);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -524,7 +577,7 @@ onUnmounted(() => {
 
 .time {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--tc-text-time);
   min-width: 30px;
   text-align: center;
   flex-shrink: 0;
@@ -537,15 +590,19 @@ onUnmounted(() => {
 .progress-slider :deep(.n-slider-rail) {
   height: 3px;
   border-radius: 2px;
+  background-color: var(--tc-slider-rail);
 }
 
 .progress-slider :deep(.n-slider-fill) {
   border-radius: 2px;
+  background-color: var(--tc-slider-fill);
 }
 
 .progress-slider :deep(.n-slider-handle) {
   width: 12px;
   height: 12px;
+  background-color: var(--tc-slider-handle);
+  border: 2px solid var(--tc-slider-handle);
 }
 
 .controls {
@@ -564,8 +621,8 @@ onUnmounted(() => {
 }
 
 .control-btn {
-  background: rgba(255, 255, 255, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: var(--tc-btn-bg);
+  border: 1px solid var(--tc-btn-border);
   border-radius: 6px;
   width: 26px;
   height: 26px;
@@ -573,17 +630,17 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  color: rgba(255, 255, 255, 0.92);
+  color: var(--tc-btn-fg);
   transition: all 0.15s;
   padding: 0;
 }
 
 .control-btn:hover {
-  background: rgba(255, 255, 255, 0.28);
+  background: var(--tc-btn-hover);
 }
 
 .control-btn.main-btn {
-  background: rgba(255, 255, 255, 0.22);
+  background: var(--tc-btn-main);
 }
 
 .control-btn svg {

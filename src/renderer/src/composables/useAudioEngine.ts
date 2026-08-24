@@ -1,4 +1,4 @@
-import { ref, reactive, watch, watchEffect } from 'vue'
+import { ref, reactive, watch, watchEffect, onScopeDispose } from 'vue'
 import { audioEngine } from '../audio/audio-engine'
 import { isWebAudioMode } from '../utils/audioOutputModeManager'
 
@@ -1108,6 +1108,16 @@ export function useAudioEngine() {
     // 防抖写入，避免频繁操作时的性能损耗
     debouncedSaveEngineState(snapshot)
   })
+
+  // 组件作用域销毁兜底：即使调用方忘记显式调用 destroy()，
+  // 也确保停止增益轮询 rAF 循环并清理防抖定时器，避免残留 60fps 空转与定时器
+  onScopeDispose(() => {
+    stopGainReductionPolling();
+    if (engineSaveTimer) {
+      clearTimeout(engineSaveTimer);
+      engineSaveTimer = null;
+    }
+  });
 
   return {
     // 状态

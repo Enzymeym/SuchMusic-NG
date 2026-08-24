@@ -3,7 +3,7 @@
  * 用于 Electron 主进程中调用 Rust NAPI 模块
  */
 
-import { BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 import { join } from 'path';
 import { readFile } from 'fs/promises';
 
@@ -108,20 +108,47 @@ function loadNativeModule(): any {
 
   console.log('[AudioEngine] 开始加载 native 模块...');
 
-  // 尝试多个路径（使用 .node 后缀，Node.js 才能正确加载）
-  const possiblePaths = [
-    // 路径 1: 生产环境 - electron-builder extraResources 将 native/ 拷贝到 resources/native/
-    join(process.resourcesPath!, 'native', 'audio_napi.node'),
-    // 路径 2: 开发环境 - 基于 __dirname
-    join(__dirname, '..', '..', '..', 'resources', 'native', 'audio_napi.node'),
-    // 路径 3: 开发环境 - 基于 process.cwd()
-    join(process.cwd(), 'resources', 'native', 'audio_napi.node'),
-    // 路径 4: 开发环境 - Rust 构建目录
-    join(process.cwd(), 'native', 'rust-audio-engine', 'target', 'release', 'audio_napi.node'),
-    join(process.cwd(), 'native', 'rust-audio-engine', 'target', 'debug', 'audio_napi.node'),
-  ];
-
+  // 收集可能包含原生模块的目录，兼容多种运行形态：
+  // - 生产环境：extraResources 将 resources/native 拷贝到 <resources>/native（app.asar 外）
+  // - 开发环境（electron-vite 打包后 __dirname 指向 out/main）：app.getAppPath() 为项目根
+  // - 动态运行（cwd 不确定）：回退 process.cwd()
+  const root = app.getAppPath();
   const fs = require('fs');
+
+  const candidateDirs = [
+    process.resourcesPath && join(process.resourcesPath, 'native'),
+    join(root, 'resources', 'native'),
+    join(root, 'resources'),
+    join(root, 'native', 'rust-audio-engine', 'target', 'debug'),
+    join(root, 'native', 'rust-audio-engine', 'target', 'release'),
+    // napi_build::setup() 会在 crate 根目录生成 audio_napi.node
+    join(root, 'native', 'rust-audio-engine', 'audio-napi'),
+    process.cwd() && join(process.cwd(), 'resources', 'native'),
+  ].filter(Boolean) as string[];
+
+  let candidateDirsWithRuntimeDir: string[] = [];
+  try {
+    // __dirname 在打包后为 out/main，向上两级即项目根；兼容旧的非打包目录结构
+    candidateDirsWithRuntimeDir = [
+      join(__dirname, '..', '..', 'resources', 'native'),
+      join(__dirname, '..', '..', '..', 'resources', 'native'),
+    ];
+  } catch {
+    candidateDirsWithRuntimeDir = [];
+  }
+
+  const candidateFilenames = ['audio_napi.node', 'audio_napi.dll'];
+  const possiblePaths: string[] = [];
+  for (const dir of candidateDirs) {
+    for (const file of candidateFilenames) {
+      possiblePaths.push(join(dir, file));
+    }
+  }
+  for (const dir of candidateDirsWithRuntimeDir) {
+    for (const file of candidateFilenames) {
+      possiblePaths.push(join(dir, file));
+    }
+  }
 
   for (const modulePath of possiblePaths) {
     if (fs.existsSync(modulePath)) {
@@ -131,8 +158,8 @@ function loadNativeModule(): any {
         console.log('[AudioEngine] Loaded successfully!');
         console.log('[AudioEngine] Exports:', Object.keys(nativeModule));
 
-        if (!nativeModule.AudioEngine) {
-          throw new Error('Missing AudioEngine export');
+        if (!nativeModule.AudioEngine && !nativeModule.WasapiOutputEngine) {
+          throw new Error('Missing AudioEngine/WasapiOutputEngine export');
         }
 
         return nativeModule;
@@ -143,7 +170,9 @@ function loadNativeModule(): any {
   }
 
   console.error('[AudioEngine] No valid native module found');
-  throw new Error('Audio engine module load failed: module not found');
+  throw new Error(
+    'Audio engine module load failed: module not found. Please run npm run build:native (or npm run dev) to compile the Rust native module.'
+  );
 }
 
 /**

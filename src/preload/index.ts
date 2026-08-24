@@ -388,11 +388,6 @@ const audioEngineManager = new AudioEngineManager()
 const api = {
   rustAudio: audioEngineManager,
 
-  /** 起始点分析模型：获取 onnxruntime WASM 二进制 */
-  analyzer: {
-    getWasmBinary: () => ipcRenderer.invoke('analyzer:get-wasm-binary')
-  },
-
   /** 内存监控：获取主进程内存统计报告 */
   memory: {
     getReport: () => ipcRenderer.invoke('memory:get-report')
@@ -522,6 +517,7 @@ const api = {
     songUrl: (ids: number[], quality?: string, refresh?: boolean) =>
       ipcRenderer.invoke('netease:song-url', ids, quality, refresh),
     hotSearch: () => ipcRenderer.invoke('netease:hot-search'),
+    suggest: (keywords: string) => ipcRenderer.invoke('netease:suggest', keywords),
     loginQr: () => ipcRenderer.invoke('netease:login-qr'),
     loginQrCheck: (unikey: string) => ipcRenderer.invoke('netease:login-qr-check', unikey),
     loginStatus: () => ipcRenderer.invoke('netease:login-status'),

@@ -43,6 +43,7 @@ function Measure-Blank {
       $out.y = [int]$tbRect.Y
       $out.width = [Math]::Max(120, $leftmostX - $trayLeft - $margin)
       $out.height = [int]$tbRect.Height
+      $out.align = 'center'
     } else {
       # Left-aligned taskbar -> right gap
       $children = $tb.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
@@ -64,6 +65,7 @@ function Measure-Blank {
       $out.y = [int]$tbRect.Y
       $out.width = [Math]::Max(120, $trayX - $leftEndX - 2 * $margin)
       $out.height = [int]$tbRect.Height
+      $out.align = 'left'
     }
 
     $json = ($out | ConvertTo-Json -Compress)

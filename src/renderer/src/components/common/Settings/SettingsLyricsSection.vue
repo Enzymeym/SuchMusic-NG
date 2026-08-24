@@ -606,12 +606,13 @@ const playerBackgroundStyleOptions = [
           <div class="main-label">普通歌词颜色</div>
           <div class="sub-label">未播放歌词的颜色</div>
         </div>
-        <n-color-picker
-          v-model:value="settingsStore.playback.desktopLyricsColor"
-          :show-alpha="true"
-          :modes="['hex']"
-          class="desktop-lyrics-color-picker"
-        />
+        <div style="width: 120px; flex: 0 0 120px; display: inline-flex; align-items: center;">
+          <n-color-picker
+            v-model:value="settingsStore.playback.desktopLyricsColor"
+            :show-alpha="true"
+            :modes="['hex']"
+          />
+        </div>
       </div>
     </n-card>
 
@@ -628,12 +629,13 @@ const playerBackgroundStyleOptions = [
           <div class="main-label">高亮歌词颜色</div>
           <div class="sub-label">当前播放歌词的颜色</div>
         </div>
-        <n-color-picker
-          v-model:value="settingsStore.playback.desktopLyricsActiveColor"
-          :show-alpha="true"
-          :modes="['hex']"
-          class="desktop-lyrics-color-picker"
-        />
+        <div style="width: 120px; flex: 0 0 120px; display: inline-flex; align-items: center;">
+          <n-color-picker
+            v-model:value="settingsStore.playback.desktopLyricsActiveColor"
+            :show-alpha="true"
+            :modes="['hex']"
+          />
+        </div>
       </div>
     </n-card>
 

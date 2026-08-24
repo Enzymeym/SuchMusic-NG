@@ -224,6 +224,18 @@ const props = defineProps<{
   // 当前高亮的设置项 key
   highlightKey?: string | null
 }>()
+
+// 任务栏对齐方式：居中时才显示「预留小组件入口」开关
+const taskbarAlign = ref<'center' | 'left'>('center')
+onMounted(() => {
+  // 先查询当前对齐方式，再监听变化
+  window.electron.ipcRenderer.invoke('taskbar-control:get-align').then((align: 'center' | 'left') => {
+    if (align) taskbarAlign.value = align
+  })
+  window.electron.ipcRenderer.on('taskbar-control:set-align', (_, align: 'center' | 'left') => {
+    if (align) taskbarAlign.value = align
+  })
+})
 </script>
 
 <template>
@@ -534,12 +546,10 @@ const props = defineProps<{
       </div>
     </n-card>
 
+    <!-- 居中对齐时显示：预留 Windows 小组件入口 -->
     <n-card
+      v-if="taskbarAlign === 'center'"
       class="setting-item"
-      :class="{
-        'setting-item--highlight': props.highlightKey === 'playback.taskbarControlHeight'
-      }"
-      data-setting-key="playback.taskbarControlHeight"
       :bordered="true"
       size="small"
       :style="{
@@ -549,13 +559,32 @@ const props = defineProps<{
     >
       <div class="setting-row">
         <div class="setting-label">
-          <div class="main-label">窗口高度上限</div>
-          <div class="sub-label">播控窗口高度自动匹配任务栏高度，此值为最大上限（像素）</div>
+          <div class="main-label">预留小组件入口</div>
+          <div class="sub-label">将窗口向右偏移，为 Windows 小组件按钮留出空间</div>
+        </div>
+        <n-switch v-model:value="settingsStore.playback.taskbarControlWidgetOffset" />
+      </div>
+    </n-card>
+
+    <!-- 位置偏移：手动微调窗口水平位置 -->
+    <n-card
+      class="setting-item"
+      :bordered="true"
+      size="small"
+      :style="{
+        backgroundColor: props.settingItemBgColor,
+        borderColor: props.settingItemBorderColor
+      }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">位置偏移</div>
+          <div class="sub-label">手动调整窗口水平位置（正数右移，负数左移，单位像素）</div>
         </div>
         <n-input-number
-          v-model:value="settingsStore.playback.taskbarControlHeight"
-          :min="40"
-          :max="120"
+          v-model:value="settingsStore.playback.taskbarControlOffsetX"
+          :min="-200"
+          :max="200"
           :step="5"
           style="width: 120px"
         />

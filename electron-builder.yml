@@ -4,7 +4,7 @@ directories:
   buildResources: build
 files:
   - out/**
-  - resources/icon.png
+  - resources/**
   - '!**/.vscode/*'
   - '!src/*'
   - '!electron.vite.config.{js,ts,mjs,cjs}'

@@ -373,6 +373,19 @@
         text-align: center;
       }
     }
+
+    /* AMLL 歌词行块默认 align-items: flex-start（贴边左对齐）且行宽约为 80%，
+       纯歌词模式下改为 flex 居中，避免歌词块整体严重偏左 */
+    :deep(.lyric-am .am-lyric [class*='_lyricLineWrapper']) {
+      align-items: center;
+    }
+
+    /* suth 简洁列表模式：歌词行左对齐且限宽 600px，
+       纯歌词模式下需居中显示。覆盖 suth-lyric-kit 默认的 align-items: start + text-align: left */
+    :deep(.lyric-am .lyrics-view .lyrics-scroll) {
+      align-items: center;
+      text-align: center;
+    }
   }
 }
 

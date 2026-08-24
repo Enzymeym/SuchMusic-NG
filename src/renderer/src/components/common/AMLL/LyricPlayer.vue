@@ -215,20 +215,19 @@ onUnmounted(() => {
 // 动画帧更新
 watchEffect((onCleanup) => {
   if (!props.disabled && props.playing) {
-    let canceled = false
+    let rafId = 0
     let lastTime = -1
     const onFrame = (time: number) => {
-      if (canceled) return
       if (lastTime === -1) {
         lastTime = time
       }
       playerRef.value?.update(time - lastTime)
       lastTime = time
-      requestAnimationFrame(onFrame)
+      rafId = requestAnimationFrame(onFrame)
     }
-    requestAnimationFrame(onFrame)
+    rafId = requestAnimationFrame(onFrame)
     onCleanup(() => {
-      canceled = true
+      cancelAnimationFrame(rafId)
     })
   }
 })

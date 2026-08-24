@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, watch, computed } from 'vue'
 import { useOsTheme } from 'naive-ui'
 import { audioEngine } from '../audio/audio-engine'
+import { webAudioOutputEngine } from '../audio/web-audio-engine'
 import { setPrimaryColor, setGlobalFontFamily } from '../themes'
 import { usePlayerStore } from './playerStore'
 import { extractImageColors } from '../utils/imageColors'
@@ -91,7 +92,8 @@ export interface PlaybackSettings {
   taskbarControlEnabled: boolean // 是否启用任务栏播控
   taskbarControlWidthMode: 'auto' | 'custom' // 宽度模式：自适应 / 自定义
   taskbarControlCustomWidth: number // 自定义宽度（px）
-  taskbarControlHeight: number // 窗口高度（px）
+  taskbarControlWidgetOffset: boolean // 居中对齐时预留 Windows 小组件入口
+  taskbarControlOffsetX: number // 手动位置偏移（px，正数右移）
   taskbarControlShowCover: boolean
   taskbarControlShowTitle: boolean
   taskbarControlShowArtist: boolean
@@ -191,7 +193,8 @@ export const useSettingsStore = defineStore('settings', () => {
     taskbarControlEnabled: false,
     taskbarControlWidthMode: 'auto',
     taskbarControlCustomWidth: 480,
-    taskbarControlHeight: 60,
+    taskbarControlWidgetOffset: false,
+    taskbarControlOffsetX: 0,
     taskbarControlShowCover: true,
     taskbarControlShowTitle: true,
     taskbarControlShowArtist: true
@@ -250,6 +253,12 @@ export const useSettingsStore = defineStore('settings', () => {
   watch(
     [() => playback.value.audioOutputMode, () => playback.value.audioOutputDeviceId],
     ([mode, deviceId]) => {
+      // 离开 Web Audio 模式时释放渲染进程的 AudioContext（其单例在 WASAPI 模式下
+      // 无任何播放请求但仍占用一条 Web Audio 音频线程，属资源泄漏）。
+      // 切回 Web Audio 模式播放时 loadFromArrayBuffer 会按需重建，故 dispose 安全。
+      if (mode !== 'webaudio') {
+        webAudioOutputEngine.dispose()
+      }
       if (window.electron && window.electron.ipcRenderer) {
         window.electron.ipcRenderer.invoke('audio-engine:set-output-config', { mode, deviceId })
       }

@@ -68,18 +68,15 @@ html[data-theme='light'] .n-dropdown-menu {
 }
 
 /*
- * n-dropdown / n-select 菜单自带 --n-box-shadow / --n-menu-box-shadow，
- * box-shadow 覆盖可能被主题变量盖掉，因此直接给面板补真实描边。
- * 下拉类面板为 .n-dropdown/.n-dropdown-menu，n-select 面板为 .n-base-select-menu。
+ * n-dropdown 的弹层主体本身就是 .n-popover（下拉菜单由 popover 承载），
+ * 已由上方 .n-popover 描边规则提供单条细边框；若再给 .n-dropdown / .n-dropdown-menu
+ * 补 border，会与 popover 描边叠成「双线」显得过粗，故这里仅对独立承载的
+ * n-select 菜单面板 .n-base-select-menu 补描边（其不带 popover 圆环）。
  */
-html[data-theme='dark'] .n-dropdown,
-html[data-theme='dark'] .n-dropdown-menu,
 html[data-theme='dark'] .n-base-select-menu {
   border: 1px solid rgba(255, 255, 255, 0.08) !important;
 }
 
-html[data-theme='light'] .n-dropdown,
-html[data-theme='light'] .n-dropdown-menu,
 html[data-theme='light'] .n-base-select-menu {
   border: 1px solid rgba(0, 0, 0, 0.14) !important;
 }
