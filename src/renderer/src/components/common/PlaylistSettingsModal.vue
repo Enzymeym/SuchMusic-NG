@@ -2,22 +2,33 @@
   <n-modal
     :show="show"
     @update:show="$emit('update:show', $event)"
-    preset="card"
-    class="playlist-settings-modal"
-    :style="{ width: '480px', borderRadius: '16px', overflow: 'hidden' }"
-    :title="undefined"
-    :header-style="{ display: 'none' }"
-    :content-style="{ padding: 0 }"
+    style="border-radius: 12px; overflow: hidden"
   >
-    <div class="modal-container">
-      <!-- 顶部标题区域 -->
-      <div class="modal-header">
-        <div class="title">编辑歌单</div>
-        <div class="subtitle">查看和修改一些附加信息</div>
+    <n-card
+      class="playlist-settings-card"
+      :bordered="false"
+      role="dialog"
+      aria-modal="true"
+      :style="{
+        backgroundColor: themeVars.modalColor,
+        maxWidth: 'calc(100vw - 96px)',
+        width: 'min(480px, calc(100vw - 96px))'
+      }"
+      content-style="padding: 0; display: flex; flex-direction: column; min-height: 0;"
+    >
+      <!-- 关闭按钮：悬浮在右上角，与设置弹窗一致 -->
+      <div class="modal-topbar">
         <div class="close-btn" @click="$emit('update:show', false)">
-          <n-icon size="20"><i class="mgc_close_line"></i></n-icon>
+          <n-icon size="18"><i class="mgc_close_line"></i></n-icon>
         </div>
       </div>
+
+      <div class="modal-container">
+        <!-- 顶部标题区域 -->
+        <div class="modal-header">
+          <div class="title">编辑歌单</div>
+          <div class="subtitle">查看和修改一些附加信息</div>
+        </div>
 
       <!-- 预览区域 -->
       <div class="preview-area" :style="previewStyle">
@@ -125,13 +136,14 @@
           </n-button>
         </div>
       </div>
-    </div>
+      </div>
+    </n-card>
   </n-modal>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { NModal, NInput, NSelect, NIcon, NButton, NSwitch, useMessage, useDialog } from 'naive-ui'
+import { NModal, NCard, NInput, NSelect, NIcon, NButton, NSwitch, useMessage, useDialog, useThemeVars } from 'naive-ui'
 import type { UserPlaylist } from '../../stores/playlistStore'
 import defaultCoverIcon from '@renderer/assets/default-cover.png'
 
@@ -148,6 +160,7 @@ const emit = defineEmits<{
 
 const message = useMessage()
 const dialog = useDialog()
+const themeVars = useThemeVars()
 const activeTab = ref<'general' | 'detail'>('general')
 const defaultCover = defaultCoverIcon
 
@@ -314,37 +327,26 @@ const handleDelete = () => {
 
 <style scoped>
 .modal-container {
-  background: #fff;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-html[data-theme='dark'] .modal-container {
-  background: #1f1f1f;
-}
-
 .modal-header {
-  padding: 20px 20px 16px;
+  padding: 24px 24px 12px;
   position: relative;
 }
 
 .title {
   font-size: 18px;
-  font-weight: bold;
+  font-weight: 600;
 }
 
 .subtitle {
   font-size: 12px;
   color: #999;
   margin-top: 4px;
-}
-
-.close-btn {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  cursor: pointer;
-  color: #999;
 }
 
 .info-text {

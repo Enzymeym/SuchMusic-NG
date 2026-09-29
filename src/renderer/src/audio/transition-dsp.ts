@@ -51,6 +51,13 @@ export const BPM_MAX = 180
 export const MAX_PITCH_SHIFT_SEMITONES = 3
 /** BPM 对齐变速窗口（秒）：仅对下一曲开头这 N 秒做变速/变调，其余原速原调拼接 */
 export const STRETCH_HEAD_SEC = 30
+/**
+ * 实际"可听见"的变速/变调窗口（秒）
+ * 节奏/调性对齐只需覆盖交叉淡化重叠期（最长为 MAX_TRANSITION_MS=8s）。
+ * 若整段 STRETCH_HEAD_SEC(30s) 都变速，下一曲需长时间以错误速度播放后才恢复，
+ * 听感很差。这里缩短为仅开头一小段，让变速影响在几秒内结束、速度快速恢复正常。
+ */
+export const STRETCH_APPLY_SEC = 10
 
 // ====== 基础工具 ======
 
@@ -508,6 +515,8 @@ export interface TailDecay {
   decayStartSec: number
   /** 衰减速率（能量相对每秒下降比例，0~1） */
   decayRate: number
+  /** 尾部窗口内检测到的起始点（拍点，相对歌曲开头，秒）。用于把过渡触发对齐到当前曲的重拍上，跨风格/节拍的切换更顺 */
+  onsets?: number[]
 }
 
 /**
@@ -519,7 +528,7 @@ export function analyzeTail(
   sampleRate: number,
   tailSec: number = TAIL_ANALYSIS_SEC
 ): TailDecay {
-  const empty: TailDecay = { peakRms: 0, decayStartSec: -1, decayRate: 0 }
+  const empty: TailDecay = { peakRms: 0, decayStartSec: -1, decayRate: 0, onsets: [] }
   const durationSec = channelData.length / sampleRate
   if (durationSec <= 0) return empty
 
@@ -537,12 +546,26 @@ export function analyzeTail(
   }
   if (segments.length === 0) return empty
 
+  // 拍点（起始点）检测：能量相对之前约 2s 基线显著跃升的窗口，作为尾部重拍位置
+  const lookbackCount = Math.max(1, Math.round(2 / windowSec))
+  const minContentRms = Math.max(ONSET_MIN_RMS * 0.6, SILENCE_THRESHOLD * 2)
+  const onsets: number[] = []
+  for (let i = lookbackCount; i < segments.length; i++) {
+    if (segments[i].rms < minContentRms) continue
+    let prevSum = 0
+    for (let j = i - lookbackCount; j < i; j++) prevSum += segments[j].rms
+    const prevLevel = prevSum / lookbackCount
+    if (segments[i].rms >= Math.max(prevLevel * 1.6, prevLevel + 0.02)) {
+      onsets.push(segments[i].timeSec)
+    }
+  }
+
   const endRms = segments[segments.length - 1].rms
   const windowStartSec = startSample / sampleRate
 
   // 静音尾部：整段几乎无能量，衰减起点即窗口起点
   if (peakRms < SILENCE_THRESHOLD) {
-    return { peakRms, decayStartSec: windowStartSec, decayRate: 0 }
+    return { peakRms, decayStartSec: windowStartSec, decayRate: 0, onsets: [] }
   }
 
   // 峰值位置之后第一个降到峰值 70% 以下的位置即为衰减起点
@@ -567,7 +590,7 @@ export function analyzeTail(
     }
   }
 
-  return { peakRms, decayStartSec, decayRate }
+  return { peakRms, decayStartSec, decayRate, onsets }
 }
 
 /** 下一首头部特征 */
@@ -904,13 +927,31 @@ export function computeTransitionPlan(p: TransitionPlanParams): TransitionPlan {
   const keyScore = Math.max(0, 1 - keyDistance / 4)
 
   // ---- 3. 触发点 ----
-  const earliestMs = Math.max(0, durationMs - TAIL_ANALYSIS_SEC * 1000)
+  // 触发点应尽量贴近歌曲结尾：默认在最晚合法点触发（过渡在歌曲结束前恰好完成），
+  // 避免切入点过早导致两曲长时间叠放。仅当检测到自然衰减且其起点距最晚合法点
+  // 不超过一个过渡时长时，才提前到衰减起点触发，且不早于最晚合法点前一个过渡时长。
   const latestMs = Math.max(0, durationMs - userMs - BEAT_TRIGGER_MARGIN_MS)
-  let triggerMs: number
+  const earliestMs = Math.max(0, latestMs - userMs)
+  let triggerMs: number = latestMs
   if (p.tail.decayStartSec >= 0) {
-    triggerMs = p.tail.decayStartSec * 1000
-  } else {
-    triggerMs = earliestMs
+    const decayMs = p.tail.decayStartSec * 1000
+    if (decayMs >= earliestMs) {
+      triggerMs = decayMs
+    }
+  }
+  // 对齐到当前曲尾部最近的一个拍点（起始点）：让交叉淡化从重拍上开始，
+  // 不同风格/节拍的歌曲衔接更顺，避免落在任意节奏相位上产生脱拍感。
+  // 仅在合法窗口 [earliestMs, latestMs] 内挑选最接近期望触发点的拍点。
+  const desiredTriggerMs = triggerMs
+  let bestGap = Infinity
+  for (const o of p.tail.onsets ?? []) {
+    const om = o * 1000
+    if (om < earliestMs || om > latestMs) continue
+    const gap = Math.abs(om - desiredTriggerMs)
+    if (gap < bestGap) {
+      bestGap = gap
+      triggerMs = om
+    }
   }
   triggerMs = Math.min(Math.max(triggerMs, earliestMs), latestMs)
 
@@ -927,9 +968,19 @@ export function computeTransitionPlan(p: TransitionPlanParams): TransitionPlan {
   const finalDurationMs = Math.max(MIN_TRANSITION_MS, Math.min(baseDurationMs, remainingMs))
 
   // ---- 5. 下一曲起始偏移（变速后时间轴） ----
+  // 开头 STRETCH_APPLY_SEC 秒整体拉伸至 STRETCH_APPLY_SEC*ratio，其后为原速区。
+  // 必须把"原曲内容起点"映射到"拉伸后缓冲"的实际位置，两段位移分别计入，
+  // 否则首句歌词在拉伸区之外时（常见于前奏后 10s 才开口）落点会偏后到首句结尾。
   let startOffsetMs = Math.round(p.contentStartSec * 1000)
-  if (stretchRatio !== 1 && p.contentStartSec < STRETCH_HEAD_SEC) {
-    startOffsetMs = Math.round(startOffsetMs * stretchRatio)
+  if (stretchRatio !== 1) {
+    if (p.contentStartSec < STRETCH_APPLY_SEC) {
+      // 落点在拉伸区内部：整体线性换算
+      startOffsetMs = Math.round(p.contentStartSec * stretchRatio * 1000)
+    } else {
+      // 落点在拉伸区之后:拉伸区位移 + 原速区剩余
+      const headStretchedSec = STRETCH_APPLY_SEC * stretchRatio
+      startOffsetMs = Math.round((headStretchedSec + (p.contentStartSec - STRETCH_APPLY_SEC)) * 1000)
+    }
   }
 
   return {

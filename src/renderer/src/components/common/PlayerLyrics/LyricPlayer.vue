@@ -84,7 +84,7 @@ const appleLyrics = computed<CoreLyricLine[]>(() => {
     }
     if (typeof props.lyrics === 'string') {
       const translatedContent = props.translatedLyrics || playerStore.currentSong?.translatedLyrics || ''
-      return parseLyricsToCore(props.lyrics, translatedContent)
+      return parseLyricsToCore(props.lyrics, translatedContent, playerStore.currentSong?.title)
     }
   }
   return []

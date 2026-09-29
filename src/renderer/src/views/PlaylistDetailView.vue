@@ -40,18 +40,26 @@
             {{ playlist.name }}
           </div>
 
-          <!-- 标签（模拟数据，实际UserPlaylist暂无标签字段） -->
-          <div class="tags-row" v-if="layoutStyle === 'classic'">
-            <span class="tag">本地歌单</span>
-            <span class="tag">自建</span>
+          <!-- 标签 -->
+          <div v-if="layoutStyle === 'classic'" class="tags-row">
+            <template v-if="playlist.source === 'netease'">
+              <span class="tag">网易云导入</span>
+              <span class="tag">在线歌单</span>
+            </template>
+            <template v-else>
+              <span class="tag">本地歌单</span>
+              <span class="tag">自建</span>
+            </template>
           </div>
 
           <!-- 描述 -->
           <div class="desc-row" :style="headerTextStyle">
             <div class="desc-text line-clamp-2">
               {{
-                playlist.description ||
-                `这是一个本地创建的歌单，包含了 ${playlist.tracks.length} 首歌曲。`
+                playlist.description?.trim() ||
+                (playlist.source === 'netease'
+                  ? `从网易云同步的歌单，包含 ${playlist.tracks.length} 首歌曲。`
+                  : `这是一个本地创建的歌单，包含了 ${playlist.tracks.length} 首歌曲。`)
               }}
             </div>
           </div>
@@ -78,6 +86,19 @@
                   ></n-icon>
                 </template>
                 {{ isBatchMode ? '退出管理' : '批量管理' }}
+              </n-button>
+              <n-button
+                v-if="playlist.source === 'netease' && playlist.sourcePlaylistId"
+                size="large"
+                secondary
+                round
+                :loading="syncing"
+                @click="handleSync"
+              >
+                <template #icon>
+                  <n-icon><i class="mgc_refresh_2_line"></i></n-icon>
+                </template>
+                重新同步
               </n-button>
             </div>
             <div class="actions-row">
@@ -159,6 +180,7 @@ import { usePlaylistStore, type UserPlaylist } from '../stores/playlistStore'
 import { usePlayerStore } from '../stores/playerStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { usePlaylistTheme } from '../composables/usePlaylistTheme'
+import { fetchNeteasePlaylist } from '../composables/useNeteasePlaylist'
 import SongList from '../components/common/SongList.vue'
 import PlaylistSettingsModal from '../components/common/PlaylistSettingsModal.vue'
 import defaultCover from '@renderer/assets/default-cover.png'
@@ -187,6 +209,38 @@ const layoutStyle = computed<'classic' | 'modern'>(() => {
 })
 
 const showSettings = ref(false)
+const syncing = ref(false)
+
+// 重新同步：以网易云最新曲目覆盖本地歌单
+const handleSync = async (): Promise<void> => {
+  if (!playlist.value || syncing.value) return
+  const sourcePlaylistId = playlist.value.sourcePlaylistId
+  if (!sourcePlaylistId) return
+
+  syncing.value = true
+  const loadingMsg = message.loading('正在同步歌单…', { duration: 0 })
+  try {
+    const payload = await fetchNeteasePlaylist(sourcePlaylistId)
+    if (!payload) {
+      loadingMsg.destroy()
+      message.error('同步失败，原歌单可能已被删除')
+      return
+    }
+    const ok = playlistStore.syncPlaylistFromNetease(playlist.value.id, payload)
+    loadingMsg.destroy()
+    if (ok) {
+      message.success(`已同步为最新 ${payload.tracks.length} 首`)
+    } else {
+      message.error('同步失败，请稍后重试')
+    }
+  } catch (e) {
+    loadingMsg.destroy()
+    console.error('[PlaylistDetailView] 同步歌单失败:', e)
+    message.error('同步失败，请稍后重试')
+  } finally {
+    syncing.value = false
+  }
+}
 
 const playlist = computed(() => {
   return playlistStore.playlists.find((p) => p.id === playlistId)
@@ -402,7 +456,8 @@ const handleSongClick = (song: any) => {
   const target = list.find((s) => s.id === song.id)
   if (!target) return
 
-  if (!target.filePath) {
+  // 在线音源（网易云）无本地文件路径，由 PlayerBar 依据 sourceSongId 解析在线地址
+  if (!target.filePath && target.source !== 'netease') {
     message.error('找不到本地文件')
     return
   }
@@ -411,7 +466,9 @@ const handleSongClick = (song: any) => {
   player.setPlaylist(list)
   player.setCurrentSong(target)
 
-  if (/^https?:\/\//.test(target.filePath)) {
+  if (target.source === 'netease') {
+    message.success('正在播放在线音频')
+  } else if (/^https?:\/\//.test(target.filePath || '')) {
     message.success('正在播放在线音频')
   } else {
     message.success('从本地缓存播放')

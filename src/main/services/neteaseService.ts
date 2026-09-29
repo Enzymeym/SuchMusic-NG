@@ -91,6 +91,43 @@ interface WySuggestResponse {
   }
 }
 
+/** 歌单详情的原始结构（仅取用到的字段） */
+interface WyRawPlaylist {
+  id?: number
+  name?: string
+  coverImgUrl?: string
+  description?: string
+  trackCount?: number
+  trackIds?: { id: number }[]
+}
+
+/** 歌单详情接口响应（/playlist/detail） */
+interface WyPlaylistDetailResponse {
+  code: number
+  playlist?: WyRawPlaylist
+}
+
+/** 歌单所有歌曲接口响应（/playlist/track/all） */
+interface WyPlaylistTracksResponse {
+  code: number
+  songs?: WyRawSong[]
+}
+
+/** 用户歌单接口响应（/user/playlist） */
+interface WyUserPlaylistResponse {
+  code: number
+  playlist?: WyRawPlaylist[]
+}
+
+/** 归一化后的歌单摘要（供渲染层列表/导入使用） */
+export interface NeteasePlaylistSummary {
+  id: number
+  name: string
+  cover: string
+  trackCount: number
+  description?: string
+}
+
 /**
  * 归一化原始歌曲结构（兼容搜索接口 artists/album/duration 与歌单接口 ar/al/dt 两套字段）
  */
@@ -305,6 +342,114 @@ async function getSearchSuggest(keywords: string): Promise<string[]> {
   }
 }
 
+// ==================== 歌单拉取 ====================
+
+/** 将原始歌单映射为摘要 */
+function toPlaylistSummary(raw: WyRawPlaylist): NeteasePlaylistSummary {
+  return {
+    id: Number(raw.id) || 0,
+    name: raw.name || '未命名歌单',
+    cover: raw.coverImgUrl || '',
+    trackCount: raw.trackCount ?? raw.trackIds?.length ?? 0,
+    description: raw.description || ''
+  }
+}
+
+/**
+ * 获取歌单详情
+ * @param id 网易云歌单 ID
+ */
+async function getPlaylistDetail(id: number): Promise<NeteasePlaylistSummary | null> {
+  if (!Number.isFinite(id) || id <= 0) return null
+  try {
+    const resp = await netFetch(`${API_BASE}/playlist/detail?id=${id}`, activeAccount()?.cookie)
+    if (!resp.ok) {
+      console.error(`[neteaseService] HTTP ${resp.status} fetching playlist detail ${id}`)
+      return null
+    }
+    const data: WyPlaylistDetailResponse = await resp.json()
+    if (data.code !== 200 || !data.playlist) {
+      console.error(`[neteaseService] API error code ${data.code} fetching playlist detail ${id}`)
+      return null
+    }
+    return toPlaylistSummary(data.playlist)
+  } catch (e) {
+    console.error(`[neteaseService] Failed to fetch playlist detail ${id}:`, e)
+    return null
+  }
+}
+
+/** 单页拉取数量（与接口 limit 上限配合） */
+const PLAYLIST_TRACK_PAGE_SIZE = 500
+/** 安全阈值：避免异常响应导致无限翻页 */
+const PLAYLIST_TRACK_MAX = 20000
+
+/**
+ * 获取歌单全部歌曲（分页拉取并归一化）
+ * @param id 网易云歌单 ID
+ */
+async function getPlaylistTracks(id: number): Promise<NeteaseSong[]> {
+  if (!Number.isFinite(id) || id <= 0) return []
+  const detail = await getPlaylistDetail(id)
+  const total = detail?.trackCount ?? 0
+  const out: NeteaseSong[] = []
+  let offset = 0
+  try {
+    while (offset < PLAYLIST_TRACK_MAX) {
+      const url =
+        `${API_BASE}/playlist/track/all?id=${id}` +
+        `&limit=${PLAYLIST_TRACK_PAGE_SIZE}&offset=${offset}`
+      const resp = await netFetch(url, activeAccount()?.cookie)
+      if (!resp.ok) {
+        console.error(`[neteaseService] HTTP ${resp.status} fetching playlist tracks ${id}`)
+        break
+      }
+      const data: WyPlaylistTracksResponse = await resp.json()
+      if (data.code !== 200) {
+        console.error(`[neteaseService] API error code ${data.code} fetching playlist tracks ${id}`)
+        break
+      }
+      const songs = data.songs || []
+      out.push(...songs.map(normalizeSong))
+      // 返回不足一页说明已到末尾
+      if (songs.length < PLAYLIST_TRACK_PAGE_SIZE) break
+      offset += PLAYLIST_TRACK_PAGE_SIZE
+      // 已满足详情声明的总数
+      if (total && offset >= total) break
+    }
+    return out
+  } catch (e) {
+    console.error(`[neteaseService] Failed to fetch playlist tracks ${id}:`, e)
+    return out
+  }
+}
+
+/**
+ * 获取当前活跃账号的用户歌单列表
+ * 未登录时返回空数组
+ */
+async function getUserPlaylists(): Promise<NeteasePlaylistSummary[]> {
+  const account = activeAccount()
+  if (!account?.userId) return []
+  try {
+    const url = `${API_BASE}/user/playlist?uid=${encodeURIComponent(account.userId)}&limit=1000`
+    const resp = await netFetch(url, account.cookie)
+    if (!resp.ok) {
+      console.error(`[neteaseService] HTTP ${resp.status} fetching user playlists`)
+      return []
+    }
+    const data: WyUserPlaylistResponse = await resp.json()
+    if (data.code !== 200) {
+      console.error(`[neteaseService] API error code ${data.code} fetching user playlists`)
+      return []
+    }
+    return (data.playlist || []).map(toPlaylistSummary).filter((p) => p.id > 0)
+  } catch (e) {
+    console.error('[neteaseService] Failed to fetch user playlists:', e)
+    return []
+  }
+}
+
 // ==================== 登录状态与多账号管理 ====================
 
 /** 网易云登录用户信息（渲染层展示用，含 VIP 与等级） */
@@ -355,11 +500,40 @@ const BROWSER_HEADERS: Record<string, string> = {
   Referer: 'https://music.163.com'
 }
 
-/** 带浏览器头（及可选 Cookie）的网易云 API 请求 */
-function netFetch(url: string, cookie?: string): Promise<Response> {
+/** 网络层错误的最大请求次数（含首次） */
+const NET_FETCH_ATTEMPTS = 3
+
+/** 判断是否为可重试的网络层错误（连接超时/中断等，非 HTTP 错误状态） */
+function isRetriableNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const causeCode = (error as { cause?: { code?: string } }).cause?.code
+  if (causeCode && String(causeCode).startsWith('UND_ERR')) return true
+  return error.name === 'TypeError' || error.name === 'AbortError' || error.name === 'TimeoutError'
+}
+
+/**
+ * 带浏览器头（及可选 Cookie）的网易云 API 请求
+ * 通过代理/TUN 访问时连接可能较慢，undici 默认 10s 连接超时偶发触发，
+ * 因此对网络层错误做有限次重试（GET 请求幂等，重试安全）
+ */
+async function netFetch(url: string, cookie?: string): Promise<Response> {
   const headers: Record<string, string> = { ...BROWSER_HEADERS }
   if (cookie) headers['Cookie'] = cookie
-  return fetch(url, { headers })
+
+  let lastError: unknown
+  for (let attempt = 0; attempt < NET_FETCH_ATTEMPTS; attempt++) {
+    try {
+      return await fetch(url, { headers })
+    } catch (error) {
+      lastError = error
+      if (!isRetriableNetworkError(error) || attempt === NET_FETCH_ATTEMPTS - 1) break
+      console.warn(
+        `[neteaseService] 请求失败，正在重试 (${attempt + 1}/${NET_FETCH_ATTEMPTS - 1}): ${url}`
+      )
+      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)))
+    }
+  }
+  throw lastError
 }
 
 /** 将账号转为渲染层可见的 profile */
@@ -775,5 +949,17 @@ export function registerNeteaseHandlers(): void {
 
   ipcMain.handle('netease:logout', async (_event, userId?: string) => {
     await logout(userId)
+  })
+
+  ipcMain.handle('netease:playlist-detail', async (_event, id: number) => {
+    return getPlaylistDetail(Number(id))
+  })
+
+  ipcMain.handle('netease:playlist-tracks', async (_event, id: number) => {
+    return getPlaylistTracks(Number(id))
+  })
+
+  ipcMain.handle('netease:user-playlists', async () => {
+    return getUserPlaylists()
   })
 }

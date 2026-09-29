@@ -20,11 +20,13 @@
 import { usePlayerStore } from '../stores/playerStore'
 import type { PlayerSong } from '../stores/playerStore'
 import { useSettingsStore } from '../stores/settingsStore'
+import { getFirstLyricLineStartSec } from '../utils/lyric/lyricParser'
 import { audioEngine } from './audio-engine'
 import {
   BPM_ANALYSIS_WINDOW_SEC,
   BEAT_TRIGGER_MARGIN_MS,
   CONTENT_ANALYSIS_SEC,
+  STRETCH_APPLY_SEC,
   STRETCH_HEAD_SEC,
   TAIL_ANALYSIS_SEC,
   analyzeContentStartAsync,
@@ -32,7 +34,6 @@ import {
   analyzeTail,
   computeTransitionPlan,
   estimateBpm,
-  pitchShiftPcmAsync,
   timeStretchPcmAsync
 } from './transition-dsp'
 import type { MusicKey, TailDecay, TransitionPlan } from './transition-dsp'
@@ -43,6 +44,7 @@ const PRELOAD_READ_TIMEOUT_MS = 10000
 const PRELOAD_DECODE_TIMEOUT_MS = 15000
 /** 触发点时间预算（毫秒）：距最晚触发点不足该值时下一曲仍未就绪则放弃预解码，走常规硬切 */
 const TRIGGER_GUARD_MS = 10000
+
 
 /** 为 Promise 加超时：超时 reject（调用方 catch 降级），避免挂起的异步调用阻塞过渡流程 */
 const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
@@ -71,7 +73,7 @@ interface ReadAudioFileResult {
 
 /** 安全默认值（分析失败时使用，保证过渡流程不中断） */
 const EMPTY_ANALYSIS: CurrentAnalysis = {
-  tail: { peakRms: 0, decayStartSec: -1, decayRate: 0 },
+  tail: { peakRms: 0, decayStartSec: -1, decayRate: 0, onsets: [] },
   bpm: 0,
   key: null
 }
@@ -306,11 +308,41 @@ export class TransitionController {
       // 下一曲头部特征：节奏（BPM）/ 调性（Key）/ 前奏偏移（内容起点），并行计算
       const headSec = Math.min(STRETCH_HEAD_SEC, channel.length / sampleRate)
       const headSlice = channel.slice(0, Math.floor(headSec * sampleRate))
-      const [nextBpm, nextKey, contentStartSec] = await Promise.all([
+      const [nextBpm, nextKey] = await Promise.all([
         estimateBpm(channel, sampleRate, 0, headSec),
-        analyzeKeyAsync(headSlice, sampleRate, headSec),
-        analyzeContentStartAsync(headSlice, sampleRate, CONTENT_ANALYSIS_SEC)
+        analyzeKeyAsync(headSlice, sampleRate, headSec)
       ])
+      if (!this.active || this.trackId !== targetTrackId) return
+
+      // 下一曲歌词预取：prepareNext 时 next.lyrics 通常尚未加载（歌词在切歌后才拉取），
+      // 若为空则按网易云 ID / 标题歌手在线获取，否则内容起点只能靠音频检测而落不到首句。
+      const nextLyrics = next.lyrics || (await this.fetchNextLyrics(next))
+      if (nextLyrics && !next.lyrics) next.lyrics = nextLyrics
+
+      // 下一曲"内容起点"（跳过前奏、落在开始演唱处）
+      // 歌词首句时间仅在与音频检测的有声起点接近时被信任（歌词优先）；
+      // 个别曲目歌词时间戳过早/无歌词时，以音频人声/能量起点为准，避免落在演唱之前。
+      const lyricStartSec = getFirstLyricLineStartSec(nextLyrics, next.title)
+      const audioStartSec = await analyzeContentStartAsync(
+        headSlice,
+        sampleRate,
+        CONTENT_ANALYSIS_SEC
+      )
+      let contentStartSec: number
+      if (lyricStartSec > 0 && lyricStartSec <= STRETCH_HEAD_SEC) {
+        // 有有效歌词时以"首句歌词"对齐为落点（歌词优先）。
+        // 不再用音频起点向上钳制：音频的"人声跃升"检测常因首句演唱
+        // 能量/人声频段占比未明显突破阈值而漏检、落在第二句，导致过渡
+        // 直接跳到第二句开始。仅歌词缺失时才退化为音频能量起点。
+        contentStartSec = lyricStartSec
+      } else {
+        // 无有效歌词（或首句超窗）时，退化为音频人声/能量起点
+        contentStartSec = audioStartSec
+      }
+      console.log(
+        '[TransitionController] 下一曲内容起点',
+        { title: next.title, audioStartSec, lyricStartSec, contentStartSec }
+      )
       if (!this.active || this.trackId !== targetTrackId) return
 
       // 等待当前曲分析就绪（与上一首预解码并行；失败时为安全默认值）
@@ -362,17 +394,48 @@ export class TransitionController {
   }
 
   /**
-   * 对下一曲开头 STRETCH_HEAD_SEC 秒做节奏/调性对齐（WSOLA 变速 + 相位声码器变调），
-   * 其余部分原速原调拼接，避免整曲处理耗时阻塞过渡。
+   * 预取下一首歌词文本（主歌词）
+   * 歌词通常在歌曲成为当前曲后才拉取，预解码阶段 next.lyrics 多为空，
+   * 这里按来源补拉：网易云曲目用 sourceSongId，其余用"标题 + 歌手"在线匹配。
+   * @returns 主歌词文本（无/失败返回空串）
+   */
+  private async fetchNextLyrics(next: PlayerSong): Promise<string> {
+    try {
+      if (
+        (next.source === 'wy' || next.source === 'netease') &&
+        next.sourceSongId != null
+      ) {
+        const result = await window.electron.ipcRenderer.invoke(
+          'lyric:fetch-wy',
+          String(next.sourceSongId)
+        )
+        return (result as { lyrics?: string } | null)?.lyrics || ''
+      }
+      if (next.title) {
+        const result = await window.electron.ipcRenderer.invoke('lyric:fetch-local', {
+          title: next.title,
+          artist: next.artist || ''
+        })
+        return (result as { lyrics?: string } | null)?.lyrics || ''
+      }
+    } catch (e) {
+      console.warn('[TransitionController] 预取下一首歌词失败:', e)
+    }
+    return ''
+  }
+
+  /**
+   * 对下一曲开头 STRETCH_APPLY_SEC 秒做节奏对齐（仅 WSOLA 变速，不变调），
+   * 其余部分原速拼接，避免整曲处理耗时阻塞过渡，也让变速影响在几秒内结束。
+   * 变速会改变音高走向，故这里只变速速度、不做变调，保证人声/调性听感尽量自然。
    */
   private async alignNextAudio(plan: TransitionPlan): Promise<void> {
     const src = audioEngine.nextAudioBuffer
     if (!src) return
     const needsStretch = Math.abs(plan.stretchRatio - 1) >= 0.01
-    const needsPitch = plan.pitchShiftSemitones !== 0
-    if (!needsStretch && !needsPitch) return
+    if (!needsStretch) return
 
-    const headLen = Math.min(src.length, Math.floor(STRETCH_HEAD_SEC * src.sampleRate))
+    const headLen = Math.min(src.length, Math.floor(STRETCH_APPLY_SEC * src.sampleRate))
     const headOutLen = Math.round(headLen * plan.stretchRatio)
     const out = new AudioBuffer({
       numberOfChannels: src.numberOfChannels,
@@ -382,14 +445,12 @@ export class TransitionController {
 
     for (let ch = 0; ch < src.numberOfChannels; ch++) {
       const srcData = src.getChannelData(ch)
-      // 拷贝头部到独立缓冲（避免时间拉伸/变调污染播放缓冲；typed array 泛型统一为 ArrayBuffer）
+      // 拷贝头部到独立缓冲（避免时间拉伸污染播放缓冲；typed array 泛型统一为 ArrayBuffer）
       let head: Float32Array<ArrayBuffer> = srcData.slice(0, headLen)
-      if (needsStretch) head = new Float32Array(await timeStretchPcmAsync(head, plan.stretchRatio))
-      if (needsPitch)
-        head = new Float32Array(await pitchShiftPcmAsync(head, plan.pitchShiftSemitones))
+      head = new Float32Array(await timeStretchPcmAsync(head, plan.stretchRatio))
       const outCh = out.getChannelData(ch)
       outCh.set(head.subarray(0, Math.min(head.length, out.length)), 0)
-      // 尾部原速原调拼接
+      // 尾部原速拼接
       const tailLen = Math.min(src.length - headLen, out.length - head.length)
       if (tailLen > 0) outCh.set(srcData.subarray(headLen, headLen + tailLen), head.length)
     }
@@ -403,7 +464,15 @@ export class TransitionController {
     this.player.setTransitioning(true)
 
     const fadeMs = this.plan.transitionDurationMs
-    const ok = audioEngine.beginCrossfade(fadeMs, this.plan.startOffsetMs)
+    // 让"首句歌词开始"落在交叉淡化中段、两曲音量大致持平的感知接管点，
+    // 而不是淡入起点或淡出尾端：
+    // - 从淡入起点就播首句：首句在低音量淡入期被"吃掉"，淡完后已是首句结尾；
+    // - 退回整段 fadeMs：又会在淡出期提前暴露一大段前奏，显得过早。
+    // 对称线性交叉淡化在约 50% 时长处两曲等响，理论中点为一半淡入时长，
+    // 取 0.44 为折中（首句贴近淡出期、前奏暴露适中）。
+    const backoffMs = Math.round(fadeMs * 0.44)
+    const effectiveOffsetMs = Math.max(0, this.plan.startOffsetMs - backoffMs)
+    const ok = audioEngine.beginCrossfade(fadeMs, effectiveOffsetMs)
     if (!ok) {
       // 预解码失败或引擎不可用：回退到常规切歌路径
       this.rollback()

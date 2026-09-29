@@ -12,6 +12,15 @@ export interface NeteaseSong {
   source: 'netease'
 }
 
+/** 网易云歌单摘要（导入列表用） */
+export interface NeteasePlaylistSummary {
+  id: number
+  name: string
+  cover: string
+  trackCount: number
+  description?: string
+}
+
 /** 网易云登录用户信息（含 VIP 与等级） */
 export interface NeteaseLoginProfile {
   nickname: string
@@ -119,6 +128,9 @@ declare global {
           activeUserId: string
         }>
         logout: (userId?: string) => Promise<void>
+        playlistDetail: (id: number) => Promise<NeteasePlaylistSummary | null>
+        playlistTracks: (id: number) => Promise<NeteaseSong[]>
+        userPlaylists: () => Promise<NeteasePlaylistSummary[]>
       }
       cache: {
         getInfo: () => Promise<{

@@ -771,7 +771,7 @@ watch(
   () => {
     // 使用与应用歌词页一致的解析器，兼容 LRC / YRC / 纯文本等多种格式
     const lyrics = player.currentSong?.lyrics
-    hoveredLyricLines.value = lyrics ? parseLyricsToCore(lyrics) : []
+    hoveredLyricLines.value = lyrics ? parseLyricsToCore(lyrics, undefined, player.currentSong?.title) : []
   },
   { immediate: true }
 )

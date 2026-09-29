@@ -1,6 +1,7 @@
 import { ref, computed, watch } from 'vue'
 import { usePlayerStore } from '../../../stores/playerStore'
 import { useSettingsStore } from '../../../stores/settingsStore'
+import { parseLyricsToCore } from '../../../utils/lyric/lyricParser'
 
 /**
  * 歌词相关的组合式函数
@@ -22,8 +23,19 @@ export function usePlayerLyrics() {
     return player.currentSong?.lyrics || ''
   })
 
-  // 是否含有有效歌词（去除空白后判断）
-  const hasLyrics = computed(() => lyricsData.value.trim().length > 0)
+  // 是否含有"有效"歌词（过滤署名/纯音乐/歌名占位行后仍有实际歌词才视为有）
+  // 过滤后为空则不显示歌词区域
+  const hasLyrics = computed(() => {
+    const raw = player.currentSong?.lyrics || ''
+    if (!raw.trim()) return false
+    return (
+      parseLyricsToCore(
+        raw,
+        player.currentSong?.translatedLyrics,
+        player.currentSong?.title
+      ).length > 0
+    )
+  })
 
   // 翻译歌词数据
   const translatedLyricsData = computed(() => {

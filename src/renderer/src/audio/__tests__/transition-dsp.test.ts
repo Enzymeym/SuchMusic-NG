@@ -24,8 +24,7 @@ import {
   pitchShiftPcmAsync,
   SILENCE_THRESHOLD,
   MIN_TRANSITION_MS,
-  MAX_TRANSITION_MS,
-  TAIL_ANALYSIS_SEC
+  MAX_TRANSITION_MS
 } from '../transition-dsp'
 import type { MusicKey } from '../transition-dsp'
 
@@ -273,8 +272,10 @@ describe('智能过渡计划', () => {
     expect(plan.stretchRatio).toBe(1)
   })
 
-  it('触发点：无衰减时取结尾窗口起点，有时取衰减起点并收敛到窗口内', () => {
-    // 有衰减：触发点 = 衰减起点
+  it('触发点：贴近结尾触发，天然衰减起点距结尾过远时不采纳', () => {
+    // duration=240s、userMs=3000 → 最晚合法点 = 240000-3000-1200 = 235800ms
+    // baseTail 衰减起点 226s（=226000ms）早于 earliest(235800-3000=232800)，
+    // 视为过早，触发点回落到最晚合法点，避免两曲长时间叠放
     const plan = computeTransitionPlan({
       durationMs: 240000,
       tail: baseTail,
@@ -285,9 +286,9 @@ describe('智能过渡计划', () => {
       contentStartSec: 0,
       userTransitionMs: 3000
     })
-    expect(plan.triggerMs).toBe(226000)
+    expect(plan.triggerMs).toBe(235800)
 
-    // 无衰减：触发点 = 结尾 TAIL_ANALYSIS_SEC 窗口起点
+    // 无衰减：触发点 = 最晚合法点（接近结尾，而非结尾前 30s 窗口起点）
     const plan2 = computeTransitionPlan({
       durationMs: 240000,
       tail: { peakRms: 0.6, decayStartSec: -1, decayRate: 0 },
@@ -298,7 +299,23 @@ describe('智能过渡计划', () => {
       contentStartSec: 0,
       userTransitionMs: 3000
     })
-    expect(plan2.triggerMs).toBe(240000 - TAIL_ANALYSIS_SEC * 1000)
+    expect(plan2.triggerMs).toBe(235800)
+  })
+
+  it('触发点：天然衰减起点距结尾足够近时采纳衰减起点', () => {
+    // duration=240s、userMs=5000 → 最晚合法点 = 240000-5000-1200 = 233800ms，
+    // earliest = 233800-5000 = 228800ms；衰减起点 230s 落在 [228800,233800] 内 → 采纳
+    const plan = computeTransitionPlan({
+      durationMs: 240000,
+      tail: { peakRms: 0.8, decayStartSec: 230, decayRate: 0.1 },
+      currentBpm: 120,
+      nextBpm: 120,
+      currentKey: null,
+      nextKey: null,
+      contentStartSec: 0,
+      userTransitionMs: 5000
+    })
+    expect(plan.triggerMs).toBe(230000)
   })
 
   it('过渡时长：随质量缩放且不超剩余时间，恒在合法区间', () => {

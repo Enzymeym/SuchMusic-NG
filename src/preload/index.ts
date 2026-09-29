@@ -522,7 +522,10 @@ const api = {
     loginQrCheck: (unikey: string) => ipcRenderer.invoke('netease:login-qr-check', unikey),
     loginStatus: () => ipcRenderer.invoke('netease:login-status'),
     switchAccount: (userId: string) => ipcRenderer.invoke('netease:switch-account', userId),
-    logout: (userId?: string) => ipcRenderer.invoke('netease:logout', userId)
+    logout: (userId?: string) => ipcRenderer.invoke('netease:logout', userId),
+    playlistDetail: (id: number) => ipcRenderer.invoke('netease:playlist-detail', id),
+    playlistTracks: (id: number) => ipcRenderer.invoke('netease:playlist-tracks', id),
+    userPlaylists: () => ipcRenderer.invoke('netease:user-playlists')
   },
 
   // 在线音频缓存（缓存目录管理 / 统计 / 清理）

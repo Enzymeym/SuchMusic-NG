@@ -18,3 +18,5 @@ src/renderer/src/utils/supabase.ts
 docs
 .dbg
 .pnpm-fresh-store
+.pnpm-store
+tmp-tags

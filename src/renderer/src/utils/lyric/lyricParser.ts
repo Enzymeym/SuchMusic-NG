@@ -9,6 +9,49 @@ import { parseLrc as parseBetterLrc } from './ParseLrc'
 const METADATA_HEADER_REGEX = /^\[(ti|ar|al|by|offset|kana|roma):/
 
 /**
+ * 署名占位行匹配正则：过滤「作词：/作曲：/编曲：」等 AI 生成曲的署名声明行，
+ * 以及单字「词：/曲：」、歌名/歌曲名占位行（如「歌名：xxxx」「歌曲名：xxxx」）。
+ * 这类行整行通常是署名信息而非实际歌词内容（如「作词：xxx 作曲：xxx」）。
+ */
+const ATTRIBUTION_LINE_REGEX =
+  /^(?:作词|作曲|词曲|曲作|编曲|混音|演唱|原唱|作词人|作曲人|制作人|出品|OP|歌名|歌曲名|歌曲|词|曲)\s*[:：]/
+
+/**
+ * 判断一行歌词是否为"署名/占位行"（作词/作曲/编曲/纯音乐/歌名等）
+ * @param text 单行歌词文本（去除时间戳后的内容）
+ */
+export function isAttributionLyric(text: string): boolean {
+  const t = text.trim()
+  if (!t) return false
+  if (ATTRIBUTION_LINE_REGEX.test(t)) return true
+  // 纯音乐占位行（整行无实际唱词）
+  return t.includes('纯音乐')
+}
+
+/**
+ * 判断一行歌词是否为"歌名占位行"：与歌曲名相同，或以歌曲名为前缀、后跟破折号/括号后缀
+ * （如「歌名-歌曲名」「歌名(降调版)」）。忽略空格与标点做归一化比较。
+ * 用于去除 AI 生成曲开头重复/组合歌曲名的那几句。
+ * @param text 单行歌词文本
+ * @param title 歌曲名
+ */
+export function isTitleLyricLine(text: string, title?: string): boolean {
+  if (!title) return false
+  const t = text.trim()
+  if (!t) return false
+  const norm = (s: string) => s.replace(/[\s·..——\-—()（）《》「」『』"'“”]/g, '')
+  const nt = norm(title)
+  if (!nt) return false
+  if (norm(t) === nt) return true
+  // 以歌名为前缀且紧跟破折号/括号/斜杠等分隔符的「歌名-xxx」形式
+  if (t.startsWith(title)) {
+    const after = t.slice(title.length).trimStart()
+    return /^[-—/\\|·（(《「『"“]/.test(after)
+  }
+  return false
+}
+
+/**
  * YRC JSON 元数据行匹配正则
  * 网易云 YRC 内容可能包含 {"t":毫秒,"c":[...]} 格式的歌曲元信息（作曲、编曲等）
  */
@@ -33,6 +76,20 @@ export function stripLyricMetadata(content: string): string {
     return true
   })
   return cleanedLines.join('\n')
+}
+
+/**
+ * 获取首句"有效歌词"开始时间（秒）
+ * 跳过空行与署名/占位行（作词/作曲/编曲/纯音乐/歌名等，已在解析时过滤），
+ * 以及重复歌曲名那一句，返回实际有歌词内容的第一行时间点；无有效歌词时返回 0。
+ * 用于智能过渡把下一曲的落点对齐到首句歌词开始处。
+ * @param content 歌词原始文本
+ * @param title 歌曲名（用于去掉开头重复歌名那句，可选）
+ */
+export function getFirstLyricLineStartSec(content: string, title?: string): number {
+  if (!content) return 0
+  const lines = parseLyricsToCore(content, undefined, title)
+  return lines.length > 0 ? lines[0].startTime / 1000 : 0
 }
 
 /**
@@ -197,7 +254,11 @@ function parseYrcCustom(content: string): CoreLyricLine[] {
  * @param translatedContent 翻译歌词文本（LRC 格式，可选）
  * @returns 包含翻译信息的 CoreLyricLine 数组
  */
-export function parseLyricsToCore(content: string, translatedContent?: string): CoreLyricLine[] {
+export function parseLyricsToCore(
+  content: string,
+  translatedContent?: string,
+  title?: string
+): CoreLyricLine[] {
   if (!content) return []
 
   let lrc = typeof content === 'string' ? content : String(content)
@@ -305,7 +366,14 @@ export function parseLyricsToCore(content: string, translatedContent?: string): 
       isDuet: line.isDuet ?? false
     }))
 
-    return mergeTranslatedLyrics(coreLines, translatedContent)
+    // 逐字歌词（YRC 等）需把整行所有词拼接后判断，仅看首词会漏掉署名/占位行
+    const lineTextOf = (line: CoreLyricLine): string =>
+      (line.words ?? []).map((w) => w.word).join('')
+
+    return mergeTranslatedLyrics(coreLines, translatedContent).filter(
+      (line) =>
+        !isAttributionLyric(lineTextOf(line)) && !isTitleLyricLine(lineTextOf(line), title)
+    )
   } catch (e) {
     console.error('Lyric parse failed:', e)
     return []

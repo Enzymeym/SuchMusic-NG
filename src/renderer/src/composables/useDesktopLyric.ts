@@ -34,7 +34,7 @@ export function useDesktopLyric() {
     if (!isDesktopLyricOpen.value) return
     const lyricsContent = player.currentSong?.lyrics || ''
     const translatedContent = player.currentSong?.translatedLyrics || ''
-    const parsed = parseLyricsToCore(lyricsContent, translatedContent)
+    const parsed = parseLyricsToCore(lyricsContent, translatedContent, player.currentSong?.title)
     window.electron.ipcRenderer.send('desktop-lyric:set-lyrics', parsed)
     
     // Also update info

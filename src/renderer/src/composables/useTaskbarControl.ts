@@ -62,7 +62,7 @@ export function useTaskbarControl() {
     () => {
       const song = playerStore.currentSong
       if (!song) return
-      const parsed = parseLyricsToCore(song.lyrics || '', song.translatedLyrics || '')
+      const parsed = parseLyricsToCore(song.lyrics || '', song.translatedLyrics || '', song.title)
       window.electron.ipcRenderer.send('taskbar-control:set-lyrics', parsed)
       // 歌曲切换时与歌词瞬间可能滞后于进度，立即补发当前进度，保证歌词/信息同步
       window.electron.ipcRenderer.send('taskbar-control:set-progress', {

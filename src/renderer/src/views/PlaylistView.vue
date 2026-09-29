@@ -17,6 +17,20 @@
             </template>
             新建歌单
           </n-button>
+          <n-button
+            secondary
+            style="padding: 0 16px; font-size: 15px;"
+            size="large"
+            round
+            @click="showImportModal = true"
+          >
+            <template #icon>
+              <n-icon size="16">
+                <i class="mgc_download_3_line"></i>
+              </n-icon>
+            </template>
+            导入歌单
+          </n-button>
           <n-button secondary strong circle size="large" @click="refreshPlaylist">
             <template #icon>
               <n-icon size="20">
@@ -63,6 +77,8 @@
         <n-button type="primary" @click="handleConfirmCreate">确定</n-button>
       </template>
     </n-modal>
+
+    <NeteasePlaylistImportModal v-model:show="showImportModal" @imported="handleImported" />
   </div>
 </template>
 
@@ -72,6 +88,7 @@ import { useRouter } from 'vue-router'
 import { NButton, NIcon, NInput, NScrollbar, NModal, useMessage } from 'naive-ui'
 import { usePlayerStore } from '../stores/playerStore'
 import { usePlaylistStore, type UserPlaylist } from '../stores/playlistStore'
+import NeteasePlaylistImportModal from '../components/common/NeteasePlaylistImportModal.vue'
 import defaultCover from '@renderer/assets/default-cover.png'
 
 const router = useRouter()
@@ -83,6 +100,7 @@ const searchKeyword = ref('')
 const loading = ref(false)
 const selectedId = ref<string | null>(null)
 const showCreateModal = ref(false)
+const showImportModal = ref(false)
 const createMode = ref<'empty' | 'queue'>('empty')
 const newPlaylistName = ref('')
 
@@ -146,6 +164,11 @@ const handlePlayPlaylist = (id: string) => {
 const refreshPlaylist = (): void => {
   playlistStore.loadFromStorage()
   message.success('歌单已从本地存储重新加载')
+}
+
+// 导入成功后定位到新歌单（不自动跳转，避免批量导入时连续跳转）
+const handleImported = (pl: UserPlaylist): void => {
+  selectedId.value = pl.id
 }
 
 const createEmptyPlaylist = (): void => {

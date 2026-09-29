@@ -26,6 +26,12 @@ export interface UserPlaylist {
   titleFontFamily?: 'default' | 'serif'
   /** 封面是否跟随第一首歌曲封面，为 true 时忽略 cover 字段自动使用第一首歌曲封面 */
   coverFollowsFirstTrack?: boolean
+  /** 导入来源平台标识（如 netease），本地自建歌单为空 */
+  source?: 'netease'
+  /** 导入来源的网易云歌单 ID（用于「重新同步」） */
+  sourcePlaylistId?: number
+  /** 最近一次同步时间戳 */
+  lastSyncedAt?: number
 }
 
 interface PlaylistState {
@@ -202,6 +208,64 @@ export const usePlaylistStore = defineStore('playlist', {
       this.playlists.unshift(playlist)
       this.saveToStorage()
       return playlist
+    },
+    /**
+     * 从网易云歌单导入为本地歌单（一次性快照）
+     * @param payload 歌单名称、封面、描述、来源歌单 ID 与曲目
+     * @returns 新建的歌单对象
+     */
+    importPlaylistFromNetease(payload: {
+      name: string
+      cover?: string
+      description?: string
+      sourcePlaylistId: number
+      tracks: PlaylistTrack[]
+    }): UserPlaylist {
+      const playlist = this.createPlaylistFromTracks(
+        payload.name,
+        payload.tracks,
+        payload.cover
+      )
+      playlist.source = 'netease'
+      playlist.sourcePlaylistId = payload.sourcePlaylistId
+      playlist.lastSyncedAt = Date.now()
+      const description = payload.description?.trim()
+      if (description) {
+        playlist.description = description
+      }
+      this.saveToStorage()
+      return playlist
+    },
+    /**
+     * 以网易云最新曲目覆盖本地歌单（仅限导入来源为网易云的歌单）
+     * @param id 本地歌单 ID
+     * @param payload 最新名称、封面、描述与曲目
+     * @returns 是否同步成功（歌单不存在或非网易云来源时返回 false）
+     */
+    syncPlaylistFromNetease(
+      id: string,
+      payload: {
+        name: string
+        cover?: string
+        description?: string
+        tracks: PlaylistTrack[]
+      }
+    ): boolean {
+      const index = this.playlists.findIndex((p) => p.id === id)
+      if (index === -1 || this.playlists[index].source !== 'netease') return false
+
+      const current = this.playlists[index]
+      this.playlists.splice(index, 1, {
+        ...current,
+        name: payload.name,
+        cover: payload.cover,
+        description: payload.description ?? current.description,
+        tracks: payload.tracks,
+        updatedAt: Date.now(),
+        lastSyncedAt: Date.now()
+      })
+      this.saveToStorage()
+      return true
     },
     updatePlaylist(playlist: UserPlaylist): void {
       // 保护“我喜爱的音乐”不被重命名或修改ID
