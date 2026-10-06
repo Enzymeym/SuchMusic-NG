@@ -21,14 +21,20 @@ const props = defineProps<{
 const playerStore = usePlayerStore()
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 
+// 频谱柱数量：64 根已足够铺满视觉宽度，相比 128 根显著降低逐帧计算与绘制开销
+const BAR_COUNT = 64
+/** 渲染帧间隔（ms）：限制到 ~30fps，降低可视化对 CPU/GPU 的持续占用 */
+const FRAME_INTERVAL = 1000 / 30
+
 let animationId: number | null = null
 let ctx: CanvasRenderingContext2D | null = null
-let smoothedData = new Float32Array(128)
-let rawSpectrum = new Float32Array(128)
+let smoothedData = new Float32Array(BAR_COUNT)
+let rawSpectrum = new Float32Array(BAR_COUNT)
 let fftCleanup: (() => void) | null = null
 let isUnmounted = false
 let isVisible = true
 let observer: IntersectionObserver | null = null
+let lastRenderTime = 0
 
 // 缓存的主题色 RGB
 let cachedAccentR = 255
@@ -39,7 +45,6 @@ let accentColorFrameCounter = 0
 // 预计算柱状图坐标
 let barPositions: number[] = []
 let barWidth = 0
-const BAR_COUNT = 128
 let canvasW = 0
 let canvasH = 0
 let maxBarHeight = 0
@@ -59,7 +64,7 @@ function updateAccentColor(): void {
 }
 
 function setupCanvas(canvas: HTMLCanvasElement, size: number): void {
-  const dpr = Math.min(window.devicePixelRatio || 1, 1.5)
+  const dpr = Math.min(window.devicePixelRatio || 1, 1)
   const parent = canvas.parentElement
   if (!parent) return
 
@@ -135,6 +140,14 @@ function renderFrame(): void {
     animationId = null
     return
   }
+
+  // 限制到约 30fps：未到间隔则跳过本帧绘制（仍继续调度），降低 CPU/GPU 占用
+  const now = performance.now()
+  if (now - lastRenderTime < FRAME_INTERVAL) {
+    animationId = requestAnimationFrame(renderFrame)
+    return
+  }
+  lastRenderTime = now
 
   accentColorFrameCounter++
   if (accentColorFrameCounter >= 60) {

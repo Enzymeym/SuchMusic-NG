@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { NCard, NSwitch, NSlider, NSelect, NButton, NButtonGroup, NAlert, NSpace, NInputNumber } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import SettingsMorphaeumSection from './SettingsMorphaeumSection.vue'
@@ -228,14 +228,22 @@ const props = defineProps<{
 
 // 任务栏对齐方式：居中时才显示「预留小组件入口」开关
 const taskbarAlign = ref<'center' | 'left'>('center')
+
+/** 任务栏对齐变化监听（命名函数，便于卸载时精确移除，避免设置页反复打开累积监听器） */
+const handleTaskbarAlign = (_: unknown, align: 'center' | 'left'): void => {
+  if (align) taskbarAlign.value = align
+}
+
 onMounted(() => {
   // 先查询当前对齐方式，再监听变化
   window.electron.ipcRenderer.invoke('taskbar-control:get-align').then((align: 'center' | 'left') => {
     if (align) taskbarAlign.value = align
   })
-  window.electron.ipcRenderer.on('taskbar-control:set-align', (_, align: 'center' | 'left') => {
-    if (align) taskbarAlign.value = align
-  })
+  window.electron.ipcRenderer.on('taskbar-control:set-align', handleTaskbarAlign)
+})
+
+onBeforeUnmount(() => {
+  window.electron.ipcRenderer.removeListener('taskbar-control:set-align', handleTaskbarAlign)
 })
 </script>
 

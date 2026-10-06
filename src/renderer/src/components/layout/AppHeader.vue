@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, watch, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { NInput, NIcon, NButton, NDivider, useDialog, NPopover, NScrollbar, useThemeVars, NImage, NSpin, useMessage, NAvatar, NText, NTag } from 'naive-ui'
 
@@ -8,7 +8,8 @@ const props = defineProps<{
 }>()
 
 const themeVars = useThemeVars()
-import SettingsModal from '../common/SettingsModal.vue'
+// 设置弹窗内容庞大，改为按需加载，仅在打开设置时拉取
+const SettingsModal = defineAsyncComponent(() => import('../common/SettingsModal.vue'))
 import { useSettingsStore } from '../../stores/settingsStore'
 import { usePlayerStore } from '../../stores/playerStore'
 import { usePlaylistStore } from '../../stores/playlistStore'

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { NCard, NIcon, useThemeVars, NAlert, NSpin, NButton, NProgress, NTag, useMessage, NModal, NScrollbar } from 'naive-ui'
+import { NCard, NIcon, useThemeVars, NAlert, NSpin, NButton, NProgress, NTag, useMessage } from 'naive-ui'
 import MarkdownIt from 'markdown-it'
 import { full as emoji } from 'markdown-it-emoji'
 import markdownItGitHubAlerts from 'markdown-it-github-alerts'
@@ -10,12 +10,17 @@ import 'markdown-it-github-alerts/styles/github-base.css'
 import axios, { type AxiosError } from 'axios'
 import { useUpdater } from '../../../composables/useUpdater'
 import { useSettingsStore } from '../../../stores/settingsStore'
-import LegalTexts from '../LegalTexts.vue'
 
 // 主题变量，用于控制关于页颜色与玻璃卡片样式
 const themeVars = useThemeVars()
 const message = useMessage()
 const settingsStore = useSettingsStore()
+
+// 卡片背景色与边框色由父级设置弹窗统一注入，保证与其它设置分区观感一致
+defineProps<{
+  settingItemBgColor: string
+  settingItemBorderColor: string
+}>()
 
 // 使用更新系统 composable
 const {
@@ -73,7 +78,6 @@ try {
 
 // 应用名称固定显示为产品名 Such Music（package.json 的 name 字段为内部包名，不用于展示）
 const appName = 'Such Music'
-const appDescription = __APP_DESCRIPTION__
 // 优先使用注入的真实版本号，IPC 未返回时也无需硬编码回退
 const appVersion = computed(() => currentVersion.value || __APP_VERSION__)
 
@@ -97,7 +101,7 @@ const baseVersion = computed(() => {
 })
 
 // 更新日志相关
-const showChangelog = ref(false)
+const changelogExpanded = ref(false)
 const changelogLoading = ref(false)
 const changelogContent = ref('')
 const changelogError = ref('')
@@ -107,19 +111,21 @@ const currentChangelogVersion = ref('')
 const developerInfo = ref<GitHubUser | null>(null)
 const developerLoading = ref(false)
 
-// 法律信息（隐私政策与在线服务声明）弹窗
-const showLegalModal = ref(false)
-
 onMounted(() => {
   fetchChangelog()
   fetchDeveloperInfo()
 })
 
+/** 展开 / 收起更新日志 */
+const toggleChangelog = () => {
+  changelogExpanded.value = !changelogExpanded.value
+}
+
 /**
  * 处理检查更新按钮点击
  */
 const handleCheckUpdate = async () => {
-  const result = await checkUpdate(settingsStore.general.updateChannel)
+  const result = await checkUpdate(settingsStore.general.updateChannel, { autoDownload: true })
   if (result?.hasUpdate) {
     message.info(`发现新版本: v${result.latestVersion}`)
   } else if (result && !result.hasUpdate) {
@@ -163,32 +169,55 @@ const fetchDeveloperInfo = async () => {
   }
 }
 
-// 打开 GitHub 项目地址
-const openGithub = () => {
-  const url = 'https://github.com/Enzymeym/SuchMusic-NG'
+/**
+ * 使用外部浏览器打开链接
+ * 优先使用 Electron shell，否则回退到浏览器新标签页
+ */
+const openExternal = (url: string) => {
   if ((window as any).electron?.shell) {
     ; (window as any).electron.shell.openExternal(url)
   } else {
     window.open(url, '_blank')
   }
+}
+
+// 打开 GitHub 项目地址
+const openGithub = () => {
+  openExternal('https://github.com/Enzymeym/SuchMusic-NG')
 }
 
 /**
  * 打开赞助页面链接
- * 优先使用 Electron shell 打开外部链接，否则使用浏览器新标签页打开
  */
 const openSponsor = () => {
-  const url = 'https://ifdian.net/a/enzymeym?tab=home'
-  if ((window as any).electron?.shell) {
-    ; (window as any).electron.shell.openExternal(url)
-  } else {
-    window.open(url, '_blank')
-  }
+  openExternal('https://ifdian.net/a/enzymeym?tab=home')
 }
+
+// 特别鸣谢：对本项目提供了关键支持的开源项目，点击卡片可跳转对应仓库
+interface ThanksItem {
+  name: string
+  desc: string
+  url: string
+  icon: string
+}
+
+const thanksList: ThanksItem[] = [
+  {
+    name: 'AMLL',
+    desc: '歌词渲染与流体背景组件',
+    url: 'https://github.com/amll-dev/applemusic-like-lyrics',
+    icon: 'mgc_music_2_line'
+  },
+  {
+    name: 'NeteaseCloudMusicApiEnhanced',
+    desc: '网易云音乐 API 增强版',
+    url: 'https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced',
+    icon: 'mgc_cloud_line'
+  }
+]
 
 // 获取更新日志（从 GitHub Releases 动态获取）
 const fetchChangelog = async () => {
-  showChangelog.value = true
   if (changelogContent.value) return
 
   changelogLoading.value = true
@@ -284,76 +313,78 @@ const renderedChangelog = computed(() => {
 
 <template>
   <div class="settings-content about-root">
-    <div class="about-hero">
-      <img src="../../../assets/icon.png" alt="logo" class="about-logo" />
-      <div class="about-hero-title" title="Such Music">
-        {{ appName }}
-      </div>
-      <div class="about-hero-meta">
-        <n-tag size="small" :bordered="false" round>v{{ baseVersion }}</n-tag>
-        <n-tag v-if="releaseTag" size="small" :bordered="false" round type="warning">{{ releaseTag }}</n-tag>
-      </div>
-      <div v-if="appDescription" class="about-hero-desc">
-        {{ appDescription }}
-      </div>
-      <div class="about-hero-actions">
-        <n-button size="small" secondary @click="openGithub">
-          <template #icon>
-            <n-icon><i class="mgc_github_line" /></n-icon>
-          </template>
-          项目主页
-        </n-button>
-        <n-button size="small" secondary class="about-sponsor-btn" @click="openSponsor">
-          <template #icon>
-            <n-icon><i class="mgc_heart_line" style="color: #d03050" /></n-icon>
-          </template>
-          赞助
-        </n-button>
-        <n-button size="small" type="primary" @click="handleCheckUpdate">
-          <template #icon>
-            <n-icon><i class="mgc_refresh_1_line" /></n-icon>
-          </template>
-          检查更新
-        </n-button>
-      </div>
-
-      <!-- 更新状态卡片 -->
-      <div class="update-status-card" v-if="isUpdateAvailable || isDownloading || isDownloaded || hasError">
-        <div v-if="isChecking" class="update-status-item">
-          <n-spin size="small" />
-          <span>正在检查更新...</span>
-        </div>
-        <div v-else-if="hasError" class="update-status-item update-status-error">
-          <i class="mgc_close_circle_line" />
-          <span>{{ error || '检查更新失败' }}</span>
-          <n-button size="tiny" @click="handleCheckUpdate">重试</n-button>
-        </div>
-        <div v-else-if="isUpdateAvailable && !isDownloading && !isDownloaded" class="update-status-item">
-          <i class="mgc_alert_line" />
-          <span>发现新版本: v{{ updateInfo?.latestVersion }}</span>
-          <n-button size="tiny" type="primary" @click="handleDownloadUpdate">立即下载</n-button>
-        </div>
-        <div v-else-if="isDownloading" class="update-status-item update-status-downloading">
-          <i class="mgc_download_3_line" />
-          <div class="update-download-info">
-            <span>正在下载更新... {{ downloadProgress.percent }}%</span>
-            <n-progress type="line" :percentage="downloadProgress.percent" :show-indicator="false" :height="4"
-              :border-radius="2" style="width: 120px" />
-            <span class="update-download-detail">
-              {{ formatBytes(downloadProgress.downloaded) }} /
-              {{ formatBytes(downloadProgress.total) }}
-              <span v-if="downloadProgress.speed > 0">({{ formatSpeed(downloadProgress.speed) }})</span>
-            </span>
+    <!-- 应用信息卡片 -->
+    <n-card class="about-hero-card" :bordered="true" size="small" content-style="padding: 10px 12px;" :style="{
+      backgroundColor: settingItemBgColor,
+      borderColor: settingItemBorderColor
+    }">
+      <div class="about-hero">
+        <div class="about-hero-main">
+          <img src="../../../assets/icon.png" alt="logo" class="about-logo" />
+          <div class="about-hero-heading">
+            <span class="about-hero-title" title="Such Music">{{ appName }}</span>
+            <n-tag size="small" :bordered="false" round>v{{ baseVersion }}</n-tag>
+            <n-tag v-if="releaseTag" size="small" :bordered="false" round type="warning">{{ releaseTag }}</n-tag>
+          </div>
+          <div class="about-hero-actions">
+            <n-button size="medium" secondary @click="openGithub">
+              <template #icon>
+                <n-icon><i class="mgc_github_line" /></n-icon>
+              </template>
+              主页
+            </n-button>
+            <n-button size="medium" secondary class="about-sponsor-btn" @click="openSponsor">
+              <template #icon>
+                <n-icon><i class="mgc_heart_line" style="color: #d03050" /></n-icon>
+              </template>
+              赞助
+            </n-button>
+            <n-button size="medium" type="primary" @click="handleCheckUpdate">
+              <template #icon>
+                <n-icon><i class="mgc_refresh_1_line" /></n-icon>
+              </template>
+              更新
+            </n-button>
           </div>
         </div>
-        <div v-else-if="isDownloaded" class="update-status-item">
-          <i class="mgc_check_circle_line" />
-          <span>下载完成，准备安装</span>
-          <n-button size="tiny" type="success" @click="handleInstallUpdate">立即安装</n-button>
+
+        <!-- 更新状态卡片 -->
+        <div class="update-status-card" v-if="isUpdateAvailable || isDownloading || isDownloaded || hasError">
+          <div v-if="isChecking" class="update-status-item">
+            <n-spin size="small" />
+            <span>正在检查更新...</span>
+          </div>
+          <div v-else-if="hasError" class="update-status-item update-status-error">
+            <i class="mgc_close_circle_line" />
+            <span>{{ error || '检查更新失败' }}</span>
+            <n-button size="tiny" @click="handleCheckUpdate">重试</n-button>
+          </div>
+          <div v-else-if="isUpdateAvailable && !isDownloading && !isDownloaded" class="update-status-item">
+            <i class="mgc_alert_line" />
+            <span>发现新版本: v{{ updateInfo?.latestVersion }}</span>
+            <n-button size="tiny" type="primary" @click="handleDownloadUpdate">立即下载</n-button>
+          </div>
+          <div v-else-if="isDownloading" class="update-status-item update-status-downloading">
+            <i class="mgc_download_3_line" />
+            <div class="update-download-info">
+              <span>正在下载更新... {{ downloadProgress.percent }}%</span>
+              <n-progress type="line" :percentage="downloadProgress.percent" :show-indicator="false" :height="4"
+                :border-radius="2" style="width: 120px" />
+              <span class="update-download-detail">
+                {{ formatBytes(downloadProgress.downloaded) }} /
+                {{ formatBytes(downloadProgress.total) }}
+                <span v-if="downloadProgress.speed > 0">({{ formatSpeed(downloadProgress.speed) }})</span>
+              </span>
+            </div>
+          </div>
+          <div v-else-if="isDownloaded" class="update-status-item">
+            <i class="mgc_check_circle_line" />
+            <span>下载完成，准备安装</span>
+            <n-button size="tiny" type="success" @click="handleInstallUpdate">立即安装</n-button>
+          </div>
         </div>
       </div>
-
-    </div>
+    </n-card>
 
     <!-- 预发布提示：跟随版本号后缀，正式版不显示 -->
     <n-alert
@@ -369,8 +400,10 @@ const renderedChangelog = computed(() => {
     </n-alert>
 
     <div class="about-cards">
-      <n-card class="about-card" :bordered="false" :style="{
-        backgroundColor: themeVars.cardColor
+      <!-- 开发者卡片 -->
+      <n-card class="about-card" :bordered="true" size="small" :style="{
+        backgroundColor: settingItemBgColor,
+        borderColor: settingItemBorderColor
       }">
         <template #header>
           <div class="about-card-header">
@@ -403,64 +436,82 @@ const renderedChangelog = computed(() => {
         </div>
       </n-card>
 
-      <!-- 法律信息卡片 -->
-      <n-card class="about-card" :bordered="false" :style="{
-        backgroundColor: themeVars.cardColor
+      <!-- 特别鸣谢卡片：点击条目跳转对应开源仓库 -->
+      <n-card class="about-card" :bordered="true" size="small" :style="{
+        backgroundColor: settingItemBgColor,
+        borderColor: settingItemBorderColor
       }">
         <template #header>
           <div class="about-card-header">
-            <span class="about-card-icon"><n-icon><i class="mgc_shield_line" /></n-icon></span>
-            <span>法律信息</span>
+            <span class="about-card-icon"><n-icon><i class="mgc_heart_line" /></n-icon></span>
+            <span>特别鸣谢</span>
           </div>
         </template>
-        <div class="about-card-row legal-row">
-          <span class="about-card-label">隐私政策与在线服务声明</span>
-          <n-button size="small" secondary @click="showLegalModal = true">查看</n-button>
+
+        <div class="thanks-list">
+          <div
+            v-for="item in thanksList"
+            :key="item.url"
+            class="thanks-item"
+            role="link"
+            tabindex="0"
+            :title="item.url"
+            @click="openExternal(item.url)"
+            @keydown.enter.prevent="openExternal(item.url)"
+          >
+            <span class="thanks-icon">
+              <n-icon><i :class="item.icon" /></n-icon>
+            </span>
+            <div class="thanks-info">
+              <div class="thanks-name">{{ item.name }}</div>
+              <div class="thanks-desc">{{ item.desc }}</div>
+            </div>
+            <n-icon class="thanks-arrow"><i class="mgc_arrow_right_line" /></n-icon>
+          </div>
         </div>
       </n-card>
 
-      <!-- 更新日志卡片 -->
-      <n-card class="about-card changelog-card" :bordered="false" :style="{
-        backgroundColor: themeVars.cardColor
+      <!-- 更新日志卡片（默认收起，点击标题展开） -->
+      <n-card class="about-card changelog-card" :bordered="true" size="small" :style="{
+        backgroundColor: settingItemBgColor,
+        borderColor: settingItemBorderColor
       }">
         <template #header>
-          <div class="about-card-header">
+          <div
+            class="about-card-header changelog-header"
+            role="button"
+            tabindex="0"
+            @click="toggleChangelog"
+            @keydown.enter.prevent="toggleChangelog"
+            @keydown.space.prevent="toggleChangelog"
+          >
             <span class="about-card-icon"><n-icon><i class="mgc_history_line" /></n-icon></span>
             <span>更新日志</span>
             <n-tag v-if="currentChangelogVersion" size="small" :bordered="false" round>{{ currentChangelogVersion }}</n-tag>
+            <span class="changelog-toggle" :class="{ expanded: changelogExpanded }">
+              <n-icon><i class="mgc_down_line" /></n-icon>
+            </span>
           </div>
         </template>
 
-        <div v-if="changelogLoading" class="loading-container">
-          <n-spin size="medium" />
-          <div class="loading-text">正在获取更新日志...</div>
-        </div>
+        <template v-if="changelogExpanded">
+          <div v-if="changelogLoading" class="loading-container">
+            <n-spin size="medium" />
+            <div class="loading-text">正在获取更新日志...</div>
+          </div>
 
-        <div v-else-if="changelogError" class="error-container">
-          <n-icon size="32" color="#d03050" style="margin-bottom: 8px">
-            <i class="mgc_wifi_off_line"></i>
-          </n-icon>
-          <div class="error-text">{{ changelogError }}</div>
-          <n-button size="small" secondary style="margin-top: 12px" @click="fetchChangelog">重试</n-button>
-        </div>
+          <div v-else-if="changelogError" class="error-container">
+            <n-icon size="32" color="#d03050" style="margin-bottom: 8px">
+              <i class="mgc_wifi_off_line"></i>
+            </n-icon>
+            <div class="error-text">{{ changelogError }}</div>
+            <n-button size="small" secondary style="margin-top: 12px" @click="fetchChangelog">重试</n-button>
+          </div>
 
-        <div v-else class="markdown-body changelog-content" v-html="renderedChangelog"></div>
+          <div v-else class="markdown-body changelog-content" v-html="renderedChangelog"></div>
+        </template>
       </n-card>
     </div>
-
-    <!-- 隐私政策与在线服务声明弹窗 -->
-    <n-modal
-      v-model:show="showLegalModal"
-      preset="card"
-      title="隐私政策与在线服务声明"
-      :bordered="false"
-      size="medium"
-      style="width: 640px; max-width: 90vw"
-    >
-      <n-scrollbar style="max-height: 60vh">
-        <LegalTexts />
-      </n-scrollbar>
-    </n-modal>
   </div>
 </template>
 
@@ -471,54 +522,58 @@ const renderedChangelog = computed(() => {
   padding: 24px 4px 0 0;
 }
 
+.about-hero-card {
+  margin-bottom: 12px;
+}
+
 .about-hero {
   position: relative;
   z-index: 1;
-  text-align: center;
-  margin-bottom: 16px;
-  padding: 24px 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0;
+}
+
+/* 横向布局：Logo、应用信息、操作按钮位于同一行 */
+.about-hero-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 6px;
+  flex-wrap: wrap;
 }
 
 .about-logo {
-  width: 64px;
-  height: 64px;
-  border-radius: 14px;
-  margin: 0 auto 12px;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
   display: block;
   object-fit: cover;
+  flex-shrink: 0;
+}
+
+.about-hero-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  position: relative;
+  z-index: 1;
 }
 
 .about-hero-title {
-  font-size: 28px;
+  font-size: 20px;
   font-weight: 700;
   letter-spacing: 0.5px;
-  position: relative;
-  z-index: 1;
-}
-
-.about-hero-meta {
-  margin-top: 8px;
-  display: flex;
-  justify-content: center;
-  gap: 6px;
-  align-items: center;
-  position: relative;
-  z-index: 1;
-}
-
-.about-hero-desc {
-  margin-top: 8px;
-  font-size: 13px;
-  opacity: 0.55;
-  position: relative;
-  z-index: 1;
 }
 
 .about-hero-actions {
   position: relative;
-  margin-top: 16px;
+  margin-left: auto;
   display: flex;
-  justify-content: center;
+  align-items: center;
+  justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
   z-index: 1;
@@ -538,6 +593,7 @@ const renderedChangelog = computed(() => {
 
 .about-card {
   backdrop-filter: blur(18px);
+  border-radius: 10px;
 }
 
 .about-card-header {
@@ -546,6 +602,105 @@ const renderedChangelog = computed(() => {
   gap: 8px;
   font-size: 14px;
   font-weight: 600;
+}
+
+/* ===== 特别鸣谢 ===== */
+.thanks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.thanks-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.2s ease, transform 0.15s ease;
+}
+
+.thanks-item:hover {
+  background: rgba(127, 127, 127, 0.1);
+}
+
+.thanks-item:active {
+  transform: scale(0.99);
+}
+
+.thanks-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.1);
+  color: v-bind('themeVars.primaryColor');
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.thanks-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.thanks-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.thanks-desc {
+  margin-top: 2px;
+  font-size: 12px;
+  opacity: 0.6;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.thanks-arrow {
+  flex-shrink: 0;
+  opacity: 0.4;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.thanks-item:hover .thanks-arrow {
+  opacity: 0.8;
+  transform: translateX(2px);
+}
+
+/* 更新日志标题：整行可点击折叠，右侧箭头指示展开状态 */
+.changelog-header {
+  width: 100%;
+  cursor: pointer;
+  user-select: none;
+}
+
+.changelog-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  opacity: 0.6;
+  transition: transform 0.25s ease, opacity 0.2s ease, background-color 0.2s ease;
+}
+
+.changelog-header:hover .changelog-toggle {
+  opacity: 1;
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.changelog-toggle.expanded {
+  transform: rotate(180deg);
 }
 
 .about-card-icon {

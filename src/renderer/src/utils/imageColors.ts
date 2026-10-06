@@ -342,23 +342,31 @@ export const getAdaptiveTextColor = async (
     throw new Error('image has no valid size')
   }
 
-  canvas.width = naturalWidth
-  canvas.height = naturalHeight
-  ctx.drawImage(img, 0, 0, naturalWidth, naturalHeight)
+  // 降采样到 MAX_SAMPLE_SIZE，避免大封面（如 1000×1000）整图 getImageData 产生数 MB 的瞬时 ImageData
+  const targetWidth = Math.min(naturalWidth, MAX_SAMPLE_SIZE)
+  const targetHeight = Math.max(1, Math.round((naturalHeight / naturalWidth) * targetWidth))
+
+  canvas.width = targetWidth
+  canvas.height = targetHeight
+  ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
 
   let imageData: ImageData
   try {
-    imageData = ctx.getImageData(0, 0, naturalWidth, naturalHeight)
+    imageData = ctx.getImageData(0, 0, targetWidth, targetHeight)
   } catch (e) {
     if (typeof src === 'string') {
       const dataUrl = await fetchImageAsDataURL(src)
       const img2 = await loadImageSafe(dataUrl)
-      canvas.width = img2.naturalWidth || img2.width
-      canvas.height = img2.naturalHeight || img2.height
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
-      ctx.drawImage(img2, 0, 0, canvas.width, canvas.height)
+      const nw = img2.naturalWidth || img2.width
+      const nh = img2.naturalHeight || img2.height
+      const tw = Math.min(nw, MAX_SAMPLE_SIZE)
+      const th = Math.max(1, Math.round((nh / nw) * tw))
+      canvas.width = tw
+      canvas.height = th
+      ctx.clearRect(0, 0, tw, th)
+      ctx.drawImage(img2, 0, 0, tw, th)
       try {
-        imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+        imageData = ctx.getImageData(0, 0, tw, th)
       } catch (e2) {
         throw new Error('failed to read image data (maybe strict CORS), consider using a proxy')
       }
@@ -521,5 +529,40 @@ export const extractImageColors = async (
     neutral: rgbToHex(neutralColor.r, neutralColor.g, neutralColor.b),
     neutralVariant: neutralVariantHex
   }
+}
+
+/**
+ * `extractImageColors` 的有界 LRU 缓存包装。
+ * 同一封面（尤其是播放页、歌单页、设置页同时订阅同一封面时）会被反复提取，
+ * 缓存可避免重复建 canvas / getImageData。键包含明暗模式（调色板随模式不同）。
+ */
+const paletteCache = new Map<string, ImageColorPalette>()
+const PALETTE_CACHE_MAX = 20
+
+/**
+ * 带缓存的封面调色板提取
+ * @param src - 图片 URL（仅对字符串 URL 缓存；HTMLImageElement 直接透传）
+ * @param options - 提取选项
+ * @returns 调色板
+ */
+export const extractImageColorsCached = async (
+  src: string,
+  options?: ExtractColorOptions
+): Promise<ImageColorPalette> => {
+  const key = `${options?.isLightMode ? 'L' : 'D'}|${src}`
+  const cached = paletteCache.get(key)
+  if (cached) {
+    // 命中时刷新为最近使用，维持 LRU 顺序
+    paletteCache.delete(key)
+    paletteCache.set(key, cached)
+    return cached
+  }
+  const palette = await extractImageColors(src, options)
+  if (paletteCache.size >= PALETTE_CACHE_MAX) {
+    const oldest = paletteCache.keys().next().value
+    if (oldest !== undefined) paletteCache.delete(oldest)
+  }
+  paletteCache.set(key, palette)
+  return palette
 }
 

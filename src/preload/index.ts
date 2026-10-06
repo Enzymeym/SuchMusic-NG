@@ -341,38 +341,6 @@ class AudioEngineManager {
     return ipcRenderer.invoke('audio-engine:read-audio-file', filePath)
   }
 
-  /**
-   * 一次性解码全部音频并返回处理后的 PCM Buffer
-   * 用于 Web Audio API 播放模式
-   * @returns PCM 数据（Uint8Array 形式的 f32 PCM）、采样率、声道数
-   */
-  async decodeAllProcessed(): Promise<{
-    success: boolean
-    data?: Uint8Array
-    sampleRate?: number
-    channels?: number
-    isPartial?: boolean
-    error?: string
-  }> {
-    return ipcRenderer.invoke('audio-engine:decode-processed', this.ensureEngineId())
-  }
-
-  /**
-   * 快速解码前 N 个采样（渐进式播放）
-   * @param targetSamples 目标采样数（每声道）
-   * @returns PCM 数据
-   */
-  async decodePartial(targetSamples: number): Promise<{
-    success: boolean
-    data?: Uint8Array
-    sampleRate?: number
-    channels?: number
-    isPartial?: boolean
-    error?: string
-  }> {
-    return ipcRenderer.invoke('audio-engine:decode-partial', this.ensureEngineId(), targetSamples)
-  }
-
   async reset(): Promise<{ success: boolean; error?: string }> {
     return ipcRenderer.invoke('audio-engine:reset', this.ensureEngineId())
   }
@@ -437,10 +405,6 @@ const api = {
     isLoudnessEnabled: () => audioEngineManager.isLoudnessEnabled(),
 
     reset: () => audioEngineManager.reset(),
-
-    decodeAllProcessed: () => audioEngineManager.decodeAllProcessed(),
-
-    decodePartial: (targetSamples: number) => audioEngineManager.decodePartial(targetSamples),
 
     readAudioFile: (filePath: string) => audioEngineManager.readAudioFile(filePath),
 
@@ -613,25 +577,6 @@ const api = {
       const wrapper = (callback as any).__updateProgressWrapper
       if (wrapper) {
         ipcRenderer.removeListener('update:progress', wrapper)
-      }
-    },
-    /**
-     * 监听自动检查结果
-     * @param callback 结果回调函数
-     */
-    onAutoCheckResult: (callback: (result: any) => void) => {
-      const wrapper = (_event: any, result: any) => callback(result)
-      ;(callback as any).__updateAutoCheckWrapper = wrapper
-      ipcRenderer.on('update:autoCheckResult', wrapper)
-    },
-    /**
-     * 移除自动检查结果监听
-     * @param callback 结果回调函数
-     */
-    offAutoCheckResult: (callback: (result: any) => void) => {
-      const wrapper = (callback as any).__updateAutoCheckWrapper
-      if (wrapper) {
-        ipcRenderer.removeListener('update:autoCheckResult', wrapper)
       }
     }
   },

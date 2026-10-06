@@ -5,7 +5,7 @@ import { audioEngine } from '../audio/audio-engine'
 import { webAudioOutputEngine } from '../audio/web-audio-engine'
 import { setPrimaryColor, setGlobalFontFamily } from '../themes'
 import { usePlayerStore } from './playerStore'
-import { extractImageColors } from '../utils/imageColors'
+import { extractImageColorsCached } from '../utils/imageColors'
 import { mixWithBlack, mixWithWhite, getBrightness } from '../utils/color'
 import { getDefaultOutputMode, type AudioOutputMode } from '../utils/audioOutputModeManager'
 
@@ -301,7 +301,7 @@ export const useSettingsStore = defineStore('settings', () => {
         if (cover) {
           lastCoverUrl = cover
           try {
-            const colors = await extractImageColors(cover, { isLightMode })
+            const colors = await extractImageColorsCached(cover, { isLightMode })
             // 确保当前封面没有发生变化，再应用颜色
             if (lastCoverUrl === cover) {
               // 浅色模式下压暗颜色，深色模式下提亮暗色

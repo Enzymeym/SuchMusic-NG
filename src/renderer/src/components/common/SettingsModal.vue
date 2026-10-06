@@ -542,6 +542,8 @@ watch(
 
                 <settings-about-section
                   v-else-if="activeKey === 'about'"
+                  :setting-item-bg-color="settingItemBgColor"
+                  :setting-item-border-color="settingItemBorderColor"
                 />
               </div>
             </transition>

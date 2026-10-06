@@ -7,6 +7,12 @@ let cachedSettings: any = null
 let cachedIsPlaying: boolean = false
 let cachedInfo: any = { title: '', artist: '' }
 
+/** 清理桌面歌词窗口关闭后不再需要的大块歌词缓存，避免主进程长期持有。 */
+function clearDesktopLyricLargeCache(): void {
+  cachedLyrics = null
+  cachedInfo = { title: '', artist: '' }
+}
+
 export function registerDesktopLyricHandlers(): void {
   ipcMain.handle('desktop-lyric:open', () => {
     createDesktopLyricWindow()
@@ -14,12 +20,14 @@ export function registerDesktopLyricHandlers(): void {
 
   ipcMain.handle('desktop-lyric:close', () => {
     closeDesktopLyricWindow()
+    clearDesktopLyricLargeCache()
   })
 
   ipcMain.handle('desktop-lyric:toggle', () => {
     const win = getDesktopLyricWindow()
     if (win && !win.isDestroyed()) {
       closeDesktopLyricWindow()
+      clearDesktopLyricLargeCache()
     } else {
       createDesktopLyricWindow()
     }

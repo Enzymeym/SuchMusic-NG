@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch, onMounted, h } from 'vue'
+import { computed, onBeforeUnmount, ref, watch, onMounted, h, defineAsyncComponent } from 'vue'
 import {
   NSlider,
   NIcon,
@@ -23,7 +23,8 @@ import { usePlaylistStore } from '../../stores/playlistStore'
 import { useVolumeBalanceStore } from '../../stores/volumeBalanceStore'
 import defaultCover from '@renderer/assets/default-cover.png'
 import { audioEngine } from '../../audio/audio-engine'
-import PlayerPage from './PlayerPage.vue'
+// 播放页为重量级模块（含 AMLL 背景/歌词渲染），改为按需加载以降低首屏内存
+const PlayerPage = defineAsyncComponent(() => import('./PlayerPage.vue'))
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useDesktopLyric } from '../../composables/useDesktopLyric'
 import { useTaskbarControl } from '../../composables/useTaskbarControl'

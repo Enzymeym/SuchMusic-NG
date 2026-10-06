@@ -5,8 +5,9 @@ import { usePlayerStore } from '../../stores/playerStore'
 import { useLocalMusicStore } from '../../stores/localMusicStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { audioEngine } from '../../audio/audio-engine'
-import SoundEffectsModal from '../common/SoundEffectsModal.vue'
-import LyricSearchModal from '../common/LyricSearchModal.vue'
+// 仅打开时才展示的弹窗，按需加载以降低播放页初始内存
+const SoundEffectsModal = defineAsyncComponent(() => import('../common/SoundEffectsModal.vue'))
+const LyricSearchModal = defineAsyncComponent(() => import('../common/LyricSearchModal.vue'))
 import defaultCover from '@renderer/assets/default-cover.png'
 import {
   NIcon,
@@ -28,12 +29,38 @@ import { usePlayerProgress } from './PlayerPage/usePlayerProgress'
 import { usePlayerVolume } from './PlayerPage/usePlayerVolume'
 import { usePlayerTheme } from './PlayerPage/usePlayerTheme'
 import { usePlayerLyrics } from './PlayerPage/usePlayerLyrics'
+import { useWindowActive } from '../../composables/useWindowActive'
 
 // 初始化各模块
 const player = usePlayerStore()
 const localMusicStore = useLocalMusicStore()
 const settingsStore = useSettingsStore()
 const router = useRouter()
+
+// 窗口可见性：最小化/隐藏时暂停背景渲染与歌词逐帧动画，降低后台 CPU/GPU 与内存占用
+const windowActive = useWindowActive()
+
+/**
+ * 当前歌曲高清封面按需加载：
+ * 本地音乐库统一常驻 256px 缩略图（列表/历史等场景足够），
+ * 播放页大图与背景需要原始封面，故在切歌时按需读取该曲目高清封面并替换，
+ * 缓存受 LRU 容量限制，避免高清封面在整库规模上常驻内存。
+ */
+watch(
+  () => [player.currentSong?.id, player.currentSong?.filePath, player.currentSong?.cover] as const,
+  async ([id, filePath, cover]) => {
+    if (id == null || !filePath) return
+    // 已经是缓存中的高清封面则跳过，避免 loop
+    if (cover && cover === localMusicStore.getFullCoverUrl(id)) return
+    // 仅当当前封面为空或为本地封面(blob:/file:)时才补全，避免覆盖歌词搜索等在线封面
+    if (cover && !cover.startsWith('blob:') && !cover.startsWith('file:')) return
+    const url = await localMusicStore.loadFullCover(id, filePath)
+    if (url && player.currentSong?.id === id && player.currentSong?.cover !== url) {
+      player.setCover(url)
+    }
+  },
+  { immediate: true }
+)
 
 const {
   isControlsVisible,
@@ -115,6 +142,13 @@ const isLyricsMode = ref(false)
  */
 const toggleLyricsMode = () => {
   isLyricsMode.value = !isLyricsMode.value
+}
+
+/**
+ * 快捷跳转到设置中的「歌词设置」分区
+ */
+const openLyricsSettings = () => {
+  window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'lyrics' } }))
 }
 
 // 更多菜单显示状态（移动端和桌面端独立）
@@ -370,7 +404,7 @@ watch(
           <template v-if="settingsStore.playback.playerBackgroundStyle === 'amll'">
             <BackgroundRender
               :album="player.currentSong?.cover || defaultCover"
-              :playing="player.isPlaying"
+              :playing="player.isPlaying && windowActive"
               :has-lyric="!!lyricsData"
               :flow-speed="2"
               :render-scale="0.45"
@@ -515,7 +549,11 @@ watch(
                 </div>
 
                 <!-- Side Tools (Right Edge) -->
-                <div v-if="hasLyrics && player.currentSong?.id" class="side-tools">
+                <div
+                  v-if="hasLyrics && player.currentSong?.id"
+                  class="side-tools"
+                  :class="{ 'hide-controls': !isControlsVisible }"
+                >
                   <n-button
                     text
                     class="side-btn"
@@ -523,6 +561,15 @@ watch(
                     @click="showLyricSearchModal = true"
                   >
                     <n-icon size="22"><i class="mgc_search_2_line"></i></n-icon>
+                  </n-button>
+                  <n-button
+                    text
+                    class="side-btn"
+                    :focusable="false"
+                    title="歌词设置"
+                    @click="openLyricsSettings"
+                  >
+                    <n-icon size="22"><i class="mgc_settings_2_line"></i></n-icon>
                   </n-button>
                 </div>
               </div>

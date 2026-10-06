@@ -911,7 +911,6 @@ const isLargeList = computed(() => props.songs.length > LARGE_LIST_THRESHOLD)
 .song-list-scroll-container {
   flex: 1;
   width: 100%;
-  will-change: transform;
 }
 
 .song-list-header {

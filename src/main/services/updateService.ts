@@ -10,8 +10,8 @@ const GITHUB_OWNER = 'Enzymeym'
 const GITHUB_REPO = 'SuchMusic-NG'
 const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases`
 
-// 缓存配置
-let cachedRelease: GitHubRelease | null = null
+// 缓存配置：缓存整个 Release 列表，避免不同通道间缓存串味
+let cachedReleases: GitHubRelease[] | null = null
 let cacheTimestamp = 0
 const CACHE_DURATION = 30 * 60 * 1000 // 30 分钟
 
@@ -31,7 +31,12 @@ export function getCurrentVersion(): string {
  */
 function parseVersion(version: string): number[] {
   const clean = version.startsWith('v') ? version.slice(1) : version
-  return clean.split('.').map(Number)
+  // 去掉 -release / -beta.1 / +build 等预发布与构建元数据后缀，仅比较主版本号
+  const core = clean.split(/[-+]/)[0]
+  return core.split('.').map((s) => {
+    const n = parseInt(s, 10)
+    return Number.isNaN(n) ? 0 : n
+  })
 }
 
 /**
@@ -102,45 +107,39 @@ function sendProgress(progress: DownloadProgress): void {
  * @returns GitHub Release 对象或 null
  */
 export async function fetchLatestRelease(channel: 'stable' | 'beta' = 'stable'): Promise<GitHubRelease | null> {
-  // 检查缓存
   const now = Date.now()
-  if (cachedRelease && now - cacheTimestamp < CACHE_DURATION) {
-    // 缓存有效，检查通道是否匹配
-    if (channel === 'beta' || !cachedRelease.prerelease) {
-      return cachedRelease
-    }
-  }
 
-  try {
-    const { data } = await axios.get<GitHubRelease[]>(GITHUB_API_URL, {
-      headers: {
-        Accept: 'application/vnd.github.v3+json',
-        'User-Agent': 'SuchMusic-Updater'
-      },
-      params: { per_page: 10 },
-      timeout: 15000
-    })
+  // 缓存有效则直接复用整个 Release 列表
+  let releases = cachedReleases
+  if (!releases || now - cacheTimestamp >= CACHE_DURATION) {
+    try {
+      const { data } = await axios.get<GitHubRelease[]>(GITHUB_API_URL, {
+        headers: {
+          Accept: 'application/vnd.github.v3+json',
+          'User-Agent': 'SuchMusic-Updater'
+        },
+        params: { per_page: 10 },
+        timeout: 15000
+      })
 
-    if (!Array.isArray(data) || data.length === 0) {
+      if (!Array.isArray(data) || data.length === 0) {
+        return null
+      }
+
+      releases = data
+      cachedReleases = data
+      cacheTimestamp = now
+    } catch (error) {
+      console.error('获取 GitHub Release 失败:', error)
       return null
     }
-
-    // 根据通道筛选
-    const release =
-      channel === 'stable'
-        ? data.find((r) => !r.prerelease)
-        : data[0]
-
-    if (release) {
-      cachedRelease = release
-      cacheTimestamp = now
-    }
-
-    return release || null
-  } catch (error) {
-    console.error('获取 GitHub Release 失败:', error)
-    return null
   }
+
+  // 根据通道筛选：
+  // stable → 最新的非预发布版本；beta → 全部 Release 中最新的一个（含更新的正式版）
+  const release = channel === 'stable' ? releases.find((r) => !r.prerelease) : releases[0]
+
+  return release || null
 }
 
 /**
@@ -280,6 +279,12 @@ export async function downloadUpdate(url: string): Promise<string> {
  */
 export function installUpdate(filePath: string): void {
   shell.openPath(filePath)
+  // 安装向导需要覆盖正在运行的程序文件，短暂延迟后退出应用；
+  // 安装完成后由 NSIS 向导提供重新启动选项
+  setTimeout(() => {
+    ;(app as any).isQuiting = true
+    app.quit()
+  }, 800)
 }
 
 /**

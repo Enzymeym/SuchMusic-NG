@@ -35,7 +35,7 @@ const POSITION_THROTTLE_MS = 1000
  * data URL 单条可达数 MB，限制条数防止长会话内存无限增长（简单 LRU）。
  */
 const blobCoverCache = new Map<string, string>()
-const BLOB_COVER_CACHE_MAX = 20
+const BLOB_COVER_CACHE_MAX = 6
 
 /**
  * 将 blob: URL 封面转换为 data: URL

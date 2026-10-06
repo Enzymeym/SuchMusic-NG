@@ -36,7 +36,7 @@ export interface PlayRecord {
 
 // 保存历史记录的防抖 timer
 let saveHistoryTimer: ReturnType<typeof setTimeout> | null = null
-const LYRICS_CACHE_MAX_SIZE = 200
+const LYRICS_CACHE_MAX_SIZE = 80
 
 const lyricsCache = new Map<string | number, { lyrics?: string; translatedLyrics?: string }>()
 

@@ -157,8 +157,6 @@ declare global {
         cleanup: () => Promise<any>
         onProgress: (callback: (progress: { downloaded: number; total: number; percent: number; speed: number }) => void) => void
         offProgress: (callback: (progress: { downloaded: number; total: number; percent: number; speed: number }) => void) => void
-        onAutoCheckResult: (callback: (result: any) => void) => void
-        offAutoCheckResult: (callback: (result: any) => void) => void
       }
       plugins: {
         load: (filePath: string) => Promise<{ success: boolean; manifest?: any; state?: string; error?: string }>

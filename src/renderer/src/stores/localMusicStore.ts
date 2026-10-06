@@ -74,6 +74,34 @@ async function createThumbnailBlobUrl(src: string, size = 128, quality = 0.82): 
   }
 }
 
+/**
+ * 将 base64 封面转换为 Blob URL。
+ * Blob URL 是短引用字符串（~50 字节），避免 100–300KB 的 base64 常驻 Pinia 响应式内存。
+ * 失败时返回空字符串。
+ */
+function base64ToBlobUrl(base64: string, mimeType: string): string {
+  try {
+    const binaryStr = atob(base64)
+    const bytes = new Uint8Array(binaryStr.length)
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i)
+    }
+    return URL.createObjectURL(new Blob([bytes], { type: mimeType || 'image/jpeg' }))
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 按需加载的“高清封面”缓存：列表/历史等场景统一使用缩略图常驻，
+ * 仅当前播放歌曲按需读取原始封面并缓存在此，最多保留 FULL_COVER_CACHE_MAX 张，
+ * 超出后释放最旧一张的 Blob URL，避免高清封面在整库规模上常驻内存。
+ */
+const fullCoverCache = new Map<string | number, string>()
+const FULL_COVER_CACHE_MAX = 4
+/** 列表缩略图边长（px）：兼顾列表/卡片清晰度与常驻内存，播放页大图另走高清按需加载 */
+const THUMB_SIZE = 256
+
 export interface LocalSong {
   id: number | string
   name: string
@@ -389,26 +417,22 @@ export const useLocalMusicStore = defineStore('localMusic', {
                 }
 
                 if (result.cover && result.cover.base64 && !song.picUrl) {
-                  // 将 base64 封面转换为 Blob URL，避免大字符串占用 Pinia 响应式内存
-                  // Blob URL 是一个短引用字符串（~50字节），而非 100-300KB 的 base64 数据
-                  const binaryStr = atob(result.cover.base64)
-                  const bytes = new Uint8Array(binaryStr.length)
-                  for (let i = 0; i < binaryStr.length; i++) {
-                    bytes[i] = binaryStr.charCodeAt(i)
-                  }
-                  const blob = new Blob([bytes], { type: result.cover.mimeType })
-                  const coverUrl = URL.createObjectURL(blob)
-                  queueMetaUpdate(() => {
-                    song.picUrl = coverUrl
-                  })
-                  // 原图较大时异步生成 128px 缩略图供列表小图使用（后台执行，不阻塞 fillMeta）
-                  if (result.cover.base64.length > 16000) {
-                    void createThumbnailBlobUrl(coverUrl, 128).then((thumbUrl) => {
-                      if (thumbUrl) {
-                        queueMetaUpdate(() => {
-                          song.thumbUrl = thumbUrl
-                        })
-                      }
+                  // 先以原图占位，随后异步生成缩略图并切换为缩略图，再释放原图 Blob URL。
+                  // 列表/历史等场景只需缩略图，避免整库高清封面常驻（单张可达数百 KB 编码数据
+                  // + 大尺寸解码位图）；播放页大图另经 loadFullCover 按需加载。
+                  const coverUrl = base64ToBlobUrl(result.cover.base64, result.cover.mimeType)
+                  if (coverUrl) {
+                    queueMetaUpdate(() => {
+                      song.picUrl = coverUrl
+                    })
+                    void createThumbnailBlobUrl(coverUrl, THUMB_SIZE).then((thumbUrl) => {
+                      if (!thumbUrl) return
+                      queueMetaUpdate(() => {
+                        song.thumbUrl = thumbUrl
+                        song.picUrl = thumbUrl
+                      })
+                      // 待列表渲染切换到缩略图后再释放原图，避免封面闪烁
+                      setTimeout(() => URL.revokeObjectURL(coverUrl), 500)
                     })
                   }
                 }
@@ -493,10 +517,55 @@ export const useLocalMusicStore = defineStore('localMusic', {
     },
 
     /**
+     * 按需加载某首本地歌曲的高清封面（用于播放页大图与背景）。
+     * 结果缓存在模块级 fullCoverCache 中并受容量限制，超出时释放最旧一张。
+     * @param songId 歌曲 ID
+     * @param filePath 音频文件路径
+     * @returns 高清封面 Blob URL；无封面或失败返回 null
+     */
+    async loadFullCover(songId: string | number, filePath?: string): Promise<string | null> {
+      if (!filePath) return null
+      const cached = fullCoverCache.get(songId)
+      if (cached) return cached
+      try {
+        // @ts-ignore
+        const result = (await window.electron.ipcRenderer.invoke(
+          'local-music:get-meta',
+          filePath
+        )) as { cover?: { mimeType: string; base64: string } }
+        if (!result?.cover?.base64) return null
+        const url = base64ToBlobUrl(result.cover.base64, result.cover.mimeType)
+        if (!url) return null
+        fullCoverCache.set(songId, url)
+        while (fullCoverCache.size > FULL_COVER_CACHE_MAX) {
+          const oldestKey = fullCoverCache.keys().next().value
+          if (oldestKey === undefined) break
+          const oldUrl = fullCoverCache.get(oldestKey)
+          fullCoverCache.delete(oldestKey)
+          if (oldUrl) URL.revokeObjectURL(oldUrl)
+        }
+        return url
+      } catch (error) {
+        console.error('加载高清封面失败', filePath, error)
+        return null
+      }
+    },
+
+    /**
+     * 返回某首歌曲已缓存的高清封面 URL（未加载则为 null）
+     * @param songId 歌曲 ID
+     */
+    getFullCoverUrl(songId: string | number): string | null {
+      return fullCoverCache.get(songId) ?? null
+    },
+
+    /**
      * 清空本地音乐数据并释放所有 Blob URL
      */
     clear(): void {
       this.revokeCovers()
+      fullCoverCache.forEach((url) => URL.revokeObjectURL(url))
+      fullCoverCache.clear()
       this.songs = []
       this.loading = false
       this.fillingMeta = false

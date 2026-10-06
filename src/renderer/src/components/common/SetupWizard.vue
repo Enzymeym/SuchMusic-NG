@@ -2,7 +2,7 @@
 /**
  * 首次设置向导组件（Naive UI 版本）
  * 在应用首次启动时引导用户完成初始配置：
- * 隐私声明 → 欢迎页 → 主题色 → 音频引擎
+ * 隐私声明 → 主题色 → 音频引擎
  */
 import { ref, computed, onMounted, watch } from 'vue'
 import {
@@ -22,7 +22,6 @@ import { setPrimaryColor } from '../../themes'
 import { THEME_COLOR_PRESETS } from '../../types/onboarding'
 import { type AudioOutputMode, getAvailableOutputModes } from '../../utils/audioOutputModeManager'
 import LegalTexts from './LegalTexts.vue'
-import appIcon from '../../assets/icon.png'
 
 const wizardStore = useSetupWizardStore()
 const themeVars = useThemeVars()
@@ -62,7 +61,6 @@ const colorSelectOptions = computed(() => {
 })
 const currentStepId = computed(() => wizardStore.currentStep?.id || '')
 const isPrivacyStep = computed(() => currentStepId.value === 'privacy')
-const isWelcomeStep = computed(() => currentStepId.value === 'welcome')
 const isThemeStep = computed(() => currentStepId.value === 'theme')
 const isAudioEngineStep = computed(() => currentStepId.value === 'audio-engine')
 const availableModes = computed(() => getAvailableOutputModes())
@@ -211,8 +209,6 @@ const getDotStyle = (idx: number): Record<string, string> => {
   <Teleport to="body">
     <Transition name="wizard-fade">
       <div v-if="wizardStore.isActive" class="setup-wizard-overlay">
-        <div class="wizard-backdrop"></div>
-
         <n-card class="wizard-card" :bordered="false"
           content-style="display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 0;">
           <!-- 类轮播图指示点 -->
@@ -258,23 +254,6 @@ const getDotStyle = (idx: number): Record<string, string> => {
                       </template>
                     </n-button>
                   </div>
-                </div>
-
-                <!-- ==================== 欢迎页 ==================== -->
-                <div v-else-if="isWelcomeStep" class="step-body welcome-body">
-                  <img :src="appIcon" alt="Such Logo" class="welcome-logo" />
-                  <div class="welcome-text">
-                    <n-text tag="h2" class="welcome-title">欢迎使用 Such Music</n-text>
-                    <n-text depth="2" class="welcome-desc">
-                      下面将进行一些基础设置
-                    </n-text>
-                  </div>
-                  <n-button icon-placement="right"  type="primary" size="large" @click="handleNext" class="welcome-next-btn">
-                    下一步
-                    <template #icon>
-                      <i class="mgc_right_line"></i>
-                    </template>
-                  </n-button>
                 </div>
 
                 <!-- ==================== 主题色 ==================== -->
@@ -357,7 +336,7 @@ const getDotStyle = (idx: number): Record<string, string> => {
                 </div>
 
                 <!-- 底部导航 -->
-                <div v-if="!isWelcomeStep && !isPrivacyStep" class="wizard-nav">
+                <div v-if="!isPrivacyStep" class="wizard-nav">
                   <n-space>
                     <n-button v-if="wizardStore.currentStep?.skippable" text size="small"
                       @click="handleSkipCurrentStep">
@@ -369,7 +348,7 @@ const getDotStyle = (idx: number): Record<string, string> => {
                   </n-space>
 
                   <n-space>
-                    <n-button v-if="wizardStore.currentStepIndex > 0 && !isWelcomeStep" @click="handlePrev">
+                    <n-button v-if="wizardStore.currentStepIndex > 0" @click="handlePrev">
                       上一步
                     </n-button>
                     <n-button v-if="!wizardStore.isLastStep" type="primary" @click="handleNext">
@@ -397,8 +376,7 @@ const getDotStyle = (idx: number): Record<string, string> => {
   inset: 0;
   z-index: 10000;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
 }
 
 .wizard-fade-enter-active,
@@ -411,19 +389,13 @@ const getDotStyle = (idx: number): Record<string, string> => {
   opacity: 0;
 }
 
-.wizard-backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-}
-
 .wizard-card {
-  width: 680px;
-  max-width: calc(100vw - 48px);
-  height: 560px;
-  max-height: calc(100vh - 64px);
+  /* 全屏引导：铺满整个窗口 */
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
   /* 固定卡片高度下让内容区 flex:1 生效，防止内容撑破卡片 */
   display: flex;
   flex-direction: column;
@@ -468,12 +440,16 @@ const getDotStyle = (idx: number): Record<string, string> => {
 
 /* ===== 内容区域 ===== */
 .wizard-content {
-  padding: 20px 40px 20px;
+  padding: 24px 40px;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
+  /* 全屏下将内容约束在舒适的阅读宽度内并水平居中 */
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
 }
 
 .step-title-container {
@@ -488,9 +464,11 @@ const getDotStyle = (idx: number): Record<string, string> => {
   gap: 18px;
   flex: 1;
   min-height: 0;
+  /* 全屏布局下让步骤内容垂直居中 */
+  justify-content: center;
 }
 
-/* 非欢迎页统一居左 */
+/* 各步骤内容统一居左 */
 .step-body-left {
   align-items: flex-start;
 }
@@ -519,47 +497,6 @@ const getDotStyle = (idx: number): Record<string, string> => {
 
 .step-subtitle-text-left {
   text-align: left;
-}
-
-/* ===== 欢迎页 ===== */
-.welcome-body {
-  align-items: center;
-  justify-content: center;
-  padding-top: 10px;
-  padding-bottom: 20px;
-}
-
-.welcome-logo {
-  width: 80px;
-  height: 80px;
-  border-radius: 18px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
-}
-
-.welcome-text {
-  text-align: center;
-  margin-top: 4px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: -24px;
-}
-
-.welcome-title {
-  font-size: 28px;
-  font-weight: 700;
-  margin: 0 0 8px;
-}
-
-.welcome-desc {
-  font-size: 15px;
-  transform: translateY(-25%);
-  line-height: 1.7;
-}
-
-.welcome-next-btn {
-  margin-top: 8px;
-  min-width: 160px;
 }
 
 /* ===== 主题色 ===== */
@@ -666,34 +603,18 @@ const getDotStyle = (idx: number): Record<string, string> => {
 
 /* ===== 响应式 ===== */
 @media (max-width: 720px) {
-  .wizard-card {
-    max-width: calc(100vw - 24px);
-    height: auto;
-    min-height: 420px;
-    max-height: calc(100vh - 48px);
-  }
-
   .wizard-dots-header {
     padding: 16px 16px 0;
   }
 
   .wizard-content {
-    padding: 16px 20px 8px;
+    padding: 16px 20px;
   }
 
   .wizard-nav {
     padding: 10px 0 0;
     flex-direction: column;
     gap: 8px;
-  }
-
-  .welcome-title {
-    font-size: 22px;
-  }
-
-  .welcome-logo {
-    width: 64px;
-    height: 64px;
   }
 }
 </style>

@@ -1,7 +1,7 @@
 import { ref, computed, watch } from 'vue'
 import { usePlayerStore } from '../../../stores/playerStore'
 import { useAutoNaiveTheme } from '../../../themes/autoNaiveTheme'
-import { extractImageColors } from '../../../utils/imageColors'
+import { extractImageColorsCached } from '../../../utils/imageColors'
 import { getBrightness, mixWithWhite, hexToRgba } from '../../../utils/color'
 
 /**
@@ -58,7 +58,7 @@ export function usePlayerTheme() {
       const seq = ++extractSeq
       try {
         // 根据当前主题模式传入 isLightMode 参数
-        const palette = await extractImageColors(cover, { isLightMode: !isDark.value })
+        const palette = await extractImageColorsCached(cover, { isLightMode: !isDark.value })
         if (seq !== extractSeq) return // 竞态：已切换到新封面
         const candidates = [palette.main, palette.secondary, palette.third].filter(Boolean)
         if (!candidates.length) return

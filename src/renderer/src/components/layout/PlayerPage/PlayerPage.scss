@@ -6,8 +6,6 @@
   flex-direction: column;
   overflow: hidden;
   user-select: none;
-  backdrop-filter: blur(18px); // 整体背景模糊
-  background: rgba(0, 0, 0, 0.45); // 整体背景压暗
 }
 
 .player-bg {
@@ -290,6 +288,16 @@
       flex-direction: column;
       gap: 16px;
       z-index: 5;
+      /* 与播放控制栏使用相同的过渡，保持同步淡入/淡出 */
+      transition:
+        opacity 0.5s ease,
+        transform 0.5s ease;
+
+      &.hide-controls {
+        opacity: 0;
+        transform: translateY(-50%) translateX(16px);
+        pointer-events: none;
+      }
 
       .side-btn {
         width: 40px;
@@ -818,46 +826,46 @@
   }
 }
 
-/* Transition Animations */
-.player-slide-enter-active,
+/* Transition Animations
+   展开：整页从底部上滑展开，背景与内容都随页面一起出现；
+   顶部圆角在完全展开（60%，约 0.48s）后收起。 */
+.player-slide-enter-active {
+  animation: player-sheet-in 0.8s both;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform, border-radius;
+}
+
+/* 0% → 60%：上滑展开并保持顶部圆角；60% → 100%：圆角收起 */
+@keyframes player-sheet-in {
+  0% {
+    transform: translateY(100%);
+    border-radius: 24px 24px 0 0;
+  }
+  60% {
+    transform: translateY(0);
+    border-radius: 24px 24px 0 0;
+  }
+  100% {
+    transform: translateY(0);
+    border-radius: 0;
+  }
+}
+
+/* 收起：反向滑下并恢复顶部圆角，内容随页面一起移出 */
 .player-slide-leave-active {
-  // 使用类似缓入缓出的曲线，起止更柔和
-  transition: all 0.5s cubic-bezier(0.25, 0.1, 0.25, 1);
-
-  .player-bg {
-    transition: all 0.6s cubic-bezier(0.25, 0.1, 0.25, 1);
-  }
-
-  .player-content {
-    transition: all 0.5s cubic-bezier(0.25, 0.1, 0.25, 1);
-  }
+  animation: player-sheet-out 0.42s both;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform, border-radius;
 }
 
-.player-slide-enter-from {
-  opacity: 0;
-  transform: translateY(100%);
-
-  .player-bg {
-    transform: scale(1.5);
-    opacity: 0;
+@keyframes player-sheet-out {
+  0% {
+    transform: translateY(0);
+    border-radius: 0;
   }
-
-  .player-content {
-    transform: translateY(20px);
-  }
-}
-
-.player-slide-leave-to {
-  opacity: 0;
-  transform: translateY(100%);
-
-  .player-bg {
-    transform: scale(0.8);
-    opacity: 0;
-  }
-
-  .player-content {
-    transform: translateY(-20px);
+  100% {
+    transform: translateY(100%);
+    border-radius: 24px 24px 0 0;
   }
 }
 

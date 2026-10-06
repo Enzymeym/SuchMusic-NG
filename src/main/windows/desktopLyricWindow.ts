@@ -48,7 +48,9 @@ export function createDesktopLyricWindow(): void {
     }
   })
 
-  desktopLyricWindow.setIgnoreMouseEvents(false) // Allow dragging
+  // 新窗口的鼠标穿透状态未知，重置缓存以避免沿用上一个窗口的记录
+  lastIgnoreMouseState = null
+  applyIgnoreMouseEvents(false) // Allow dragging
 
   desktopLyricWindow.on('ready-to-show', () => {
     desktopLyricWindow?.show()
@@ -56,6 +58,7 @@ export function createDesktopLyricWindow(): void {
 
   desktopLyricWindow.on('closed', () => {
     desktopLyricWindow = undefined
+    lastIgnoreMouseState = null
     if (lockTimer) {
       clearInterval(lockTimer)
       lockTimer = null
@@ -79,6 +82,17 @@ export function closeDesktopLyricWindow(): void {
 }
 
 let lockTimer: NodeJS.Timeout | null = null
+
+// 记录最近一次实际下发的鼠标穿透状态，避免以固定轮询频率重复下发相同值
+// （重复设置同一值是语义 no-op，但每次仍会产生窗口管理器/合成器交互开销）
+let lastIgnoreMouseState: boolean | null = null
+
+function applyIgnoreMouseEvents(ignore: boolean): void {
+  if (!desktopLyricWindow || desktopLyricWindow.isDestroyed()) return
+  if (lastIgnoreMouseState === ignore) return
+  desktopLyricWindow.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined)
+  lastIgnoreMouseState = ignore
+}
 
 export function setDesktopLyricLocked(locked: boolean): void {
   if (!desktopLyricWindow || desktopLyricWindow.isDestroyed()) return
@@ -133,7 +147,7 @@ export function setDesktopLyricLocked(locked: boolean): void {
       if (isInside) {
         // Mouse is inside.
         // We MUST enable mouse events so the user can interact (click buttons).
-        desktopLyricWindow.setIgnoreMouseEvents(false)
+        applyIgnoreMouseEvents(false)
         
         // Reset the "mouse left" timer since mouse is inside
         if (unlockTimer) {
@@ -153,7 +167,7 @@ export function setDesktopLyricLocked(locked: boolean): void {
         
         // Let's stick to the polling interval (200ms).
         // If mouse is out, we lock.
-        desktopLyricWindow.setIgnoreMouseEvents(true, { forward: true })
+        applyIgnoreMouseEvents(true)
       }
     }
 
@@ -167,7 +181,7 @@ export function setDesktopLyricLocked(locked: boolean): void {
       unlockTimer = null
     }
     // Fully unlock and ensure window captures all mouse events
-    desktopLyricWindow.setIgnoreMouseEvents(false)
+    applyIgnoreMouseEvents(false)
   }
 }
 

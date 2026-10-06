@@ -1,5 +1,5 @@
 import { ref, watch } from 'vue'
-import { extractImageColors, getAdaptiveTextColor } from '../utils/imageColors'
+import { extractImageColorsCached, getAdaptiveTextColor } from '../utils/imageColors'
 import { useAutoNaiveTheme } from '../themes/autoNaiveTheme'
 import defaultCover from '@renderer/assets/default-cover.png'
 
@@ -37,7 +37,7 @@ export function usePlaylistTheme(coverUrl: () => string) {
     lastCoverUrl = url
 
     try {
-      const palette = await extractImageColors(url, {
+      const palette = await extractImageColorsCached(url, {
         isLightMode: !isDark.value
       })
       // 优先使用主色，并适当调整确保作为按钮颜色时对比度足够

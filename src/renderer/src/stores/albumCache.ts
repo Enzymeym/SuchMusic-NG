@@ -18,7 +18,7 @@ export interface AlbumInfo {
 }
 
 /** 专辑缓存最大容量 */
-const ALBUM_CACHE_MAX_SIZE = 200
+const ALBUM_CACHE_MAX_SIZE = 60
 
 /** 专辑缓存：AlbumView 构建的专辑数据，供 AlbumDetailView 直接使用 */
 const _cache = new Map<string, AlbumInfo>()

@@ -7,11 +7,14 @@ import type { LyricPlayerRef } from '../AMLL/LyricPlayer.vue'
 import { parseLyricsToCore } from '../../../utils/lyric/lyricParser'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePlayerStore } from '../../../stores/playerStore'
+import { useWindowActive } from '../../../composables/useWindowActive'
 import { audioEngine } from '../../../audio/audio-engine'
 import { getTransitionController } from '../../../audio/transition-controller'
 
 const settingsStore = useSettingsStore()
 const playerStore = usePlayerStore()
+// 窗口不可见（最小化/隐藏）时暂停歌词逐帧动画，避免后台持续占用
+const windowActive = useWindowActive()
 
 const props = defineProps({
   mode: {
@@ -196,7 +199,7 @@ watch([hidePassedLines, appleLyrics], ([enabled]) => {
         ref="lyricPlayerRef"
         :lyric-lines="appleLyrics"
         :current-time="currentTimeMs"
-        :playing="playerStore.isPlaying"
+        :playing="playerStore.isPlaying && windowActive"
         :enable-blur="enableBlur"
         :enable-spring="enableSpring"
         :hide-passed-lines="hidePassedLines"

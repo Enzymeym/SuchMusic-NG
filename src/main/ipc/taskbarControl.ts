@@ -14,6 +14,15 @@ let cachedInfo: any = { title: '', artist: '', cover: '' }
 let cachedProgress: { positionMs: number; durationMs: number } = { positionMs: 0, durationMs: 0 }
 let cachedLyrics: any[] = []
 
+/**
+ * 清理播控窗口关闭后不再需要的大块缓存（歌词逐字数组、歌曲信息），
+ * 避免窗口关闭后主进程仍长期持有这些数据。设置/进度等轻量状态保留，便于再次打开时复用。
+ */
+function clearTaskbarControlLargeCache(): void {
+  cachedLyrics = []
+  cachedInfo = { title: '', artist: '', cover: '' }
+}
+
 export function registerTaskbarControlHandlers(): void {
   ipcMain.handle('taskbar-control:open', () => {
     createTaskbarControlWindow()
@@ -21,12 +30,14 @@ export function registerTaskbarControlHandlers(): void {
 
   ipcMain.handle('taskbar-control:close', () => {
     closeTaskbarControlWindow()
+    clearTaskbarControlLargeCache()
   })
 
   ipcMain.handle('taskbar-control:toggle', () => {
     const win = getTaskbarControlWindow()
     if (win && !win.isDestroyed()) {
       closeTaskbarControlWindow()
+      clearTaskbarControlLargeCache()
     } else {
       createTaskbarControlWindow()
     }

@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow } from 'electron'
+import { ipcMain } from 'electron'
 import {
   checkForUpdate,
   downloadUpdate,
@@ -122,13 +122,3 @@ export function registerUpdateHandlers(): void {
   })
 }
 
-/**
- * 向渲染进程发送自动更新检查结果
- * @param result 更新检查结果
- */
-export function sendAutoUpdateResult(result: UpdateCheckResult): void {
-  const mainWindow = BrowserWindow.getAllWindows()[0]
-  if (mainWindow) {
-    mainWindow.webContents.send('update:autoCheckResult', result)
-  }
-}

@@ -16,7 +16,8 @@ import { usePlaylistStore } from './stores/playlistStore'
 import { useLocalMusicStore } from './stores/localMusicStore'
 import { useAutoNaiveTheme } from './themes/autoNaiveTheme'
 import PluginUpdateNotifier from './components/common/PluginUpdateNotifier.vue'
-import SetupWizard from './components/common/SetupWizard.vue'
+// 首次引导仅在需要时展示，改为按需加载以降低启动内存
+const SetupWizard = defineAsyncComponent(() => import('./components/common/SetupWizard.vue'))
 import SplashScreen from './components/common/SplashScreen.vue'
 import { useSetupWizardStore } from './stores/setupWizardStore'
 import { audioEngine } from './audio/audio-engine'

@@ -16,8 +16,6 @@ import { createTray } from './tray'
 import { registerAudioEngineHandlers } from './services/audioEngineService'
 import { registerWasapiHandlers } from './services/wasapiService'
 import { registerUpdateHandlers } from './ipc/update'
-import { checkForUpdate } from './services/updateService'
-import { sendAutoUpdateResult } from './ipc/update'
 import { registerPluginHandlers } from './ipc/pluginManager'
 import { loadAllSavedPlugins } from './ipc/pluginManager'
 import { registerLyricHandlers } from './services/lyricService'
@@ -63,23 +61,17 @@ if (process.platform === 'win32') {
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 
-// 启用 WebNN（Web Machine Learning）实验特性
-// 用于在支持的环境中通过 NPU/GPU 加速音频特征推理；不支持的平台会自动降级为 CPU，不影响正常使用
-// WebNNOnnxRuntime 启用 ONNX Runtime 后端（GPU/NPU 推理依赖 DirectML）
-app.commandLine.appendSwitch(
-  'enable-features',
-  'WebMachineLearningNeuralNetwork,WebNNOnnxRuntime'
-)
-
-// 关闭 WebNN 的 DirectML NPU 硬件黑名单（Chromium 默认对部分 NPU 设备启用）
-// --disable_webnn_for_npu=0 是微软官方文档提供的关闭该黑名单的方式（Edge/Chromium 通用）。
-// 使用 appendArgument 替代 appendSwitch，确保下划线格式的 flag 被正确传递。
-// 注意：若本机 NPU 驱动不稳定，DirectML 可能异常；届时移除本行即可恢复默认行为。
-app.commandLine.appendArgument('--disable_webnn_for_npu=0')
-
 // 限制 Chromium 磁盘缓存（默认上限 1GB，其内存映射页会计入任务管理器 Working Set，
-// 对音乐应用这类以本地文件为主的产品贡献有限却虚增占用）。128MB 足以缓存封面等网络资源。
-app.commandLine.appendSwitch('disk-cache-size', '134217728')
+// 对音乐应用这类以本地文件为主的产品贡献有限却虚增占用）。64MB 足以缓存封面等网络资源。
+app.commandLine.appendSwitch('disk-cache-size', '67108864')
+
+// 限制渲染/工具进程 V8 堆上限，促使更早 GC、降低常驻内存。
+// 注意：js-flags 作用于渲染与工具进程，不影响主进程（Node）。
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=768')
+
+// 注意：此处不再启用 enable-low-end-device-mode / disable-gpu-shader-disk-cache。
+// 二者会改变 Chromium 的图层光栅化与 GPU 着色器策略，实测会导致界面闪烁、棋盘格错乱，
+// 属于内存收益不足以抵消渲染正确性风险的高风险开关，故移除。
 
 // 设置应用名称，解决 SMTC（系统媒体传输控制）中显示未知应用或 electron 的问题
 app.name = 'Such Music'
@@ -278,21 +270,8 @@ app.whenReady().then(() => {
   // 自动加载已保存的插件
   loadAllSavedPlugins()
 
-  // 应用启动后自动检查应用更新（延迟 3 秒执行）
-  setTimeout(async () => {
-    try {
-      console.log('启动自动应用更新检查...')
-      const result = await checkForUpdate('stable')
-      sendAutoUpdateResult(result)
-      if (result.hasUpdate) {
-        console.log(`发现新版本: v${result.latestVersion}`)
-      } else {
-        console.log('当前已是最新版本')
-      }
-    } catch (error) {
-      console.error('自动检查应用更新失败:', error)
-    }
-  }, 3000)
+  // 应用更新检查由渲染进程按用户设置（autoCheckUpdate / updateChannel）触发，
+  // 见 renderer 的 UpdateNotification 组件
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the

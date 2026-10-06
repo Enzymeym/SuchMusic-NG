@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onMounted } from 'vue'
 import { NButton, NModal, NProgress, useMessage, useThemeVars } from 'naive-ui'
 import { useUpdater } from '../../composables/useUpdater'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -56,13 +56,23 @@ const dialogTitle = computed(() => {
  * 处理检查更新
  */
 const handleCheck = async () => {
-  const result = await checkUpdate(settingsStore.general.updateChannel)
+  const result = await checkUpdate(settingsStore.general.updateChannel, {
+    autoDownload: true,
+    silent: false
+  })
   if (result?.hasUpdate) {
     message.info(`发现新版本: v${result.latestVersion}`)
   } else if (result && !result.hasUpdate) {
     message.success('当前已是最新版本')
   }
 }
+
+// 启动时按用户设置自动检查更新（未开启则保持静默；网络异常不弹错误）
+onMounted(() => {
+  if (settingsStore.general.autoCheckUpdate) {
+    checkUpdate(settingsStore.general.updateChannel, { autoDownload: true, silent: true })
+  }
+})
 
 /**
  * 处理下载更新

@@ -74,12 +74,6 @@ const engineEqEnabled = new Map<string, boolean>();
 const engineCompressorEnabled = new Map<string, boolean>();
 const engineLimiterEnabled = new Map<string, boolean>();
 
-/** 缓存已解码的音频数据（Buffer），用于暂停后恢复无需重新解码 */
-const decodedAudioCache = new Map<string, Buffer>();
-
-/** 预解码 Promise：load 时启动异步解码，play 时直接 await 结果 */
-const decodePromises = new Map<string, Promise<Buffer | null>>();
-
 /** 跟踪哪些 WebContents 设置了 FFT 回调，用于自动清理 */
 const engineToWebContents = new Map<string, Electron.WebContents>();
 
@@ -253,9 +247,13 @@ export function destroyAllEngines(): void {
   });
   engines.clear();
 
-  // 清理缓存
-  decodedAudioCache.clear();
-  decodePromises.clear();
+  // 清理其余按引擎 ID 索引的映射，避免残留引用
+  engineVolumes.clear();
+  engineLoopModes.clear();
+  engineEqEnabled.clear();
+  engineCompressorEnabled.clear();
+  engineLimiterEnabled.clear();
+  engineToWebContents.clear();
 
   console.log('[AudioEngine] 已销毁所有引擎实例');
 }
@@ -577,10 +575,6 @@ export function registerAudioEngineHandlers(): void {
       });
       console.log(`[AudioEngine] 轨道信息: ${trackInfo.sampleRate}Hz, ${trackInfo.channels}ch, ${trackInfo.durationMs}ms`);
 
-      // 清除旧缓存（新文件加载时失效）
-      decodedAudioCache.delete(engineId);
-      decodePromises.delete(engineId);
-
       return { success: true, trackInfo };
     } catch (error) {
       console.error('[AudioEngine] 加载文件失败:', error);
@@ -588,126 +582,13 @@ export function registerAudioEngineHandlers(): void {
     }
   });
 
-  // 解码全部并返回处理后的 PCM 数据（异步版本，用于 Web Audio 模式）
-  ipcMain.handle('audio-engine:decode-processed', async (_event, engineId: string) => {
-    try {
-      const engine = getEngine(engineId);
-      if (typeof engine.decodeAllProcessedAsync !== 'function') {
-        // 回退到同步版本
-        if (typeof engine.decodeAllProcessed !== 'function') {
-          return { success: false, error: 'decodeAllProcessed 方法不可用' };
-        }
-        const buffer: Buffer = engine.decodeAllProcessed();
-        const track = engineTracks.get(engineId);
-        if (!track) {
-          return { success: false, error: '缺少轨道信息，请先调用 load' };
-        }
-        return {
-          success: true,
-          data: buffer, // Buffer 通过 Electron IPC 结构化克隆传输，无需转数组
-          sampleRate: track.sampleRate,
-          channels: track.channels,
-        };
-      }
-      // 异步解码，不阻塞主进程事件循环
-      const buffer: Buffer = await engine.decodeAllProcessedAsync();
-      const track = engineTracks.get(engineId);
-      if (!track) {
-        return { success: false, error: '缺少轨道信息，请先调用 load' };
-      }
-      console.log(`[AudioEngine] Web Audio 解码完成: ${(buffer.length / 1024 / 1024).toFixed(1)} MB`);
-      return {
-        success: true,
-        data: buffer, // Buffer 通过 Electron IPC 结构化克隆传输
-        sampleRate: track.sampleRate,
-        channels: track.channels,
-      };
-    } catch (error) {
-      console.error('[AudioEngine] 解码失败:', error);
-      return { success: false, error: String(error) };
-    }
-  });
-
-  // 解码前 N 个采样（快速获取开头 PCM，用于渐进式播放）
-  ipcMain.handle('audio-engine:decode-partial', async (_event, engineId: string, targetSamples: number) => {
-    try {
-      const engine = getEngine(engineId);
-      if (typeof engine.decodePartial !== 'function') {
-        return { success: false, error: 'decodePartial 方法不可用' };
-      }
-      const buffer: Buffer = engine.decodePartial(Math.round(targetSamples));
-      const track = engineTracks.get(engineId);
-      if (!track) {
-        return { success: false, error: '缺少轨道信息，请先调用 load' };
-      }
-      console.log(`[AudioEngine] Web Audio 部分解码: ${(buffer.length / 1024 / 1024).toFixed(1)} MB (${targetSamples} samples)`);
-      return {
-        success: true,
-        data: buffer,
-        sampleRate: track.sampleRate,
-        channels: track.channels,
-        isPartial: true,
-      };
-    } catch (error) {
-      console.error('[AudioEngine] 部分解码失败:', error);
-      return { success: false, error: String(error) };
-    }
-  });
-
-  // 播放 / 恢复（缓存命中走快速切片路径，首次播放走流式解码）
+  // 播放 / 恢复（统一走 Rust 流式解码）
   ipcMain.handle('audio-engine:play', async (_event, engineId: string) => {
     try {
       const engine = getEngine(engineId);
 
-      const track = engineTracks.get(engineId);
-      if (!track) {
-        // 无轨道信息时由 Rust 引擎自行管理
-        engine.play();
-        startOutput(engineId, engine);
-        return { success: true };
-      }
-
-      const { sampleRate, channels } = track;
-
-      // === 缓存命中：直接切片推送（seek / 暂停恢复 场景） ===
-      let allData = decodedAudioCache.get(engineId);
-      if (allData && allData.length > 0) {
-        let currentMs = 0;
-        try { currentMs = engine.getPositionMs(); } catch {}
-
-        const sampleOffset = Math.floor((currentMs / 1000) * sampleRate * channels);
-        const byteOffset = sampleOffset * 4;
-        const remaining = byteOffset < allData.length ? allData.slice(byteOffset) : allData;
-
-        const existing = engineOutputs.get(engineId);
-        let outputEngine = existing?.outputEngine ?? null;
-
-        if (outputEngine) {
-          try { outputEngine.flush(); } catch {}
-          try { outputEngine.start(); } catch {}
-        } else {
-          const native = loadNativeModule();
-          outputEngine = createOutputEngine(native, sampleRate, channels);
-        }
-
-        if (outputEngine) {
-          outputEngine.outputAudio(remaining, channels, sampleRate);
-          if (!existing || existing.stopped) {
-            engineOutputs.set(engineId, { outputEngine, interval: null, stopped: false, paused: false });
-          } else {
-            existing.outputEngine = outputEngine;
-            existing.stopped = false;
-            existing.paused = false;
-          }
-        }
-
-        try { engine.playOneShot(); } catch { engine.play(); }
-        return { success: true };
-      }
-
-      // === 首次播放：流式解码 ===
       // Rust 流式线程逐帧解码 → RingAudioBuffer → startOutput 桥接 → WASAPI 输出
-      engine.play(); // 启动流式解码线程
+      engine.play(); // 启动/恢复流式解码线程
       startOutput(engineId, engine); // 启动桥接，读取 RingAudioBuffer 推送到输出
 
       return { success: true };
@@ -731,44 +612,10 @@ export function registerAudioEngineHandlers(): void {
     }
   });
 
-  // 恢复播放（委托给统一的 play handler）
+  // 恢复播放（Rust 流式线程从暂停位置继续）
   ipcMain.handle('audio-engine:resume', async (_event, engineId: string) => {
     try {
       const engine = getEngine(engineId);
-      const track = engineTracks.get(engineId);
-      if (!track) return { success: false, error: '无轨道信息' };
-
-      const { sampleRate, channels } = track;
-      const allData = decodedAudioCache.get(engineId);
-
-      if (allData && allData.length > 0) {
-        // 从当前位置切片 Buffer（每采样 4 字节），只推送剩余数据
-        const currentMs: number = engine.getPositionMs?.() ?? engine.get_position?.() ?? 0;
-        const sampleOffset = Math.floor((currentMs / 1000) * sampleRate * channels);
-        const byteOffset = sampleOffset * 4;
-        const remaining = byteOffset < allData.length ? allData.slice(byteOffset) : Buffer.alloc(0);
-
-        if (remaining.length > 0) {
-          // 复用暂停时保留的输出引擎（避免重建引入爆音）
-          const existing = engineOutputs.get(engineId);
-          let outputEngine = existing?.outputEngine ?? null;
-
-          if (!outputEngine) {
-            // 引擎不存在时创建新的（兜底）
-            const native = loadNativeModule();
-            outputEngine = createOutputEngine(native, sampleRate, channels);
-          } else {
-            // 复用已有引擎：重新启动并推送数据（set_all 触发淡入）
-            try { outputEngine.start(); } catch {}
-          }
-
-          if (outputEngine) {
-            outputEngine.outputAudio(remaining, channels, sampleRate);
-            engineOutputs.set(engineId, { outputEngine, interval: null, stopped: false, paused: false });
-          }
-        }
-      }
-
       try { engine.playOneShot(); } catch { engine.play(); }
       return { success: true };
     } catch (error) {
@@ -783,8 +630,6 @@ export function registerAudioEngineHandlers(): void {
       const engine = getEngine(engineId);
       engine.stop();
       stopOutput(engineId);
-      decodedAudioCache.delete(engineId);
-      decodePromises.delete(engineId);
       return { success: true };
     } catch (error) {
       console.error('[AudioEngine] 停止失败:', error);
@@ -792,7 +637,7 @@ export function registerAudioEngineHandlers(): void {
     }
   });
 
-  // 跳转（优化：缓存命中时使用轻量级 setPositionMs 避免 decode-and-discard）
+  // 跳转（流式模式：重置解码器并跳过帧）
   ipcMain.handle('audio-engine:seek', async (_event, engineId: string, positionMs: number) => {
     try {
       const engine = getEngine(engineId);
@@ -802,17 +647,7 @@ export function registerAudioEngineHandlers(): void {
         try { output.outputEngine.flush(); } catch {}
       }
 
-      // 缓存命中 → 轻量级位置更新（无需重新解码文件）
-      if (decodedAudioCache.has(engineId)) {
-        if (typeof engine.setPositionMs === 'function') {
-          engine.setPositionMs(positionMs);
-        } else {
-          engine.seek(positionMs);
-        }
-      } else {
-        // 流式模式（无缓存）→ 完整 seek（重置解码器 + 跳过帧）
-        engine.seek(positionMs);
-      }
+      engine.seek(positionMs);
       return { success: true };
     } catch (error) {
       console.error('[AudioEngine] 跳转失败:', error);
@@ -829,39 +664,15 @@ export function registerAudioEngineHandlers(): void {
         return { success: false, error: '无轨道信息' };
       }
 
-      const hasCache = decodedAudioCache.has(engineId);
-
       // 1. 统一停止旧输出桥接（清理 interval + 停止 + reset 输出引擎）
       stopOutput(engineId);
 
-      // 2. 更新位置追踪（缓存用轻量 setPositionMs，流式用 seek）
-      if (hasCache && typeof engine.setPositionMs === 'function') {
-        engine.setPositionMs(positionMs);
-      } else {
-        engine.seek(positionMs);
-      }
+      // 2. 更新位置追踪（流式 seek：重置解码器 + 跳过帧）
+      engine.seek(positionMs);
 
-      // 3. 推送音频数据
-      if (hasCache) {
-        // 缓存模式：切片推送
-        const { sampleRate, channels } = track;
-        const allData = decodedAudioCache.get(engineId)!;
-        const sampleOffset = Math.floor((positionMs / 1000) * sampleRate * channels);
-        const byteOffset = sampleOffset * 4;
-        const remaining = byteOffset < allData.length ? allData.slice(byteOffset) : allData;
-
-        const native = loadNativeModule();
-        const outputEngine = createOutputEngine(native, sampleRate, channels);
-        if (outputEngine) {
-          outputEngine.outputAudio(remaining, channels, sampleRate);
-          engineOutputs.set(engineId, { outputEngine, interval: null, stopped: false, paused: false });
-        }
-        try { engine.playOneShot(); } catch { engine.play(); }
-      } else {
-        // 流式模式：启动解码线程并重启桥接，墙钟在首帧推送时启动确保进度同步
-        engine.play();
-        startOutput(engineId, engine, true);
-      }
+      // 3. 流式模式：启动解码线程并重启桥接，墙钟在首帧推送时启动确保进度同步
+      engine.play();
+      startOutput(engineId, engine, true);
 
       return { success: true };
     } catch (error) {

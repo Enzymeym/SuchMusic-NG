@@ -92,13 +92,6 @@ export const SETUP_WIZARD_STEPS: SetupWizardStep[] = [
     skippable: false
   },
   {
-    id: 'welcome',
-    title: '欢迎使用 Such',
-    subtitle: '一款精致的本地音乐播放器，为你带来卓越的听觉享受',
-    icon: 'mgc_celebrate_line',
-    skippable: false
-  },
-  {
     id: 'theme',
     title: '选择主题色',
     subtitle: '挑选你喜欢的颜色，打造专属的音乐空间',

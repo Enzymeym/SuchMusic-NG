@@ -281,6 +281,10 @@ export class WebAudioOutputEngine {
     // 避免 decodeAudioData 异步解码期间旧 buffer 仍占内存
     this.audioBuffer = null
 
+    // 释放可能残留的预解码缓冲：本次为常规（非交叉淡化）加载，说明播放上下文已切换，
+    // 旧的下一曲预加载缓冲不再需要，若不清理会长期驻留（~84MB/首）。
+    this.nextBuffer = null
+
     try {
       this.audioBuffer = await ctx.decodeAudioData(buffer)
       this._sampleRate = this.audioBuffer.sampleRate

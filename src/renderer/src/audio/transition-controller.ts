@@ -44,6 +44,15 @@ const PRELOAD_READ_TIMEOUT_MS = 10000
 const PRELOAD_DECODE_TIMEOUT_MS = 15000
 /** 触发点时间预算（毫秒）：距最晚触发点不足该值时下一曲仍未就绪则放弃预解码，走常规硬切 */
 const TRIGGER_GUARD_MS = 10000
+/**
+ * 预解码启动提前量（毫秒）：仅在距最晚触发点不足该值时，才开始读文件 + 解码下一曲。
+ *
+ * 下一曲解码后是一整段 PCM AudioBuffer（立体声约 85MB/首）。若在歌曲开始即预解码，
+ * 这份缓冲会在整首歌播放期间常驻内存；延迟到临近过渡点再解码，可让绝大部分播放时段
+ * 只保留当前曲一份 PCM。该提前量远大于读文件 + 解码 + 特征分析的耗时（通常数秒），
+ * 且始终大于 TRIGGER_GUARD_MS，保证过渡计划在触发点前就绪，不改变过渡行为。
+ */
+const PRELOAD_LEAD_MS = 60000
 
 
 /** 为 Promise 加超时：超时 reject（调用方 catch 降级），避免挂起的异步调用阻塞过渡流程 */
@@ -153,9 +162,10 @@ export class TransitionController {
       this.currentAnalysis = null
       return
     }
-    // 异步分析当前曲（结尾能量 / 结尾节奏 / 结尾调性），与下一首预解码并行
+    // 异步分析当前曲（结尾能量 / 结尾节奏 / 结尾调性）
     this.currentAnalysis = this.analyzeCurrentSong(this.trackId)
-    void this.prepareNext()
+    // 注意：不在此处立即预解码下一曲。改由 onProgress 在临近过渡点（见 PRELOAD_LEAD_MS）
+    // 时触发，避免下一曲整段 PCM 在本曲绝大部分播放期间常驻内存。
   }
 
   /**
@@ -169,10 +179,13 @@ export class TransitionController {
     // 时主动放弃预解码（本曲走常规硬切），避免解码/分析卡住时过渡无限等待
     if (!this.plan) {
       if (this.pendingSong || this.nextUnavailable || this.preparing) return
-      if (positionMs >= this.guardTriggerMs() - TRIGGER_GUARD_MS) {
+      const latestTrigger = this.guardTriggerMs()
+      if (positionMs >= latestTrigger - TRIGGER_GUARD_MS) {
         this.nextUnavailable = true
         return
       }
+      // 临近过渡点才开始预解码：避免下一曲整段 PCM 长期常驻内存（见 PRELOAD_LEAD_MS）
+      if (latestTrigger - positionMs > PRELOAD_LEAD_MS) return
       void this.prepareNext()
       return
     }
@@ -307,10 +320,11 @@ export class TransitionController {
 
       // 下一曲头部特征：节奏（BPM）/ 调性（Key）/ 前奏偏移（内容起点），并行计算
       const headSec = Math.min(STRETCH_HEAD_SEC, channel.length / sampleRate)
-      const headSlice = channel.slice(0, Math.floor(headSec * sampleRate))
+      // analyzeKeyAsync 内部按 maxSec 截断采样范围，直接传整段 channel 即可，
+      // 无需再 slice 一份约 30 秒的 Float32Array 副本（避免数 MB 的瞬时拷贝）。
       const [nextBpm, nextKey] = await Promise.all([
         estimateBpm(channel, sampleRate, 0, headSec),
-        analyzeKeyAsync(headSlice, sampleRate, headSec)
+        analyzeKeyAsync(channel, sampleRate, headSec)
       ])
       if (!this.active || this.trackId !== targetTrackId) return
 
@@ -324,7 +338,7 @@ export class TransitionController {
       // 个别曲目歌词时间戳过早/无歌词时，以音频人声/能量起点为准，避免落在演唱之前。
       const lyricStartSec = getFirstLyricLineStartSec(nextLyrics, next.title)
       const audioStartSec = await analyzeContentStartAsync(
-        headSlice,
+        channel,
         sampleRate,
         CONTENT_ANALYSIS_SEC
       )
@@ -445,9 +459,9 @@ export class TransitionController {
 
     for (let ch = 0; ch < src.numberOfChannels; ch++) {
       const srcData = src.getChannelData(ch)
-      // 拷贝头部到独立缓冲（避免时间拉伸污染播放缓冲；typed array 泛型统一为 ArrayBuffer）
-      let head: Float32Array<ArrayBuffer> = srcData.slice(0, headLen)
-      head = new Float32Array(await timeStretchPcmAsync(head, plan.stretchRatio))
+      // WSOLA 变速只读输入、只写输出，故传入 subarray 视图即可，无需先 slice 一份副本；
+      // timeStretchPcmAsync 直接返回新建的独立缓冲（|ratio-1|<0.01 时原样返回输入，此时同样不被修改）。
+      const head = await timeStretchPcmAsync(srcData.subarray(0, headLen), plan.stretchRatio)
       const outCh = out.getChannelData(ch)
       outCh.set(head.subarray(0, Math.min(head.length, out.length)), 0)
       // 尾部原速拼接
