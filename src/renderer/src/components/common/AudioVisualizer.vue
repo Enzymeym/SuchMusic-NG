@@ -63,13 +63,15 @@ function updateAccentColor(): void {
   }
 }
 
-function setupCanvas(canvas: HTMLCanvasElement, size: number): void {
+function setupCanvas(canvas: HTMLCanvasElement, _size: number): void {
   const dpr = Math.min(window.devicePixelRatio || 1, 1)
   const parent = canvas.parentElement
   if (!parent) return
 
-  canvasW = parent.clientWidth * Math.min(size, 1.5)
-  canvasH = parent.clientHeight * Math.min(size, 1.5)
+  // 画布严格铺满图层容器：可视化的「大小」由外层图层高度（--visualizer-layer-height）
+  // 决定，画布自身不再按 size 放大，避免画布超出容器被 overflow 裁掉
+  canvasW = parent.clientWidth
+  canvasH = parent.clientHeight
 
   canvas.style.width = `${canvasW}px`
   canvas.style.height = `${canvasH}px`
@@ -102,7 +104,9 @@ function drawBars(): void {
   ctx.beginPath()
 
   for (let i = 0; i < BAR_COUNT; i++) {
-    const value = Math.min(displayData[i], 1) * props.intensity
+    // 强度（0.3–1.5）与信号值相乘后必须再次钳制到 1，
+    // 否则强度 >1 时柱高会超过画布高度，柱顶越界被裁（表现为「强度开高显示不全」）
+    const value = Math.min(Math.min(displayData[i], 1) * props.intensity, 1)
     // 无信号频段也渲染占位矮柱，避免频谱出现整段留空（不铺满全宽）
     const barHeight = Math.max(value * maxBarHeight, 3)
 

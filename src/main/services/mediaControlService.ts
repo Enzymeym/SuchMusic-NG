@@ -8,8 +8,9 @@
 
 import { app, ipcMain } from 'electron';
 import { join } from 'path';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync } from 'fs';
 import { getMainWindow } from '../windows/mainWindow';
+import { tryLoadNativeModule as tryLoadNative } from './nativeModuleLoader';
 
 // 类型定义
 export interface MediaControlStatus {
@@ -69,7 +70,7 @@ const commandDedupMap = new Map<string, number>();
 let coverDir: string | null = null;
 
 /**
- * 加载原生模块（多路径探测 + try/catch + 失败降级）
+ * 加载原生模块（统一路径解析 + 失败降级）
  * @returns 原生模块或 null（不可用时降级，应用照常运行）
  */
 function loadNativeModule(): any {
@@ -77,51 +78,19 @@ function loadNativeModule(): any {
     return nativeModule;
   }
 
-  // 收集可能包含原生模块的目录，兼容多种运行形态：
-  // - 生产环境：extraResources 将 resources/native 拷贝到 <resources>/native（app.asar 外）
-  // - 开发环境（electron-vite 打包后 __dirname 指向 out/main）：app.getAppPath() 为项目根
-  // - 动态运行（cwd 不确定）：回退 process.cwd()
-  const root = app.getAppPath();
+  const result = tryLoadNative({
+    label: 'MediaControl',
+    filenames: ['media_control_napi.node'],
+    requiredExports: ['MediaControl']
+  });
 
-  const candidateDirs = [
-    process.resourcesPath && join(process.resourcesPath, 'native'),
-    join(root, 'resources', 'native'),
-    join(root, 'resources'),
-    join(root, 'native', 'rust-audio-engine', 'target', 'release'),
-    join(root, 'native', 'rust-audio-engine', 'target', 'debug'),
-    process.cwd() && join(process.cwd(), 'resources', 'native'),
-    // 兼容旧的非打包目录结构
-    __dirname && join(__dirname, '..', '..', 'resources', 'native'),
-    __dirname && join(__dirname, '..', '..', '..', 'resources', 'native'),
-  ].filter(Boolean) as string[];
-
-  const candidateFilenames = ['media_control_napi.node', 'media_control_napi.dll'];
-  const possiblePaths: string[] = [];
-  for (const dir of candidateDirs) {
-    for (const file of candidateFilenames) {
-      possiblePaths.push(join(dir, file));
-    }
+  if (!result) {
+    console.warn('[MediaControl] 未找到可用的原生模块，系统媒体控制降级为禁用状态');
+    return null;
   }
 
-  for (const modulePath of possiblePaths) {
-    if (existsSync(modulePath)) {
-      try {
-        const mod = require(modulePath);
-        if (!mod.MediaControl) {
-          throw new Error('Missing MediaControl export');
-        }
-        nativeModule = mod;
-        console.log('[MediaControl] 原生模块加载成功:', modulePath);
-        return nativeModule;
-      } catch (error: any) {
-        console.warn('[MediaControl] 原生模块加载失败:', modulePath, error?.message ?? error);
-        nativeModule = null;
-      }
-    }
-  }
-
-  console.warn('[MediaControl] 未找到可用的原生模块，系统媒体控制降级为禁用状态');
-  return null;
+  nativeModule = result.module;
+  return nativeModule;
 }
 
 /**

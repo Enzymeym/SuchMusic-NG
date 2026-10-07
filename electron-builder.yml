@@ -5,6 +5,8 @@ directories:
 files:
   - out/**
   - resources/**
+  # 原生模块只通过 extraResources 交付（见下），不再重复打进 asar
+  - '!resources/native/**'
   - '!**/.vscode/*'
   - '!src/*'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
@@ -14,12 +16,13 @@ files:
 asarUnpack:
   - resources/**
 extraResources:
-  # 将 resources/native 目录下编译好的 .node/.dll 二进制文件拷贝到 resources/native
+  # 将 resources/native 下编译好的 .node 拷贝到 <resources>/native（app.asar 之外）。
+  # 只有 .node 会被 require；cargo 在 Windows 产出的 .dll 是同一份二进制的重命名副本，
+  # 构建脚本已不再输出它。
   - from: resources/native
     to: native
     filter:
       - '*.node'
-      - '*.dll'
 win:
   executableName: such-pc-ng
   target:

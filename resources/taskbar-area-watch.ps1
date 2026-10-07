@@ -41,7 +41,7 @@ function Measure-Blank {
       # Centered taskbar -> left blank area
       $out.x = $trayLeft
       $out.y = [int]$tbRect.Y
-      $out.width = [Math]::Max(120, $leftmostX - $trayLeft - $margin)
+      $out.width = [Math]::Max(176, $leftmostX - $trayLeft - $margin)
       $out.height = [int]$tbRect.Height
       $out.align = 'center'
     } else {
@@ -63,7 +63,7 @@ function Measure-Blank {
       }
       $out.x = $leftEndX + $margin
       $out.y = [int]$tbRect.Y
-      $out.width = [Math]::Max(120, $trayX - $leftEndX - 2 * $margin)
+      $out.width = [Math]::Max(176, $trayX - $leftEndX - 2 * $margin)
       $out.height = [int]$tbRect.Height
       $out.align = 'left'
     }

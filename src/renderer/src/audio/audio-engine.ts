@@ -37,7 +37,14 @@ class AudioEngine {
     }
     // 播放中打开音效面板时立即接线，让参数调整实时生效（无需等下次 doPlay）
     webAudioOutputEngine.attachDspChain(webAudioOutputEngine.dspChain)
+    // 新建的 DSP 链需要立刻拿到当前音量，低音量补偿才能正确跟随
+    webAudioOutputEngine.dspChain.setLoudnessVolume(this.currentVolume)
     return webAudioOutputEngine.dspChain
+  }
+
+  /** 把当前音量上报给 DSP 链，供「低音量高低频补偿」计算使用 */
+  private syncLoudnessVolume(): void {
+    webAudioOutputEngine.dspChain?.setLoudnessVolume(this.currentVolume)
   }
 
   /** 检查 Web Audio API 是否可用 */
@@ -238,6 +245,8 @@ class AudioEngine {
     const effectiveGain = Math.min(4, Math.max(0.125, this.currentVolume * this.volumeBoost * trackGain))
     if (isWebAudioMode()) {
       webAudioOutputEngine.setVolume(effectiveGain)
+      // 音量变化时同步给 DSP，使低音量高低频补偿实时跟随
+      this.syncLoudnessVolume()
       return
     }
     const api = this.getApi()
@@ -546,12 +555,22 @@ class AudioEngine {
         await api.setLoudness({
           enabled: params.enabled,
           compensation: params.compensation,
-          referenceLoudness: params.referenceLoudness,
-          direction: params.direction
+          referenceLoudness: params.referenceLoudness ?? -20,
+          direction: 'both'
         })
       }
     } catch {
       /* ignore */
+    }
+  }
+
+  /**
+   * 设置声道平衡（L/R 独立增益，dB）。仅 Web Audio 模式支持。
+   */
+  public setChannelBalance(enabled: boolean, leftDb: number, rightDb: number): void {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setChannelBalance(enabled, leftDb, rightDb)
     }
   }
 

@@ -178,9 +178,11 @@ export function usePlayerLyrics() {
   }
 
   // 监听当前歌曲变化，尝试在线获取歌词
+  // 同时监听「是否已有歌词」：单曲循环重播（id 不变但歌词对象被重建）时，
+  // 若歌词仍然缺失也能重新触发一次拉取，避免歌词区永久为空。
   watch(
-    () => player.currentSong?.id,
-    (newId) => {
+    () => [player.currentSong?.id, !!player.currentSong?.lyrics] as const,
+    ([newId]) => {
       if (!newId || !player.currentSong) return
       // 歌曲切换时清除手动选择标记
       if (manualLyricsSongId.value !== newId) {

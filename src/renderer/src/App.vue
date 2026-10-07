@@ -42,11 +42,15 @@ const { theme, isDark } = useAutoNaiveTheme()
 
 const route = useRoute()
 const isDesktopLyric = computed(() => route.name === 'desktop-lyric')
+// 任务栏播控窗口与桌面歌词一样，属于无边框透明辅助窗口：
+// 不能渲染不透明启动画面（否则启动瞬间会盖住任务栏区域），也不需要主题包裹
+const isTaskbarControl = computed(() => route.name === 'taskbar-control')
+const isAuxWindow = computed(() => isDesktopLyric.value || isTaskbarControl.value)
 
 // 深色模式下统一深化 NaiveUI 组件背景，与窗口深黑便捷基底对齐，并带轻微描边
 const providerOverrides = computed(() => {
   const base = themeOverridesRef.value
-  if (isDesktopLyric.value || !isDark.value) return base
+  if (isAuxWindow.value || !isDark.value) return base
   return {
     ...base,
     common: {
@@ -242,19 +246,19 @@ onMounted(() => {
 </script>
 
 <template>
-  <template v-if="!isDesktopLyric">
+  <template v-if="!isAuxWindow">
     <SplashScreen :visible="!appReady" @fade-out-complete="handleSplashFadeOutComplete" />
   </template>
 
-  <n-config-provider :theme="isDesktopLyric ? null : theme" :theme-overrides="providerOverrides">
-    <n-global-style v-if="!isDesktopLyric" />
+  <n-config-provider :theme="isAuxWindow ? null : theme" :theme-overrides="providerOverrides">
+    <n-global-style v-if="!isAuxWindow" />
     <n-notification-provider>
       <n-message-provider>
         <n-dialog-provider>
           <update-notification />
           <PluginUpdateNotifier />
           <SetupWizard />
-          <router-view v-show="splashHidden || isDesktopLyric" />
+          <router-view v-show="splashHidden || isAuxWindow" />
         </n-dialog-provider>
       </n-message-provider>
     </n-notification-provider>

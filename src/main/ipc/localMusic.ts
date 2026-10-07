@@ -415,6 +415,27 @@ export function registerLocalMusicHandlers(): void {
     }
   })
 
+  // 批量获取本地音频文件大小（字节）。扫描阶段不逐个 stat 以免拖慢整库扫描，
+  // 由统计页按需传入其关心的路径（本地曲库），仅对这些文件做 stat。
+  ipcMain.handle('local-music:sizes', async (_event, filePaths: unknown) => {
+    const sizes: Record<string, number> = {}
+    if (!Array.isArray(filePaths)) return sizes
+    const paths = Array.from(
+      new Set(filePaths.filter((p): p is string => typeof p === 'string' && !!p))
+    )
+    await Promise.all(
+      paths.map(async (filePath) => {
+        try {
+          const stat = await fs.stat(filePath)
+          if (stat.isFile()) sizes[filePath] = stat.size
+        } catch {
+          // 文件已删除 / 无权限时忽略，统计页按缺失处理
+        }
+      })
+    )
+    return sizes
+  })
+
   // 批量删除本地音乐文件
   ipcMain.handle('local-music:delete', async (_event, filePaths: string[]) => {
     try {

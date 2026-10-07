@@ -133,6 +133,15 @@ const emit = defineEmits<{
 const useCrossfadeTransition = computed(() => player.isTransitioning)
 
 /**
+ * 可视化工件层高度：随「大小」设置同步放大（0.5–1.5 倍基准 60px）。
+ * 之前图层高度写死 60px，而可视化画布会按大小放大，导致高强度/大尺寸下
+ * 频谱柱超出图层被 overflow 裁掉（表现为「强度开高就显示不全」）。
+ */
+const visualizerLayerHeight = computed(
+  () => `${Math.round(60 * Math.min(Math.max(settingsStore.playback.visualizerSize, 0.5), 1.5))}px`
+)
+
+/**
  * 歌词模式状态：隐藏封面，歌曲信息移到歌词顶部居中，歌词居中显示
  */
 const isLyricsMode = ref(false)
@@ -422,6 +431,7 @@ watch(
           v-if="settingsStore.playback.visualizerEnabled"
           class="visualizer-layer"
           :class="{ 'fade-out': isControlsVisible }"
+          :style="{ '--visualizer-layer-height': visualizerLayerHeight }"
         >
           <AudioVisualizer
             :size="settingsStore.playback.visualizerSize"
@@ -842,6 +852,59 @@ watch(
 
   .n-dropdown-divider {
     margin: 2px 8px;
+  }
+}
+
+/* ===== 播放页音量弹窗 =====
+   弹层节点由 naive-ui 创建，不带组件 scope 属性，故此块为全局样式且不使用 :deep()。
+   固定 rail / fill 宽度与 handle 尺寸，保证 0%–100% 各音量下竖条宽度一致
+   （此前 handle 使用 naive 默认 18px，远宽于 4px 轨道，100% 时手柄停在顶端
+   导致「音量条宽度不一致」）。 */
+.player-page-volume-popover {
+  background: rgba(0, 0, 0, 0.8);
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+
+  .volume-slider-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+
+    .volume-value {
+      font-size: 12px;
+      color: #fff;
+      min-width: 40px;
+      text-align: center;
+    }
+
+    .volume-slider {
+      width: 4px !important;
+      height: 100px !important;
+      min-height: 100px !important;
+      flex-shrink: 0 !important;
+
+      .n-slider-rail {
+        width: 4px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.25);
+      }
+
+      .n-slider-rail__fill {
+        width: 4px;
+        border-radius: 999px;
+        background: var(--player-accent-color, #fff);
+      }
+
+      .n-slider-handle {
+        width: 12px;
+        height: 12px;
+        background: var(--player-accent-color, #fff);
+        border: 2px solid rgba(0, 0, 0, 0.35);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+      }
+    }
   }
 }
 </style>

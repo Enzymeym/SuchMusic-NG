@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
-import { NCard, NSwitch, NSlider, NSelect, NButton, NButtonGroup, NAlert, NSpace, NInputNumber } from 'naive-ui'
+import { NCard, NSwitch, NSlider, NSelect, NButton, NButtonGroup, NAlert, NInputNumber } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import SettingsMorphaeumSection from './SettingsMorphaeumSection.vue'
 import {
@@ -86,7 +86,10 @@ const wasapiExclusiveEnabled = computed<boolean>({
 const wasapiAvailable = ref(false)
 
 /// WASAPI 不可用原因
-const wasapiUnavailableReason = ref('正在检测...')
+const wasapiUnavailableReason = ref('')
+
+/// 探测是否已完成（未完成时先不显示「不可用」告警，避免加载瞬间闪烁）
+const wasapiProbeDone = ref(false)
 
 /// 模式切换错误（临时错误，不影响 WASAPI 可用性判断）
 const modeSwitchError = ref('')
@@ -111,6 +114,15 @@ async function refreshDevices() {
   try {
     const devices = await outputManager.enumerateDevices()
     audioDevices.value = devices
+    // 同步默认设备信息到 store：此前只在切换模式时写入，
+    // 导致 store 中设备名为空、UI 显示与默认设备不一致
+    if (!settingsStore.playback.audioOutputDeviceId) {
+      const def = devices.find((d) => d.isDefault) || devices[0]
+      if (def) {
+        settingsStore.playback.audioOutputDeviceId = def.id
+        settingsStore.playback.audioOutputDeviceName = def.name
+      }
+    }
     modeSwitchError.value = '' // 刷新设备时清除错误
   } catch (err) {
     // 静默处理，不影响主流程
@@ -207,14 +219,34 @@ function selectDevice(deviceId: string) {
 }
 
 /// 组件挂载时刷新设备列表
-onMounted(async () => {
-  if (showWasapiControls.value) {
-    // 先探测 WASAPI 是否可用（仅 Windows 平台）
+/// 探测 WASAPI 可用性（仅 Windows 平台）
+/**
+ * 探测 Windows 音频会话 API 是否可用
+ * @param force 为 true 时清除上一次的探测缓存，强制重新检测
+ */
+async function probeWasapi(force = false) {
+  if (force) {
+    outputManager.resetWasapiProbe()
+  }
+  wasapiProbeDone.value = false
+  try {
     const probe = await outputManager.probeWasapiAvailability()
     wasapiAvailable.value = probe.available
-    if (!probe.available) {
-      wasapiUnavailableReason.value = probe.reason
-    }
+    wasapiUnavailableReason.value = probe.available ? '' : probe.reason
+  } finally {
+    wasapiProbeDone.value = true
+  }
+}
+
+/// 用户手动重新检测（例如刚更新完应用、刚插入外置声卡）
+async function retryProbeWasapi() {
+  await probeWasapi(true)
+  await refreshDevices()
+}
+
+onMounted(async () => {
+  if (showWasapiControls.value) {
+    await probeWasapi()
   }
   refreshDevices()
 })
@@ -253,12 +285,18 @@ onBeforeUnmount(() => {
 
     <!-- Windows 音频会话 API 不可用提示（仅在 Windows 平台且设备枚举失败时显示） -->
     <n-alert
-      v-if="showWasapiControls && !wasapiAvailable"
+      v-if="showWasapiControls && wasapiProbeDone && !wasapiAvailable"
       type="warning"
       title="Windows 音频会话 API 不可用"
       style="margin-bottom: 12px"
     >
-      Windows 音频会话 API 音频输出功能当前不可用。原因：{{ wasapiUnavailableReason }}
+      <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 8px">
+        <span>当前会自动使用 Web Audio 播放，不影响正常听歌。</span>
+        <span style="font-size: 12px; opacity: 0.8">原因：{{ wasapiUnavailableReason }}</span>
+        <n-button size="tiny" :loading="devicesLoading" @click="retryProbeWasapi">
+          重新检测
+        </n-button>
+      </div>
     </n-alert>
 
     <!-- 模式切换失败提示（允许用户选择其他设备重试） -->
@@ -283,7 +321,7 @@ onBeforeUnmount(() => {
         borderColor: props.settingItemBorderColor
       }"
     >
-      <div class="setting-row" style="flex-direction: column; align-items: flex-start; gap: 12px">
+      <div class="setting-row setting-row--column">
         <div class="setting-label">
           <div class="main-label">音频输出模式</div>
           <div class="sub-label">
@@ -292,7 +330,7 @@ onBeforeUnmount(() => {
             <strong>Windows 音频会话 API</strong> 可提供更低延迟和独占模式，适合 USB DAC
           </div>
         </div>
-        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
+        <div class="output-mode-controls">
           <n-button-group>
             <n-button
               :type="selectedBaseMode === 'webaudio' ? 'primary' : 'default'"
@@ -312,17 +350,8 @@ onBeforeUnmount(() => {
             </n-button>
           </n-button-group>
           <template v-if="showWasapiControls && selectedBaseMode === 'wasapi' && wasapiAvailable">
-            <div
-              style="
-                display: flex;
-                align-items: center;
-                gap: 6px;
-                margin-left: 8px;
-                padding-left: 12px;
-                border-left: 1px solid var(--n-border-color);
-              "
-            >
-              <span style="font-size: 13px; white-space: nowrap">独占模式</span>
+            <div class="output-mode-exclusive">
+              <span class="exclusive-label">独占模式</span>
               <n-switch
                 v-model:value="wasapiExclusiveEnabled"
                 :loading="modeSwitching"
@@ -335,8 +364,9 @@ onBeforeUnmount(() => {
       </div>
     </n-card>
 
-    <!-- 设备选择 (始终显示) -->
+    <!-- 设备选择（仅在选用 Windows 音频会话 API 时才有意义） -->
     <n-card
+      v-if="showWasapiControls && selectedBaseMode === 'wasapi'"
       class="setting-item"
       :bordered="true"
       size="small"
@@ -345,7 +375,7 @@ onBeforeUnmount(() => {
         borderColor: props.settingItemBorderColor
       }"
     >
-      <div class="setting-row" style="flex-direction: column; align-items: flex-start; gap: 12px">
+      <div class="setting-row setting-row--column">
         <div class="setting-label">
           <div class="main-label">输出设备</div>
           <div class="sub-label">
@@ -353,7 +383,7 @@ onBeforeUnmount(() => {
             独占模式下该设备将被独占，其他应用无法使用。
           </div>
         </div>
-        <n-space align="center" style="width: 100%">
+        <div class="output-device-row">
           <n-select
             v-model:value="selectedDeviceId"
             :loading="devicesLoading"
@@ -363,11 +393,10 @@ onBeforeUnmount(() => {
                 value: d.id
               }))
             "
-            style="flex: 1; max-width: 400px"
             placeholder="选择音频输出设备..."
           />
           <n-button size="small" :loading="devicesLoading" @click="refreshDevices"> 刷新 </n-button>
-        </n-space>
+        </div>
         <div class="time-text">
           {{
             audioDevices.length > 0 ? `已发现 ${audioDevices.length} 个音频设备` : '正在搜索设备...'

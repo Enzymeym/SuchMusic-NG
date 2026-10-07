@@ -1976,14 +1976,17 @@ html[data-theme='dark'] .item-cover {
   flex-shrink: 0;
 }
 
-.volume-slider :deep(.n-slider) {
+/* 注意：此块为非 scoped 全局样式，不能使用 :deep()（非 scoped 块中的 :deep
+   会被原样输出、被浏览器当作未知伪类丢弃，导致整条规则失效）。
+   固定 rail / fill 宽度与 handle 尺寸，保证各音量下竖条宽度一致。 */
+.volume-slider .n-slider {
   width: 4px;
   height: 100px;
   min-height: 100px;
   flex-shrink: 0;
 }
 
-.volume-slider :deep(.n-slider-rail) {
+.volume-slider .n-slider-rail {
   width: 4px;
   height: 100px;
   min-height: 100px;
@@ -1991,13 +1994,13 @@ html[data-theme='dark'] .item-cover {
   border-radius: 999px;
 }
 
-.volume-slider :deep(.n-slider-rail__fill) {
+.volume-slider .n-slider-rail__fill {
   width: 4px;
   background-color: #2c8efd;
   border-radius: 999px;
 }
 
-.volume-slider :deep(.n-slider-handle) {
+.volume-slider .n-slider-handle {
   width: 12px;
   height: 12px;
   background-color: #2c8efd;
@@ -2008,7 +2011,7 @@ html[data-theme='dark'] .item-cover {
     height 0.1s ease;
 }
 
-.volume-slider :deep(.n-slider:hover .n-slider-handle) {
+.volume-slider .n-slider:hover .n-slider-handle {
   width: 14px;
   height: 14px;
 }

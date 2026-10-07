@@ -17,8 +17,8 @@
  *                    └─────────┴─────────┘
  */
 
-import { app, ipcMain } from 'electron';
-import { join } from 'path';
+import { ipcMain } from 'electron';
+import { loadNativeModule as loadNative } from './nativeModuleLoader';
 
 // 类型定义
 export interface WasapiDeviceInfo {
@@ -49,102 +49,24 @@ function generateWasapiEngineId(): string {
 
 /**
  * 加载 native 模块
- * 返回 native 模块对象，如果 WASAPI 导出缺失则抛出明确错误
+ *
+ * 通过统一的 nativeModuleLoader 解析路径。历史实现有两个缺陷：
+ * 1. 用 `nativeModuleLoadAttempted` 把「首次失败」缓存成一条固定文案，
+ *    导致后续调用抛出的错误与真实原因无关（设置页因此显示误导性提示）；
+ * 2. 把 `audio_napi.dll` 也列为候选 —— Node 不把 `.dll` 注册为原生扩展名，
+ *    require 它只会得到 "Invalid or unexpected token"。
  */
 let nativeModule: any = null;
-let nativeModuleLoadAttempted = false;
 
 function loadNativeModule(): any {
   if (nativeModule) return nativeModule;
-  if (nativeModuleLoadAttempted) {
-    throw new Error('WASAPI 原生模块不可用：模块未包含 WasapiOutputEngine 导出（需要重新编译 audio_napi.node）');
-  }
-
-  nativeModuleLoadAttempted = true;
-  console.log('[WASAPI] 开始加载 native 模块...');
-
-  // 收集可能包含原生模块的目录，兼容多种运行形态：
-  // - 生产环境：extraResources 将 resources/native 拷贝到 <resources>/native（app.asar 外）
-  // - 开发环境（electron-vite 打包后 __dirname 指向 out/main）：app.getAppPath() 为项目根
-  // - 动态运行（cwd 不确定）：回退 process.cwd()
-  const root = app.getAppPath();
-  const fs = require('fs');
-
-  const candidateDirs = [
-    process.resourcesPath && join(process.resourcesPath, 'native'),
-    join(root, 'resources', 'native'),
-    join(root, 'resources'),
-    join(root, 'native', 'rust-audio-engine', 'target', 'debug'),
-    join(root, 'native', 'rust-audio-engine', 'target', 'release'),
-    // napi_build::setup() 会在 crate 根目录生成 audio_napi.node
-    join(root, 'native', 'rust-audio-engine', 'audio-napi'),
-    process.cwd() && join(process.cwd(), 'resources', 'native'),
-  ].filter(Boolean) as string[];
-
-  let candidateDirsWithRuntimeDir: string[] = [];
-  try {
-    // __dirname 在打包后为 out/main，向上两级即项目根；兼容旧的非打包目录结构
-    candidateDirsWithRuntimeDir = [
-      join(__dirname, '..', '..', 'resources', 'native'),
-      join(__dirname, '..', '..', '..', 'resources', 'native'),
-    ];
-  } catch {
-    candidateDirsWithRuntimeDir = [];
-  }
-
-  const candidateFilenames = ['audio_napi.node', 'audio_napi.dll'];
-  const possiblePaths: string[] = [];
-  for (const dir of candidateDirs) {
-    for (const file of candidateFilenames) {
-      possiblePaths.push(join(dir, file));
-    }
-  }
-  for (const dir of candidateDirsWithRuntimeDir) {
-    for (const file of candidateFilenames) {
-      possiblePaths.push(join(dir, file));
-    }
-  }
-
-  let loadedModule: any = null;
-  const triedPaths: string[] = [];
-
-  for (const modulePath of possiblePaths) {
-    triedPaths.push(modulePath);
-    if (fs.existsSync(modulePath)) {
-      console.log('[WASAPI] Found:', modulePath);
-      try {
-        loadedModule = require(modulePath);
-        if (!loadedModule) {
-          console.warn('[WASAPI] ⚠️ 模块加载失败');
-          continue;
-        }
-        console.log('[WASAPI] Loaded, exports:', Object.keys(loadedModule));
-
-        if (!loadedModule.WasapiOutputEngine) {
-          console.warn('[WASAPI] ⚠️ 当前 audio_napi.node 未包含 WasapiOutputEngine 导出');
-          console.warn('[WASAPI] ⚠️ 这意味着 WASAPI 绑定尚未编译进原生模块');
-          console.warn('[WASAPI] ⚠️ 请重新构建 Rust 原生模块以启用 WASAPI 功能');
-          throw new Error(
-            'WASAPI 原生模块未编译：audio_napi.node 缺少 WasapiOutputEngine 导出。' +
-            '请在 native/rust-audio-engine 目录执行 cargo build 重新编译后重试。'
-          );
-        }
-
-        nativeModule = loadedModule;
-        console.log('[WASAPI] ✅ WasapiOutputEngine 导出确认可用');
-        return nativeModule;
-      } catch (error: any) {
-        console.error('[WASAPI] Failed to load:', modulePath, error.message);
-        // 不要在这里 throw，继续尝试其他路径或给出明确错误
-      }
-    }
-  }
-
-  const errMsg = loadedModule
-    ? 'WASAPI 原生模块未编译：audio_napi.node 缺少 WasapiOutputEngine 导出。请在 native/rust-audio-engine 目录执行 cargo build 重新编译后重试。'
-    : 'WASAPI 原生模块未找到：audio_napi.node 文件不存在。请运行 npm run build:native（或 npm run dev）编译 Rust 原生模块。已尝试以下路径：\n  - ' +
-      triedPaths.join('\n  - ');
-  throw new Error(errMsg);
+  const { module } = loadNative({
+    label: 'WASAPI',
+    filenames: ['audio_napi.node'],
+    requiredExports: ['WasapiOutputEngine']
+  });
+  nativeModule = module;
+  return nativeModule;
 }
 
 /**

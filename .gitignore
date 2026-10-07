@@ -4,11 +4,24 @@ out
 .DS_Store
 .eslintcache
 *.log*
-symphonia-napi-decoder
 .VSCodeCounter
 
 tests
-native
+# Rust 原生模块源码工作区（仅本地构建用，体积巨大）
+# 注意：必须用 /native 锚定到仓库根目录。
+# 写成裸 `native` 会同时忽略 resources/native，导致预编译的 .node
+# 永远进不了仓库 → CI/Release 打出的安装包缺失全部原生模块
+# （表现为「WASAPI 原生模块不可用」「任务栏播控/标签读取降级」）。
+/native
+/symphonia-napi-decoder
+
+# 预编译原生模块目录：整目录需纳入版本控制（见上）
+# 但其中可能被误拷入的 cargo 构建缓存/元数据不应入库
+resources/native/debug/
+resources/native/.rustc_info.json
+resources/native/*.dll.lib
+# 原生的 .dll 只是 .node 的重命名副本，保留 .node 即可
+resources/native/*.dll
 .env.local
 src/renderer/src/utils/supabase.ts
 .figma
@@ -20,3 +33,4 @@ docs
 .pnpm-fresh-store
 .pnpm-store
 tmp-tags
+.native-junk-backup

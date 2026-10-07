@@ -45,7 +45,7 @@ try {
     # Centered taskbar: enough blank space on the left -> use it
     $out.x = $trayLeft
     $out.y = [int]$tbRect.Y
-    $out.width = [Math]::Max(120, $leftmostX - $trayLeft - $margin)
+    $out.width = [Math]::Max(176, $leftmostX - $trayLeft - $margin)
     $out.height = [int]$tbRect.Height
     $out.align = 'center'
   } else {
@@ -67,7 +67,7 @@ try {
     }
     $out.x = $leftEndX + $margin
     $out.y = [int]$tbRect.Y
-    $out.width = [Math]::Max(120, $trayX - $leftEndX - 2 * $margin)
+    $out.width = [Math]::Max(176, $trayX - $leftEndX - 2 * $margin)
     $out.height = [int]$tbRect.Height
     $out.align = 'left'
   }

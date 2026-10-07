@@ -1,0 +1,6 @@
+# resources/native 下的原生模块（NAPI .node）是二进制产物，
+# 必须禁止任何行尾/编码转换，否则在 Windows 上提交的文件可能被污染而无法加载。
+*.node binary
+*.dll binary
+*.dylib binary
+*.so binary

@@ -5,8 +5,8 @@
  * 与 Rust 引擎的 DSP 链功能对等。在 Web Audio 输出模式下使用。
  *
  * 处理链顺序：
- *   input → EQ (10x BiquadFilter) → Compressor → Limiter
- *         → Loudness (low/high shelf) → Virtual Bass → Soft Clipper → output
+ *   input → EQ (10x BiquadFilter) → Loudness (EQ 响度补偿 + 低音量补偿架)
+ *         → Compressor → Limiter → Virtual Bass → Soft Clipper → output
  *
  * 所有节点始终连接在链中；禁用效果时参数设置为中性值（旁通），
  * 避免动态重连带来的音频断续。
@@ -32,15 +32,37 @@ export interface CompressorParams {
 }
 
 export interface LimiterParams {
+  /** 阈值（dB，对应 ceiling） */
   ceiling: number
   release: number
+  /** 启动时间（ms，可选，默认 5） */
+  attack?: number
+  /** 限幅比（可选，默认 20） */
+  ratio?: number
+  /** 后增益（dB，可选，默认 0） */
+  postGain?: number
 }
 
+/**
+ * 等响度参数
+ *
+ * 包含两套互相独立的响度处理：
+ * 1. **EQ 响度补偿**（`enabled` / `compensation`）：调整 EQ 后保持整体响度与调整前一致。
+ *    DSP 按各频段在整体响度中的权重算出当前 PEQ 曲线带来的响度变化，再施加等量反向增益。
+ * 2. **低音量高低频补偿**（`followVolume` / `followStrength` / `referenceLoudness`）：
+ *    Fletcher-Munson 近似 —— 音量越低，人耳对高低频越不敏感，因此按音量缺口自动提升两端。
+ */
 export interface LoudnessParams {
+  /** EQ 响度补偿开关 */
   enabled: boolean
+  /** EQ 响度补偿强度倍率：0 = 不补偿，1 = 完全抵消 EQ 引起的响度变化（默认），最大 2 */
   compensation: number
-  referenceLoudness: number
-  direction: 'low' | 'high' | 'both'
+  /** 低音量高低频补偿开关（Fletcher-Munson 近似） */
+  followVolume?: boolean
+  /** 低音量补偿强度倍率（0 ~ 2，1 = 默认） */
+  followStrength?: number
+  /** 基准音量（dB，0 = 满音量）：音量低于该值才开始低音量补偿 */
+  referenceLoudness?: number
 }
 
 export interface VirtualBassParams {
@@ -57,6 +79,38 @@ export interface SoftClipperParams {
 
 // ====== 默认频段频率（10 段） ======
 const EQ_BAND_FREQUENCIES = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+
+/**
+ * 各频段在「整体响度」中的权重（与 EQ_BAND_FREQUENCIES 一一对应，和为 1）。
+ *
+ * 近似依据：等频程带宽下粉噪声谱能量近似均匀，再叠加人耳在 250Hz~4kHz
+ * 的等响敏感度峰值 —— 因此中频段权重最高，两端最低。
+ * 用它加权平均各频段增益，即得到该 EQ 曲线对整体响度的净影响（dB）。
+ */
+export const LOUDNESS_BAND_WEIGHTS = [0.05, 0.08, 0.11, 0.14, 0.14, 0.14, 0.13, 0.11, 0.06, 0.04]
+
+/**
+ * 计算一组 EQ 增益（dB）对整体响度的净影响（dB）。
+ *
+ * 返回正数表示该曲线整体变响，负数表示变轻；等响度补偿即取相反数。
+ */
+export function computeEqLoudnessDb(gains: number[]): number {
+  let weighted = 0
+  let total = 0
+  const n = Math.min(gains.length, LOUDNESS_BAND_WEIGHTS.length)
+  for (let i = 0; i < n; i++) {
+    const g = gains[i]
+    if (typeof g !== 'number' || !Number.isFinite(g)) continue
+    weighted += g * LOUDNESS_BAND_WEIGHTS[i]
+    total += LOUDNESS_BAND_WEIGHTS[i]
+  }
+  return total > 0 ? weighted / total : 0
+}
+
+/** 等响度补偿增益的下限 / 上限（dB）：削得多一些，补得保守一些，避免削顶 */
+export const LOUDNESS_COMP_MIN_DB = -18
+export const LOUDNESS_COMP_MAX_DB = 12
+
 
 /** 将 Web Audio 滤波器类型字符串映射到 BiquadFilterType */
 function toBiquadType(type: string): BiquadFilterType {
@@ -91,14 +145,49 @@ export class WebAudioDspChain {
 
   // === 限制器节点 ===
   private limiterNode: DynamicsCompressorNode | null = null
+  private limiterMakeupGain: GainNode | null = null
   private _limiterEnabled = false
+  private limiterAttack = 5
+  private limiterRatio = 20
+  private limiterPostGain = 0
 
   // === 等响度节点 ===
+  /** EQ 响度补偿增益：按 PEQ 曲线反向补偿整体响度 */
+  private loudnessGainNode: GainNode | null = null
+  /** 低音量补偿：低架 / 高架 */
   private loudnessLowShelf: BiquadFilterNode | null = null
   private loudnessHighShelf: BiquadFilterNode | null = null
   private _loudnessEnabled = false
+  /** EQ 补偿强度倍率（0~2，1 = 完全补偿） */
   private loudnessCompensation = 1.0
-  private loudnessDirection: 'low' | 'high' | 'both' = 'both'
+  /** 最近一次实际下发的 EQ 补偿增益（dB），供 UI 回读 */
+  private _loudnessCompDb = 0
+  /** 低音量高低频补偿开关 */
+  private _loudnessFollowVolume = false
+  /** 低音量补偿强度倍率（0~2） */
+  private loudnessFollowStrength = 1.0
+  /** 基准音量（dB，0dB = 满音量），低于该值才开始低音量补偿 */
+  private loudnessReferenceDb = 0
+  /** 当前音量换算出的 dB（满音量 = 0dB） */
+  private loudnessVolumeDb = 0
+  /** 最近一次实际下发的低/高频提升量（dB），供 UI 回读 */
+  private _loudnessLowBoost = 0
+  private _loudnessHighBoost = 0
+
+  /** 低音量补偿的上限（dB） */
+  private static readonly FOLLOW_LOW_MAX_DB = 15
+  private static readonly FOLLOW_HIGH_MAX_DB = 12
+  /** 音量缺口达到该值（dB）时补偿到达上限 */
+  private static readonly FOLLOW_FULL_DEFICIT_DB = 30
+
+  // === 声道平衡节点（分频→左右独立增益→合并） ===
+  private balanceSplitter: ChannelSplitterNode | null = null
+  private balanceGainL: GainNode | null = null
+  private balanceGainR: GainNode | null = null
+  private balanceMerger: ChannelMergerNode | null = null
+  private _balanceEnabled = false
+  private balanceLDb = 0
+  private balanceRDb = 0
 
   // === 虚拟低频节点 ===
   private virtualBassLowpass: BiquadFilterNode | null = null
@@ -182,19 +271,14 @@ export class WebAudioDspChain {
       this.eqNodes.push(filter)
     }
 
-    // --- Compressor ---
-    this.compressorNode = ctx.createDynamicsCompressor()
-    this.applyCompressorDefaults()
-    prevNode.connect(this.compressorNode)
-    prevNode = this.compressorNode
+    // --- Loudness：EQ 响度补偿增益 + 低音量高低频补偿架 ---
+    // 放在压缩/限幅之前：提升量（低音量补偿最多 +15dB）会被后级限幅器接住，
+    // 不会在链路末端直接削顶；关闭动态处理时位置无影响。
+    this.loudnessGainNode = ctx.createGain()
+    this.loudnessGainNode.gain.value = 1
+    prevNode.connect(this.loudnessGainNode)
+    prevNode = this.loudnessGainNode
 
-    // --- Limiter ---
-    this.limiterNode = ctx.createDynamicsCompressor()
-    this.applyLimiterDefaults()
-    prevNode.connect(this.limiterNode)
-    prevNode = this.limiterNode
-
-    // --- Loudness (low shelf + high shelf) ---
     this.loudnessLowShelf = ctx.createBiquadFilter()
     this.loudnessLowShelf.type = 'lowshelf'
     this.loudnessLowShelf.frequency.value = 200
@@ -208,6 +292,24 @@ export class WebAudioDspChain {
     this.loudnessHighShelf.gain.value = 0
     prevNode.connect(this.loudnessHighShelf)
     prevNode = this.loudnessHighShelf
+
+    // --- Compressor ---
+    this.compressorNode = ctx.createDynamicsCompressor()
+    this.applyCompressorDefaults()
+    prevNode.connect(this.compressorNode)
+    prevNode = this.compressorNode
+
+    // --- Limiter ---
+    this.limiterNode = ctx.createDynamicsCompressor()
+    this.applyLimiterDefaults()
+    prevNode.connect(this.limiterNode)
+    prevNode = this.limiterNode
+
+    // --- Limiter 后增益 ---
+    this.limiterMakeupGain = ctx.createGain()
+    this.limiterMakeupGain.gain.value = 1
+    prevNode.connect(this.limiterMakeupGain)
+    prevNode = this.limiterMakeupGain
 
     // --- Virtual Bass (parallel: dry + waveshaper) ---
     this.virtualBassDryGain = ctx.createGain()
@@ -252,33 +354,46 @@ export class WebAudioDspChain {
     prevNode.connect(this.softClipperPostGain)
     prevNode = this.softClipperPostGain
 
+    // --- 声道平衡（L/R 独立增益）---
+    this.balanceSplitter = ctx.createChannelSplitter(2)
+    this.balanceGainL = ctx.createGain()
+    this.balanceGainR = ctx.createGain()
+    this.balanceMerger = ctx.createChannelMerger(2)
+    prevNode.connect(this.balanceSplitter)
+    this.balanceSplitter.connect(this.balanceGainL, 0)
+    this.balanceSplitter.connect(this.balanceGainR, 1)
+    this.balanceGainL.connect(this.balanceMerger, 0, 0)
+    this.balanceGainR.connect(this.balanceMerger, 0, 1)
+    prevNode = this.balanceMerger
+
     // 输出
     prevNode.connect(outputNode)
 
     // 缓存所有内部节点的引用
     this._builtNodes = [
       ...this.eqNodes,
-      this.compressorNode, this.limiterNode,
-      this.loudnessLowShelf, this.loudnessHighShelf,
+      this.loudnessGainNode, this.loudnessLowShelf, this.loudnessHighShelf,
+      this.compressorNode, this.limiterNode, this.limiterMakeupGain,
       this.virtualBassLowpass, this.virtualBassShaper,
       this.virtualBassWetGain, this.virtualBassDryGain, this.virtualBassMixGain,
-      this.softClipperNode, this.softClipperPreGain, this.softClipperPostGain
+      this.softClipperNode, this.softClipperPreGain, this.softClipperPostGain,
+      this.balanceSplitter, this.balanceGainL, this.balanceGainR, this.balanceMerger
     ].filter((n): n is NonNullable<typeof n> => n != null)
   }
 
   /** 仅连接输入/输出（内部链已在 buildChain 中连接好，无需重建） */
   private wireInputOutput(inputNode: AudioNode, outputNode: AudioNode): void {
-    // 先断开输出端的旧连接：只断 softClipperPostGain（链的末端）即可清理
-    // 上次接线遗留的输出，绝不能动 eqNodes[0] —— AudioNode.disconnect() 会切断
-    // 其所有输出（含 EQ[0] → EQ[1] 内部链），导致整条链路静音。
-    try { this.softClipperPostGain?.disconnect() } catch { /* ignore */ }
+    // 先断开输出端的旧连接：只断链的末端节点即可清理上次接线遗留的输出，
+    // 绝不能动 eqNodes[0] —— AudioNode.disconnect() 会切断其所有输出
+    // （含 EQ[0] → EQ[1] 内部链），导致整条链路静音。
+    try { this.balanceMerger?.disconnect() } catch { /* ignore */ }
     // 输入：inputNode → 第一个 EQ 节点
     if (this.eqNodes.length > 0) {
       inputNode.connect(this.eqNodes[0])
     }
-    // 输出：最后一个节点（softClipperPostGain）→ outputNode
-    if (this.softClipperPostGain) {
-      this.softClipperPostGain.connect(outputNode)
+    // 输出：末端节点（balanceMerger）→ outputNode
+    if (this.balanceMerger) {
+      this.balanceMerger.connect(outputNode)
     }
   }
 
@@ -292,11 +407,12 @@ export class WebAudioDspChain {
     this.eqNodes = []
 
     const nodes: (AudioNode | null)[] = [
-      this.compressorNode, this.limiterNode,
-      this.loudnessLowShelf, this.loudnessHighShelf,
+      this.loudnessGainNode, this.loudnessLowShelf, this.loudnessHighShelf,
+      this.compressorNode, this.limiterNode, this.limiterMakeupGain,
       this.virtualBassLowpass, this.virtualBassShaper,
       this.virtualBassWetGain, this.virtualBassDryGain, this.virtualBassMixGain,
-      this.softClipperNode, this.softClipperPreGain, this.softClipperPostGain
+      this.softClipperNode, this.softClipperPreGain, this.softClipperPostGain,
+      this.balanceSplitter, this.balanceGainL, this.balanceGainR, this.balanceMerger
     ]
     nodes.forEach((n) => {
       if (n) {
@@ -306,6 +422,8 @@ export class WebAudioDspChain {
 
     this.compressorNode = null
     this.limiterNode = null
+    this.limiterMakeupGain = null
+    this.loudnessGainNode = null
     this.loudnessLowShelf = null
     this.loudnessHighShelf = null
     this.virtualBassLowpass = null
@@ -316,6 +434,10 @@ export class WebAudioDspChain {
     this.softClipperNode = null
     this.softClipperPreGain = null
     this.softClipperPostGain = null
+    this.balanceSplitter = null
+    this.balanceGainL = null
+    this.balanceGainR = null
+    this.balanceMerger = null
 
     this._builtNodes = []
     this._isConnected = false
@@ -339,6 +461,7 @@ export class WebAudioDspChain {
     this.syncLoudness()
     this.syncVirtualBass()
     this.syncSoftClipper()
+    this.syncBalance()
   }
 
   // ====== EQ 控制 ======
@@ -367,6 +490,8 @@ export class WebAudioDspChain {
       filter.gain.value = this._eqEnabled ? band.preGain : 0
       filter.Q.value = band.preQ
     }
+    // 单频段变化同样影响整体响度，保持等响度补偿跟随
+    this.syncLoudness()
   }
 
   /**
@@ -380,17 +505,20 @@ export class WebAudioDspChain {
   }
 
   private syncEq(): void {
-    if (!this._isConnected) return
-    for (let i = 0; i < this.eqNodes.length; i++) {
-      const filter = this.eqNodes[i]
-      const settings = this.eqBandSettings[i]
-      if (filter) {
-        filter.type = toBiquadType(settings.bandType || 'peaking')
-        filter.frequency.value = settings.frequency
-        filter.gain.value = this._eqEnabled ? settings.preGain : 0
-        filter.Q.value = settings.preQ
+    if (this._isConnected) {
+      for (let i = 0; i < this.eqNodes.length; i++) {
+        const filter = this.eqNodes[i]
+        const settings = this.eqBandSettings[i]
+        if (filter) {
+          filter.type = toBiquadType(settings.bandType || 'peaking')
+          filter.frequency.value = settings.frequency
+          filter.gain.value = this._eqEnabled ? settings.preGain : 0
+          filter.Q.value = settings.preQ
+        }
       }
     }
+    // EQ 曲线变化会改变整体响度，需同步等响度补偿
+    this.syncLoudness()
   }
 
   // ====== 压缩器控制 ======
@@ -453,12 +581,16 @@ export class WebAudioDspChain {
   }
 
   /**
-   * 设置限制器参数
+   * 设置限制器参数（阈值 / 释放 / 启动时间 / 限幅比 / 后增益）
    */
   setLimiterParams(params: LimiterParams): void {
+    if (params.attack !== undefined) this.limiterAttack = params.attack
+    if (params.ratio !== undefined) this.limiterRatio = params.ratio
+    if (params.postGain !== undefined) this.limiterPostGain = params.postGain
     if (!this.limiterNode) return
     this.limiterNode.threshold.value = params.ceiling
     this.limiterNode.release.value = Math.max(0.001, params.release / 1000)
+    this.syncLimiter()
   }
 
   /**
@@ -481,14 +613,19 @@ export class WebAudioDspChain {
   private syncLimiter(): void {
     if (!this.limiterNode) return
     if (this._limiterEnabled) {
-      // 配置为砖墙限制器
-      this.limiterNode.ratio.value = 20
-      this.limiterNode.attack.value = 0.0001
+      // 应用用户设置的启动时间 / 限幅比，knee=0 使其接近砖墙限制器
+      this.limiterNode.ratio.value = Math.max(1, Math.min(20, this.limiterRatio))
+      this.limiterNode.attack.value = Math.max(0.0001, this.limiterAttack / 1000)
       this.limiterNode.knee.value = 0
     } else {
       this.applyLimiterDefaults()
     }
-    // threshold 和 release 由 setLimiterParams 设置，仅在 enabled 时生效
+    // 限制器后增益：任一状态下都按用户设定应用（关闭时为 0dB → 1x）
+    if (this.limiterMakeupGain) {
+      const db = this._limiterEnabled ? this.limiterPostGain : 0
+      this.limiterMakeupGain.gain.value = Math.pow(10, db / 20)
+    }
+    // threshold 和 release 由 setLimiterParams 设置
   }
 
   // ====== 等响度控制 ======
@@ -506,22 +643,86 @@ export class WebAudioDspChain {
    */
   setLoudnessParams(params: LoudnessParams): void {
     if (params.enabled !== undefined) this._loudnessEnabled = params.enabled
-    if (params.compensation !== undefined) this.loudnessCompensation = params.compensation
-    if (params.direction !== undefined) this.loudnessDirection = params.direction
+    if (params.compensation !== undefined) {
+      this.loudnessCompensation = Math.max(0, Math.min(2, params.compensation))
+    }
+    if (params.followVolume !== undefined) this._loudnessFollowVolume = params.followVolume
+    if (params.followStrength !== undefined) {
+      this.loudnessFollowStrength = Math.max(0, Math.min(2, params.followStrength))
+    }
+    if (params.referenceLoudness !== undefined) {
+      this.loudnessReferenceDb = Math.max(-40, Math.min(0, params.referenceLoudness))
+    }
     this.syncLoudness()
   }
 
+  /**
+   * 上报当前播放音量（0..1），用于低音量高低频补偿。
+   * 满音量 = 0dB，音量越低该值越负，补偿量随之增大。
+   */
+  setLoudnessVolume(volume: number): void {
+    const v = Math.max(0.0001, Math.min(1, volume))
+    this.loudnessVolumeDb = 20 * Math.log10(v)
+    this.syncLoudness()
+  }
+
+  /** 当前实际下发的 EQ 响度补偿增益（dB，正数=提升），供 UI 回读显示 */
+  get loudnessCompensationDb(): number {
+    return this._loudnessCompDb
+  }
+
+  /** 当前实际下发的低频提升量（dB），供 UI 回读显示 */
+  get loudnessLowBoost(): number {
+    return this._loudnessLowBoost
+  }
+
+  /** 当前实际下发的高频提升量（dB），供 UI 回读显示 */
+  get loudnessHighBoost(): number {
+    return this._loudnessHighBoost
+  }
+
+  /**
+   * 同步等响度两个部分。
+   */
   private syncLoudness(): void {
+    // --- 1) EQ 响度补偿：调整 EQ 后保持整体响度与调整前一致 ---
+    // 按频段权重求出当前 PEQ 曲线带来的响度变化，再施加等量反向增益；
+    // 例如整体 +3dB 的曲线会被补偿 -3dB，音色变了但响度不变。EQ 旁通时不补偿。
+    if (this.loudnessGainNode) {
+      let compDb = 0
+      if (this._loudnessEnabled && this._eqEnabled) {
+        const loudnessDelta = computeEqLoudnessDb(this.eqBandSettings.map((b) => b.preGain))
+        compDb = Math.max(
+          LOUDNESS_COMP_MIN_DB,
+          Math.min(LOUDNESS_COMP_MAX_DB, -loudnessDelta * this.loudnessCompensation)
+        )
+      }
+      this._loudnessCompDb = compDb
+      this.loudnessGainNode.gain.value = Math.pow(10, compDb / 20)
+    }
+
+    // --- 2) 低音量高低频补偿（Fletcher-Munson 近似）---
     if (!this.loudnessLowShelf || !this.loudnessHighShelf) return
-    if (this._loudnessEnabled) {
-      // 基于 Fletcher-Munson 近似：低频 + 高频提升
-      const comp = this.loudnessCompensation
-      // 参考响度越低，补偿越大（反向关系）
-      const lowBoost = this.loudnessDirection === 'high' ? 0 : comp * 6
-      const highBoost = this.loudnessDirection === 'low' ? 0 : comp * 4
+    if (this._loudnessFollowVolume) {
+      // 音量缺口：比基准低多少 dB（高于基准则为 0，不补偿）
+      const deficitDb = Math.max(
+        0,
+        Math.min(
+          WebAudioDspChain.FOLLOW_FULL_DEFICIT_DB,
+          this.loudnessReferenceDb - this.loudnessVolumeDb
+        )
+      )
+      const ratio =
+        (deficitDb / WebAudioDspChain.FOLLOW_FULL_DEFICIT_DB) * this.loudnessFollowStrength
+      const lowBoost = Math.min(ratio * WebAudioDspChain.FOLLOW_LOW_MAX_DB, 18)
+      const highBoost = Math.min(ratio * WebAudioDspChain.FOLLOW_HIGH_MAX_DB, 15)
+      this._loudnessLowBoost = lowBoost
+      this._loudnessHighBoost = highBoost
       this.loudnessLowShelf.gain.value = lowBoost
       this.loudnessHighShelf.gain.value = highBoost
     } else {
+      this._loudnessLowBoost = 0
+      this._loudnessHighBoost = 0
       this.loudnessLowShelf.gain.value = 0
       this.loudnessHighShelf.gain.value = 0
     }
@@ -529,13 +730,22 @@ export class WebAudioDspChain {
 
   // ====== 虚拟低频控制 ======
 
-  /** 创建正弦波形整形曲线，用于生成谐波 */
+  /**
+   * 创建用于生成低频谐波的非线性曲线。
+   *
+   * 旧实现为 `sin(x * π/2 * drive*2)`：当 drive > 0.5 时自变量超过 π/2，
+   * 曲线在 |x| 较大处回折（非单调），输入越大输出反而越小，产生折叠失真，
+   * 听感是「越增强越糊/越乱」。改为归一化 tanh（严格单调奇对称）：
+   * drive 越大谐波越丰富但永不回折，低音增强干净可控。
+   */
   private makeSineShaperCurve(drive: number): Float32Array {
     const length = 1024
     const curve = new Float32Array(length)
+    const k = 1 + Math.max(0, drive) * 3
+    const norm = Math.tanh(k) || 1
     for (let i = 0; i < length; i++) {
       const x = (i / (length - 1)) * 2 - 1 // -1 to 1
-      curve[i] = Math.sin(x * Math.PI * 0.5 * Math.max(0.1, drive * 2))
+      curve[i] = Math.tanh(k * x) / norm
     }
     return curve
   }
@@ -570,7 +780,8 @@ export class WebAudioDspChain {
       if (this.virtualBassShaper) {
         this.virtualBassShaper.curve = this.makeSineShaperCurve(drive) as Float32Array<ArrayBuffer>
       }
-      this.virtualBassWetGain.gain.value = 0.5 * drive
+      // 湿声（谐波）增益：控制在 0.35 以内，避免与干声直接相加后低频过冲
+      this.virtualBassWetGain.gain.value = 0.35 * drive
     } else {
       this.virtualBassWetGain.gain.value = 0
     }
@@ -644,5 +855,27 @@ export class WebAudioDspChain {
       this.softClipperNode.curve = this.makeLinearCurve() as Float32Array<ArrayBuffer>
       this.softClipperNode.oversample = 'none'
     }
+  }
+
+  // ====== 声道平衡控制 ======
+
+  /**
+   * 设置声道平衡（L/R 独立增益，单位 dB）。
+   * 关闭时左右均回到 0dB（1x）。
+   */
+  setChannelBalance(enabled: boolean, leftDb: number, rightDb: number): void {
+    this._balanceEnabled = enabled
+    this.balanceLDb = leftDb
+    this.balanceRDb = rightDb
+    this.syncBalance()
+  }
+
+  private syncBalance(): void {
+    if (!this.balanceGainL || !this.balanceGainR) return
+    // 钳制到 [-60, 12] dB：-60dB 近似静音，避免 Math.pow 出现 0/NaN
+    const lDb = this._balanceEnabled ? Math.max(-60, Math.min(12, this.balanceLDb)) : 0
+    const rDb = this._balanceEnabled ? Math.max(-60, Math.min(12, this.balanceRDb)) : 0
+    this.balanceGainL.gain.value = Math.pow(10, lDb / 20)
+    this.balanceGainR.gain.value = Math.pow(10, rDb / 20)
   }
 }

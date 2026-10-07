@@ -153,6 +153,17 @@ export class AudioOutputModeManager {
   }
 
   /**
+   * 清除探测缓存
+   *
+   * probeWasapiAvailability 命中缓存后会直接返回上一次的结论。用户在设置页
+   * 点击「重新检测」（例如刚更新完应用 / 刚接上外置声卡）时需要一次真实的重新探测。
+   */
+  resetWasapiProbe(): void {
+    this.wasapiDetected = false;
+    this.wasapiUnavailableReason = '';
+  }
+
+  /**
    * 检查 WASAPI 是否可用（每次调用都重新探测）
    */
   async probeWasapiAvailability(): Promise<{ available: boolean; reason: string }> {

@@ -48,6 +48,13 @@ jobs:
           sudo apt-get install -y libarchive-tools libopenjp2-7
           sudo snap install snapcraft --classic
 
+      # 门禁：resources/native 下的原生模块必须随仓库一起被检出。
+      # 历史上 .gitignore 里一条未锚定的 `native` 规则把 resources/native 一并忽略，
+      # 导致 CI 检出后该目录不存在、构建静默跳过原生模块，发布出去的安装包
+      # 缺失 WASAPI / 系统媒体控制 / 标签读取等能力。这里让此类问题直接构建失败。
+      - name: Verify native modules
+        run: node scripts/verify-native.mjs --strict
+
       - name: Build for Windows
         if: matrix.os == 'windows-latest'
         run: pnpm run build:win --publish never

@@ -9,11 +9,15 @@ header = """
 本项目的变更记录由 git-cliff 根据 Conventional Commits 自动生成。
 """
 # 每次迭代生成的正文模板
+# 注意：commit.body 前必须显式换行。Conventional Commits 的 body 不含前导换行，
+# 若写成 `{{ commit.message }}{{ commit.body }}`，git-cliff 会把正文首行直接拼到
+# 提交标题后面（如「…缺失# Such Music NG v1.2.1」），破坏 release 正文排版。
 body = """
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | upper_first }}
 {% for commit in commits %}
-- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message }}{% if commit.breaking %} ⚠{% endif %}{% if commit.body %}{{ commit.body }}{% endif %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message }}{% if commit.breaking %} ⚠{% endif %}{% if commit.body %}
+{{ commit.body }}{% endif %}
 {% endfor %}
 {% endfor %}
 """

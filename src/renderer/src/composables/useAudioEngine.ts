@@ -31,16 +31,33 @@ export interface CompressorParams {
 export interface LimiterParams {
   ceiling: number;
   release: number;
+  /** 启动时间（ms） */
+  attack?: number;
+  /** 限幅比 */
+  ratio?: number;
+  /** 后增益（dB） */
+  postGain?: number;
 }
 
 /**
  * 等响度参数
+ *
+ * 包含两套互相独立的响度处理：
+ * 1. **EQ 响度补偿**（`enabled` / `compensation`）：调整 EQ 后保持整体响度与调整前一致。
+ * 2. **低音量高低频补偿**（`followVolume` / `followStrength` / `referenceLoudness`）：
+ *    Fletcher-Munson 近似，音量越低越提升高低频两端。
  */
 export interface LoudnessParams {
+  /** EQ 响度补偿开关 */
   enabled: boolean;
+  /** EQ 响度补偿强度倍率：0 = 不补偿，1 = 完全补偿（默认），最大 2 */
   compensation: number;
-  referenceLoudness: number;
-  direction: 'low' | 'high' | 'both';
+  /** 低音量高低频补偿开关 */
+  followVolume?: boolean;
+  /** 低音量补偿强度倍率（0 ~ 2，1 = 默认） */
+  followStrength?: number;
+  /** 基准音量（dB，0 = 满音量）：音量低于该值才开始低音量补偿 */
+  referenceLoudness?: number;
 }
 
 /**
@@ -124,13 +141,32 @@ const BUILTIN_PRESETS: Preset[] = [
     id: 'flat',
     name: '平坦',
     builtin: true,
-    eqEnabled: false,
-    eqBands: [],
+    // 平坦 = EQ 开启但各频段均为 0dB，而不是关闭均衡器。
+    // （旧实现 eqEnabled:false 会让「切换到平坦 / 重置」时把均衡器整块禁用）
+    eqEnabled: true,
+    eqBands: [
+      { frequency: 32, preGain: 0, postGain: 0, preQ: 0.7, postQ: 0.7, bandType: 'lowShelf' },
+      { frequency: 64, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 125, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 250, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 500, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 1000, preGain: 0, postGain: 0, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 2000, preGain: 0, postGain: 0, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 4000, preGain: 0, postGain: 0, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+      { frequency: 8000, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+      { frequency: 16000, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'highShelf' }
+    ],
     compressorEnabled: false,
     compressor: { threshold: -24, ratio: 4, attack: 10, release: 100, knee: 6 },
     limiterEnabled: false,
     limiter: { ceiling: -0.3, release: 50 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    loudness: {
+      enabled: false,
+      compensation: 1.0,
+      followVolume: false,
+      followStrength: 1.0,
+      referenceLoudness: 0
+    },
     virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
@@ -155,7 +191,13 @@ const BUILTIN_PRESETS: Preset[] = [
     compressor: { threshold: -18, ratio: 4, attack: 5, release: 80, knee: 4 },
     limiterEnabled: true,
     limiter: { ceiling: -0.3, release: 50 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    loudness: {
+      enabled: false,
+      compensation: 1.0,
+      followVolume: false,
+      followStrength: 1.0,
+      referenceLoudness: 0
+    },
     virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
@@ -180,7 +222,13 @@ const BUILTIN_PRESETS: Preset[] = [
     compressor: { threshold: -20, ratio: 3, attack: 8, release: 120, knee: 6 },
     limiterEnabled: true,
     limiter: { ceiling: -0.3, release: 50 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    loudness: {
+      enabled: false,
+      compensation: 1.0,
+      followVolume: false,
+      followStrength: 1.0,
+      referenceLoudness: 0
+    },
     virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
@@ -205,7 +253,13 @@ const BUILTIN_PRESETS: Preset[] = [
     compressor: { threshold: -24, ratio: 4, attack: 10, release: 100, knee: 6 },
     limiterEnabled: false,
     limiter: { ceiling: -0.3, release: 50 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    loudness: {
+      enabled: false,
+      compensation: 1.0,
+      followVolume: false,
+      followStrength: 1.0,
+      referenceLoudness: 0
+    },
     virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
@@ -230,7 +284,13 @@ const BUILTIN_PRESETS: Preset[] = [
     compressor: { threshold: -24, ratio: 4, attack: 10, release: 100, knee: 6 },
     limiterEnabled: false,
     limiter: { ceiling: -0.3, release: 50 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    loudness: {
+      enabled: false,
+      compensation: 1.0,
+      followVolume: false,
+      followStrength: 1.0,
+      referenceLoudness: 0
+    },
     virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
@@ -255,7 +315,13 @@ const BUILTIN_PRESETS: Preset[] = [
     compressor: { threshold: -12, ratio: 6, attack: 3, release: 60, knee: 2 },
     limiterEnabled: true,
     limiter: { ceiling: -0.5, release: 30 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    loudness: {
+      enabled: false,
+      compensation: 1.0,
+      followVolume: false,
+      followStrength: 1.0,
+      referenceLoudness: 0
+    },
     virtualBass: { enabled: true, intensity: 60, crossoverFreq: 100 },
     softClipper: { enabled: true, threshold: 1.5, makeupGain: 2 }
   },
@@ -280,7 +346,13 @@ const BUILTIN_PRESETS: Preset[] = [
     compressor: { threshold: -18, ratio: 3, attack: 10, release: 150, knee: 8 },
     limiterEnabled: false,
     limiter: { ceiling: -0.3, release: 50 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    loudness: {
+      enabled: false,
+      compensation: 1.0,
+      followVolume: false,
+      followStrength: 1.0,
+      referenceLoudness: 0
+    },
     virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
@@ -305,7 +377,13 @@ const BUILTIN_PRESETS: Preset[] = [
     compressor: { threshold: -24, ratio: 4, attack: 10, release: 100, knee: 6 },
     limiterEnabled: true,
     limiter: { ceiling: -1.0, release: 50 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    loudness: {
+      enabled: false,
+      compensation: 1.0,
+      followVolume: false,
+      followStrength: 1.0,
+      referenceLoudness: 0
+    },
     virtualBass: { enabled: true, intensity: 80, crossoverFreq: 150 },
     softClipper: { enabled: true, threshold: 1.0, makeupGain: 3 }
   },
@@ -330,7 +408,13 @@ const BUILTIN_PRESETS: Preset[] = [
     compressor: { threshold: -24, ratio: 4, attack: 10, release: 100, knee: 6 },
     limiterEnabled: false,
     limiter: { ceiling: -0.3, release: 50 },
-    loudness: { enabled: false, compensation: 1.0, referenceLoudness: -20, direction: 'both' },
+    loudness: {
+      enabled: false,
+      compensation: 1.0,
+      followVolume: false,
+      followStrength: 1.0,
+      referenceLoudness: 0
+    },
     virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   }
@@ -373,7 +457,10 @@ export function useAudioEngine() {
   const limiterEnabled = ref(false);
   const limiter = ref<LimiterParams>({
     ceiling: -0.3,
-    release: 50
+    release: 50,
+    attack: 5,
+    ratio: 20,
+    postGain: 0
   });
   const limiterGR = ref(0);
 
@@ -381,8 +468,9 @@ export function useAudioEngine() {
   const loudness = ref<LoudnessParams>({
     enabled: false,
     compensation: 1.0,
-    referenceLoudness: -20,
-    direction: 'both'
+    followVolume: false,
+    followStrength: 1.0,
+    referenceLoudness: 0
   });
 
   // 虚拟低频状态
@@ -1068,6 +1156,13 @@ export function useAudioEngine() {
     audioEngine.setLoudnessEnabled(enabled);
   }
 
+  /**
+   * 设置声道平衡（L/R 独立增益，dB）。仅 Web Audio 模式生效。
+   */
+  function setChannelBalance(enabled: boolean, leftDb: number, rightDb: number) {
+    audioEngine.setChannelBalance(enabled, leftDb, rightDb);
+  }
+
   // === 虚拟低频控制 ===
 
   /**
@@ -1149,6 +1244,9 @@ export function useAudioEngine() {
     loudness,
     setLoudnessEnabled,
     setLoudnessParams,
+
+    // 声道平衡（仅 Web Audio）
+    setChannelBalance,
 
     // 虚拟低频
     virtualBass,

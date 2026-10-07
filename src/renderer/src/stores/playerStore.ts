@@ -78,6 +78,26 @@ function restoreLyricsFromCache(song: PlayerSong): PlayerSong {
   return song
 }
 
+/**
+ * 解析歌曲歌词：依次尝试「歌曲自身 → 歌词缓存 → 上一份同 id 歌曲对象」。
+ *
+ * 第三步专门修复「单曲循环（loop）时歌词丢失」：单曲循环重播会通过
+ * playSongAtIndex 用播放列表中已剥离歌词的项重建 currentSong，若此时
+ * lyricsCache 恰好未命中（缓存容量淘汰 / 该歌词从未经 setLyrics 写入），
+ * 重播瞬间歌词区就会变空。同一首歌重播时 currentSong 仍持有歌词，
+ * 直接沿用即可保证行为与 setCurrentSong 一致。
+ */
+function resolveSongLyrics(song: PlayerSong, previous: PlayerSong | null): PlayerSong {
+  restoreLyricsFromCache(song)
+  if (previous && previous.id === song.id) {
+    if (!song.lyrics && previous.lyrics) song.lyrics = previous.lyrics
+    if (!song.translatedLyrics && previous.translatedLyrics) {
+      song.translatedLyrics = previous.translatedLyrics
+    }
+  }
+  return song
+}
+
 export const usePlayerStore = defineStore('player', {
   // 播放器全局状态
   state: () => ({
@@ -391,8 +411,9 @@ export const usePlayerStore = defineStore('player', {
       if (index >= 0 && index < this.playlist.length) {
         this.currentIndex = index
         const song = this.playlist[index]
-        // 为了触发 watch 监听器，创建一个新的对象引用，并从缓存恢复歌词
-        this.currentSong = restoreLyricsFromCache({ ...song })
+        // 为了触发 watch 监听器，创建一个新的对象引用，并从缓存/上一份同 id 歌曲恢复歌词
+        // （单曲循环重播时 playSongAtIndex 会被再次调用，此处保证歌词不丢失）
+        this.currentSong = resolveSongLyrics({ ...song }, this.currentSong)
         this.positionMs = 0
         this.shouldAutoPlay = true // 用户主动切歌，自动播放
         // isPlaying 由 PlayerBar.doLoadAndPlaySong 在音频引擎成功启动后设置，
@@ -600,17 +621,7 @@ export const usePlayerStore = defineStore('player', {
 
       if (song) {
         // 如果新对象没有 lyrics/translatedLyrics，尝试从缓存或当前歌曲恢复
-        restoreLyricsFromCache(song)
-        if (!song.lyrics && this.currentSong?.lyrics && this.currentSong.id === song.id) {
-          song.lyrics = this.currentSong.lyrics
-        }
-        if (
-          !song.translatedLyrics &&
-          this.currentSong?.translatedLyrics &&
-          this.currentSong.id === song.id
-        ) {
-          song.translatedLyrics = this.currentSong.translatedLyrics
-        }
+        resolveSongLyrics(song, this.currentSong)
       }
       this.currentSong = song
       // 仅当歌曲不同时才重置进度，同歌曲更新时保留现有进度
@@ -777,7 +788,7 @@ export const usePlayerStore = defineStore('player', {
      */
     previewTransitionSong(song: PlayerSong, index: number): void {
       this.currentIndex = index
-      this.currentSong = restoreLyricsFromCache({ ...song })
+      this.currentSong = resolveSongLyrics({ ...song }, this.currentSong)
     },
     /**
      * 过渡完成：更新当前歌曲与索引（音频已由过渡调度接管，不触发重新加载）
@@ -787,7 +798,7 @@ export const usePlayerStore = defineStore('player', {
      */
     finishTransition(song: PlayerSong, index: number): void {
       this.currentIndex = index
-      this.currentSong = restoreLyricsFromCache({ ...song })
+      this.currentSong = resolveSongLyrics({ ...song }, this.currentSong)
       this.isTransitioning = false
       this.transitionConsumed = true
       this.isPlaying = true

@@ -64,9 +64,15 @@ let areaWatcher: ChildProcessWithoutNullStreams | null = null
 let topTimer: NodeJS.Timeout | null = null
 
 function assertAlwaysOnTop(): void {
-  if (!taskbarControlWindow || taskbarControlWindow.isDestroyed()) return
+  const win = taskbarControlWindow
+  if (!win || win.isDestroyed()) return
   try {
-    taskbarControlWindow.setAlwaysOnTop(true, 'screen-saver')
+    win.setAlwaysOnTop(true, 'screen-saver')
+    // setAlwaysOnTop(true, 'screen-saver') 在 Windows 上只保证窗口处于 topmost 带内，
+    // 并不保证在该带内排到最前：任务栏（Shell_TrayWnd）本身也是 topmost 窗口，
+    // 打开/收起应用触发任务栏重绘后会把自己的 z 序提到前面，盖住播控窗。
+    // moveTop() 才能真正把窗口重新提到 z 序最前，消除「消失又出现」的闪烁。
+    win.moveTop()
   } catch {
     // 窗口销毁瞬间的偶发设置错误可忽略
   }
@@ -265,12 +271,14 @@ export function getAutoLayout(): { x: number; y: number; width: number } {
     const scale = getPrimaryScaleFactor()
     let x = Math.round(cachedBlankArea.x / scale)
     const y = Math.round(cachedBlankArea.y / scale)
-    let width = Math.max(120, Math.round(cachedBlankArea.width / scale))
+    // 下限 176px：内容（38 封面 + 歌曲信息 + 3 个 26px 控制按钮 + 间距 + 内边距）
+    // 的最小宽度约 172px，低于此值会导致右侧按钮溢出容器（「元素飞出来」）
+    let width = Math.max(176, Math.round(cachedBlankArea.width / scale))
 
     // 居中对齐时：开启小组件入口预留后向右偏移，并应用手动位置偏移
     if (cachedAlign === 'center' && widgetOffsetEnabled) {
       x += 48 // 预留 Windows 小组件入口宽度
-      width = Math.max(120, width - 48)
+      width = Math.max(176, width - 48)
     }
     // 手动偏移：正数右移，负数左移
     x += manualOffsetX
@@ -380,6 +388,10 @@ function animateWindowTo(
 function applyBounds(): void {
   if (!taskbarControlWindow || taskbarControlWindow.isDestroyed()) return
   try {
+    // 先无条件重新置顶并确保可见：即使边界未变化，也要在被任务栏重绘盖住后把窗口抢回最前
+    assertAlwaysOnTop()
+    if (!taskbarControlWindow.isVisible()) taskbarControlWindow.show()
+
     let rect: { x: number; y: number; width: number; height: number }
     if (currentWidthMode === 'auto') {
       const layout = getAutoLayout()
@@ -401,10 +413,6 @@ function applyBounds(): void {
       Math.abs(cur.width - rect.width) > 1 ||
       Math.abs(cur.height - rect.height) > 1
     if (!changed) return
-
-    // 置顶并确保可见，防止被系统隐藏
-    taskbarControlWindow.setAlwaysOnTop(true, 'screen-saver')
-    if (!taskbarControlWindow.isVisible()) taskbarControlWindow.show()
 
     animateWindowTo(rect)
   } catch (e) {
@@ -497,8 +505,10 @@ export async function createTaskbarControlWindow(): Promise<void> {
     console.log('[taskbar-control] shown, bounds =', JSON.stringify(taskbarControlWindow?.getBounds()))
   })
 
-  // 周期性重新断言置顶，保证任意场景下播控窗始终悬浮于任务栏之上
-  topTimer = setInterval(assertAlwaysOnTop, 1000)
+  // 周期性重新断言置顶，保证任意场景下播控窗始终悬浮于任务栏之上。
+  // 250ms 频率可把「任务栏重绘后短暂被盖住」的窗口压到几乎不可见
+  // （此前 1s 会让闪烁明显可感）。
+  topTimer = setInterval(assertAlwaysOnTop, 250)
 
   taskbarControlWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
     console.error('[taskbar-control] did-fail-load', code, desc, url)

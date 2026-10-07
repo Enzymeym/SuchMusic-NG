@@ -371,6 +371,11 @@ onUnmounted(() => {
   border-radius: 8px;
   box-sizing: border-box;
   transition: background-color 0.35s ease;
+  /* 裁剪越界子元素：自适应宽度下任务栏空白区可能很窄，
+     内容最小宽度大于窗口时会导致右侧按钮/绝对定位信息层跑出容器边界
+     （表现为「元素飞出来」）。与桌面歌词视图的 overflow:hidden 保持一致。 */
+  overflow: hidden;
+  contain: paint;
 }
 
 /* 浅色模式：系统任务栏为浅色背景时，文字与控件切换为深色 */
@@ -410,8 +415,11 @@ onUnmounted(() => {
   align-items: center;
   gap: 10px;
   width: 100%;
+  min-width: 0;
   white-space: nowrap;
   cursor: grab;
+  /* 窗口过窄时禁止不可压缩子项（封面 + 控制按钮）横向溢出容器 */
+  overflow: hidden;
 }
 
 .content:active {
@@ -457,6 +465,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   justify-content: center;
+  overflow: hidden;
   transition: opacity 0.25s ease, transform 0.25s ease;
 }
 

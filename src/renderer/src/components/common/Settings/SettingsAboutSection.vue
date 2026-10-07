@@ -1,13 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
 import { NCard, NIcon, useThemeVars, NAlert, NSpin, NButton, NProgress, NTag, useMessage } from 'naive-ui'
-import MarkdownIt from 'markdown-it'
-import { full as emoji } from 'markdown-it-emoji'
-import markdownItGitHubAlerts from 'markdown-it-github-alerts'
-import 'markdown-it-github-alerts/styles/github-colors-light.css'
-import 'markdown-it-github-alerts/styles/github-colors-dark-class.css'
-import 'markdown-it-github-alerts/styles/github-base.css'
 import axios, { type AxiosError } from 'axios'
+import { renderMarkdown } from '../../../utils/markdown'
 import { useUpdater } from '../../../composables/useUpdater'
 import { useSettingsStore } from '../../../stores/settingsStore'
 
@@ -58,23 +53,7 @@ interface GitHubUser {
   html_url: string
 }
 
-// 初始化 MarkdownIt，处理可能的导入兼容性问题
-let md: MarkdownIt | null = null
-try {
-  // @ts-ignore: Handle potential default export mismatch
-  const MarkdownItClass = MarkdownIt.default || MarkdownIt
-  md = new MarkdownItClass({
-    html: false,
-    linkify: true,
-    typographer: true
-  })
-  if (md) {
-    md.use(emoji)
-    md.use(markdownItGitHubAlerts)
-  }
-} catch (e) {
-  console.error('Failed to initialize MarkdownIt:', e)
-}
+// Markdown 渲染统一走 utils/markdown（与「更新弹窗 → 更新内容」共用同一个 markdown-it 实例）
 
 // 应用名称固定显示为产品名 Such Music（package.json 的 name 字段为内部包名，不用于展示）
 const appName = 'Such Music'
@@ -193,15 +172,27 @@ const openSponsor = () => {
   openExternal('https://ifdian.net/a/enzymeym?tab=home')
 }
 
-// 特别鸣谢：对本项目提供了关键支持的开源项目，点击卡片可跳转对应仓库
+// 特别鸣谢：包含开源项目与个人贡献者两类
+// - 开源项目：icon 图标 + url 跳转仓库
+// - 个人贡献者：avatar 头像，无 url 时不显示箭头、不可点击
 interface ThanksItem {
   name: string
   desc: string
-  url: string
-  icon: string
+  /** 跳转地址，留空表示纯展示不可点击 */
+  url?: string
+  /** 图标类名（与 avatar 二选一） */
+  icon?: string
+  /** 头像图片地址（与 icon 二选一） */
+  avatar?: string
 }
 
-const thanksList: ThanksItem[] = [
+const thanksList = ref<ThanksItem[]>([
+  {
+    name: 'PYLXU',
+    desc: 'BUG敏感肌），有非同寻常的找BUG体质',
+    avatar: 'http://q.qlogo.cn/headimg_dl?dst_uin=753307914&spec=640&img_type=jpg',
+    icon: 'mgc_user_3_line'
+  },
   {
     name: 'AMLL',
     desc: '歌词渲染与流体背景组件',
@@ -214,7 +205,12 @@ const thanksList: ThanksItem[] = [
     url: 'https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced',
     icon: 'mgc_cloud_line'
   }
-]
+])
+
+/** 头像加载失败时退回图标展示，避免出现破图 */
+const handleAvatarError = (item: ThanksItem): void => {
+  item.avatar = ''
+}
 
 // 获取更新日志（从 GitHub Releases 动态获取）
 const fetchChangelog = async () => {
@@ -291,18 +287,8 @@ const fetchChangelog = async () => {
   }
 }
 
-// 监听 markdown-it 渲染错误
-const renderedChangelog = computed(() => {
-  try {
-    if (!md) {
-      return '<p>更新日志渲染组件初始化失败。</p>'
-    }
-    return md.render(changelogContent.value || '')
-  } catch (e) {
-    console.error('Render changelog failed:', e)
-    return '<p>更新日志渲染出错。</p>'
-  }
-})
+// 更新日志渲染（渲染失败时由 renderMarkdown 内部退化为纯文本，不会抛错）
+const renderedChangelog = computed(() => renderMarkdown(changelogContent.value))
 
 // 手动检查更新（占位实现，后续可接入真正的更新逻辑）
 // const checkUpdate = () => {
@@ -451,22 +437,30 @@ const renderedChangelog = computed(() => {
         <div class="thanks-list">
           <div
             v-for="item in thanksList"
-            :key="item.url"
+            :key="item.name"
             class="thanks-item"
-            role="link"
-            tabindex="0"
+            :class="{ 'is-link': !!item.url }"
+            :role="item.url ? 'link' : undefined"
+            :tabindex="item.url ? 0 : undefined"
             :title="item.url"
-            @click="openExternal(item.url)"
-            @keydown.enter.prevent="openExternal(item.url)"
+            @click="item.url && openExternal(item.url)"
+            @keydown.enter.prevent="item.url && openExternal(item.url)"
           >
-            <span class="thanks-icon">
+            <img
+              v-if="item.avatar"
+              class="thanks-avatar"
+              :src="item.avatar"
+              :alt="item.name"
+              @error="handleAvatarError(item)"
+            />
+            <span v-else class="thanks-icon">
               <n-icon><i :class="item.icon" /></n-icon>
             </span>
             <div class="thanks-info">
               <div class="thanks-name">{{ item.name }}</div>
               <div class="thanks-desc">{{ item.desc }}</div>
             </div>
-            <n-icon class="thanks-arrow"><i class="mgc_arrow_right_line" /></n-icon>
+            <n-icon v-if="item.url" class="thanks-arrow"><i class="mgc_arrow_right_line" /></n-icon>
           </div>
         </div>
       </n-card>
@@ -617,16 +611,31 @@ const renderedChangelog = computed(() => {
   gap: 12px;
   padding: 8px 10px;
   border-radius: 8px;
-  cursor: pointer;
   transition: background-color 0.2s ease, transform 0.15s ease;
 }
 
-.thanks-item:hover {
+/* 仅可跳转条目显示手型与按压反馈 */
+.thanks-item.is-link {
+  cursor: pointer;
+}
+
+.thanks-item.is-link:hover {
   background: rgba(127, 127, 127, 0.1);
 }
 
-.thanks-item:active {
+.thanks-item.is-link:active {
   transform: scale(0.99);
+}
+
+/* 个人贡献者头像：与图标同尺寸，圆形裁切 */
+.thanks-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: rgba(127, 127, 127, 0.1);
+  border: 1px solid rgba(127, 127, 127, 0.15);
 }
 
 .thanks-icon {

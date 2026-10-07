@@ -1,6 +1,4 @@
-import { app } from 'electron'
-import { join } from 'path'
-import { is } from '@electron-toolkit/utils'
+import { tryLoadNativeModule as tryLoadNative } from './nativeModuleLoader'
 
 // napi-rs 自动将 Rust snake_case 字段转成 camelCase，可选字段在缺省时会被省略
 export interface NativePicture {
@@ -70,14 +68,6 @@ export interface NativeTags {
 let nativeAvailable = false
 let nativeReader: NativeTagReader | null = null
 
-// 获取 native 插件在当前环境下的实际路径（开发 / 生产）
-function getNativeTagReaderPath(): string {
-  if (is.dev) {
-    return join(app.getAppPath(), 'resources', 'native', 'music_tag_reader.node')
-  }
-  return join(process.resourcesPath, 'native', 'music_tag_reader.node')
-}
-
 // 从 native 模块中解析出真正可用的 readTags / readMany
 function resolveReader(module: NativeTagReader): {
   readTags: ((path: string, options?: { includeCover?: boolean }) => NativeTagInfo | null) | null
@@ -98,23 +88,29 @@ function resolveReader(module: NativeTagReader): {
 }
 
 // 懒加载 native 标签读取模块；加载失败或缺少 readTags 时降级为不可用，绝不崩溃
+// 路径解析统一交给 nativeModuleLoader（开发/打包两种形态共用同一套候选目录）
 function ensureLoaded(): void {
   if (nativeReader !== null) return
-  const nativePath = getNativeTagReaderPath()
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  try {
-    const module = require(nativePath) as NativeTagReader
-    const { readTags } = resolveReader(module)
-    // 只有拿到了 readTags 才认为 native 可用
-    nativeAvailable = typeof readTags === 'function'
-    if (!nativeAvailable) {
-      console.error('[music_tag_reader] 模块未导出 readTags：', module)
-    }
-    nativeReader = module
-  } catch (error) {
-    console.error('加载 local tag reader（music_tag_reader.node）失败:', error)
+
+  const result = tryLoadNative<NativeTagReader>({
+    label: 'music_tag_reader',
+    filenames: ['music_tag_reader.node'],
+    requiredExports: ['readTags']
+  })
+
+  if (!result) {
+    console.warn('[music_tag_reader] 原生模块不可用，标签读取降级为内置实现')
     nativeAvailable = false
     nativeReader = {}
+    return
+  }
+
+  nativeReader = result.module
+  const { readTags } = resolveReader(result.module)
+  // 只有拿到了 readTags 才认为 native 可用
+  nativeAvailable = typeof readTags === 'function'
+  if (!nativeAvailable) {
+    console.error('[music_tag_reader] 模块未导出 readTags：', result.module)
   }
 }
 

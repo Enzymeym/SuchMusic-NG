@@ -131,6 +131,55 @@ html[data-theme='dark'] .settings-root-card {
   padding: 4px 0;
 }
 
+/* 纵向设置行：标签在上、控件在下。
+   用于「音频输出模式 / 输出设备」这类需要整行放置控件的设置项，
+   替代此前内联 style 的写法，保证与其他分区对齐一致 */
+.setting-row--column {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+
+  .setting-label {
+    padding-right: 0;
+  }
+}
+
+/* 输出模式控件行 */
+.output-mode-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.output-mode-exclusive {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--n-border-color);
+
+  .exclusive-label {
+    font-size: 13px;
+    white-space: nowrap;
+  }
+}
+
+/* 输出设备选择行：选择框自适应 + 刷新按钮 */
+.output-device-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+
+  .n-select {
+    flex: 1;
+    max-width: 400px;
+  }
+}
+
 /* 标签区域占据剩余空间 */
 .setting-label {
   flex: 1;

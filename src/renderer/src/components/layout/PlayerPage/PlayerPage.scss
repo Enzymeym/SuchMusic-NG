@@ -36,7 +36,9 @@
   bottom: 0;
   left: 0;
   right: 0;
-  height: 60px;
+  /* 高度随可视化「大小」设置变化（由 PlayerPage.vue 注入内联变量），
+     避免固定 60px 时高强度/大尺寸下的频谱柱被容器裁掉 */
+  height: var(--visualizer-layer-height, 60px);
   z-index: 11;
   pointer-events: none;
   display: flex;
@@ -44,7 +46,9 @@
   justify-content: center;
   overflow: hidden;
   opacity: 1;
-  transition: opacity 0.5s ease;
+  transition:
+    opacity 0.5s ease,
+    height 0.25s ease;
 
   &.fade-out {
     opacity: 0.06;
@@ -227,7 +231,7 @@
     .lyrics-placeholder {
       flex: 1;
       width: 100%;
-      height: 85vh;
+      height: 100%;
       min-height: 0; /* Ensure flex item can shrink */
       overflow: hidden;
       font-family: v-bind('lyricsFontFamily');
@@ -392,6 +396,13 @@
        纯歌词模式下需居中显示。覆盖 suth-lyric-kit 默认的 align-items: start + text-align: left */
     :deep(.lyric-am .lyrics-view .lyrics-scroll) {
       align-items: center;
+      text-align: center;
+    }
+
+    /* suth-lyric-kit 默认给 .lyric-line 设了 transform-origin: left center，
+       高亮行 scale(1.1) 时从左缘放大导致视觉偏左；纯歌词模式下改为从中心放大 */
+    :deep(.lyric-am .lyrics-view .lyric-line) {
+      transform-origin: center;
       text-align: center;
     }
   }
@@ -975,31 +986,6 @@
   }
 }
 
-/* Volume Popover */
-.player-page-volume-popover {
-  background: rgba(0, 0, 0, 0.8);
-  border-radius: 8px;
-  padding: 16px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-
-  .volume-slider-container {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-
-    .volume-value {
-      font-size: 12px;
-      color: #fff;
-      min-width: 40px;
-      text-align: center;
-    }
-
-    .volume-slider {
-      width: 4px !important;
-      height: 100px !important;
-      min-height: 100px !important;
-      flex-shrink: 0 !important;
-    }
-  }
-}
+/* Volume Popover 的样式位于 PlayerPage.vue 的非 scoped 全局样式块中：
+   naive-ui 弹层节点由库创建、不携带本组件的 scope 属性，
+   写在 scoped 块里（无论是否用 :deep）都会因选择器首段失配而整条失效。 */

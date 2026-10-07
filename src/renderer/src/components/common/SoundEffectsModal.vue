@@ -9,15 +9,19 @@ import {
   NScrollbar,
   NSelect,
   NButton,
-  NRadioGroup,
-  NRadioButton,
   NCollapse,
   NCollapseItem,
   useThemeVars,
   useMessage
 } from 'naive-ui'
 import { useAudioEngine } from '../../composables/useAudioEngine'
+import {
+  computeEqLoudnessDb,
+  LOUDNESS_COMP_MIN_DB,
+  LOUDNESS_COMP_MAX_DB
+} from '../../audio/web-audio-dsp'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { usePlayerStore } from '../../stores/playerStore'
 
 const themeVars = useThemeVars()
 const message = useMessage()
@@ -32,6 +36,7 @@ const emit = defineEmits<{
 
 const audioEngine = useAudioEngine() as any
 const settingsStore = useSettingsStore()
+const playerStore = usePlayerStore()
 
 const showModal = computed({
   get: () => props.show,
@@ -79,9 +84,9 @@ watch(
   () => audioEngine.currentPresetId.value,
   (val) => {
     selectedPresetId.value = val
-    // 切换预设后，整体强度回归 100%
+    // 切换预设后：以新预设曲线为基准，整体强度回归 100%
+    captureBaseEqGains()
     eqStrength.value = 100
-    eqStrengthPrev = 100
   }
 )
 
@@ -89,21 +94,29 @@ const presetOptions = computed(() =>
   audioEngine.presets.value.map((p: any) => ({ label: p.name, value: p.id }))
 )
 
-const deviceName = computed(
-  () => settingsStore.playback.audioOutputDeviceName || '默认输出设备'
-)
+const isWebAudioOutput = computed(() => settingsStore.playback.audioOutputMode === 'webaudio')
+
+/**
+ * 输出设备名。Web Audio 模式下明确显示为系统默认输出，
+ * 避免与下方的预设下拉（默认「平坦」）混淆——用户曾误以为默认设备叫「平坦」。
+ */
+const deviceName = computed(() => {
+  if (isWebAudioOutput.value) return '系统默认输出（Web Audio）'
+  return settingsStore.playback.audioOutputDeviceName || '默认输出设备'
+})
 
 const handlePresetChange = (presetId: string) => {
   audioEngine.applyPreset(presetId)
+  // 以新预设曲线为基准，强度复位
+  captureBaseEqGains()
   eqStrength.value = 100
-  eqStrengthPrev = 100
 }
 
 /** 重置为默认（平坦）设置 */
 const handleReset = () => {
   audioEngine.applyPreset('flat')
+  captureBaseEqGains()
   eqStrength.value = 100
-  eqStrengthPrev = 100
   message.success('已重置为默认设置')
 }
 
@@ -144,12 +157,19 @@ const handleSharePreset = async () => {
   ok ? message.success('分享数据已复制到剪贴板') : message.error('复制失败')
 }
 
-const handleGoToSound = () => {
-  message.info('请在系统「声音」设置中查看更多输出选项')
+/** 打开设置页的「播放」分区（输出模式 / 输出设备等） */
+const openPlaybackSettings = () => {
+  showModal.value = false
+  window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'playback' } }))
 }
 
-// ==================== EQ 曲线图 ====================
-const eqTab = ref<'pre' | 'post'>('pre')
+const handleGoToSound = () => {
+  openPlaybackSettings()
+}
+
+// ==================== PEQ 曲线图 ====================
+// 已统一为参数均衡器（PEQ）：不再区分「原EQ（post）/预EQ（pre）」，
+// 每个频段只有一个增益（沿用引擎的 preGain 字段），直接在曲线上拖动调节。
 const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 const EQ_MIN_DB = -10
 const EQ_MAX_DB = 10
@@ -169,11 +189,8 @@ const eqEnabled = computed<boolean>({
   }
 })
 
-const eqGains = computed(() =>
-  audioEngine.eqBands.value.map((b: any) =>
-    eqTab.value === 'pre' ? (b.preGain ?? 0) : (b.postGain ?? 0)
-  )
-)
+/** PEQ 各频段增益（dB），直接映射引擎频段的 preGain */
+const eqGains = computed(() => audioEngine.eqBands.value.map((b: any) => b.preGain ?? 0))
 
 /**
  * 归一化增益数组：默认「平坦」预设的 eqBands 为空，或频段数不足时，
@@ -324,7 +341,7 @@ watch(
   redraw,
   { flush: 'post' }
 )
-watch([eqTab, draggingBand], redraw, { flush: 'post' })
+watch(draggingBand, redraw, { flush: 'post' })
 watch(
   () => props.show,
   (v) => {
@@ -383,8 +400,12 @@ function applyDrag(band: number, offsetY: number) {
   )
   // 确保目标频段存在，否则 setEqBand 会因 eqBands 为空/不足而静默失败
   ensureEqBands(band)
-  if (eqTab.value === 'pre') audioEngine.setEqBand(band, { preGain: db })
-  else audioEngine.setEqBand(band, { postGain: db })
+  audioEngine.setEqBand(band, { preGain: db })
+  // 同步基准曲线：曲线显示的是当前实际增益，故基准 = 实际增益 / 强度倍率，
+  // 这样之后再调强度时，该频段才能按正确比例缩放
+  if (baseEqGains.value.length !== EQ_FREQS.length) captureBaseEqGains()
+  const k = eqStrength.value / 100 || 1
+  baseEqGains.value[band] = clamp(db / k, EQ_MIN_DB, EQ_MAX_DB)
 }
 
 /** 补齐缺失的默认 EQ 频段（默认「平坦」预设的频段列表为空） */
@@ -402,68 +423,146 @@ function ensureEqBands(band: number) {
   audioEngine.eqBands.value = EQ_FREQS.map((_, i) => bands[i] ?? defaults[i])
 }
 
-// ==================== EQ 强度 ====================
-const eqStrengthMode = ref<'overall' | 'segmented'>('overall')
+// ==================== PEQ 强度 ====================
+// 强度是「相对基准曲线」的缩放倍率：每次调节都从基准曲线重新换算，
+// 而不是在当前增益上累乘。旧实现用 ratio 累乘 + 0.5dB 取整，多次调节后
+// 曲线会因取整误差与 ±10dB 钳制而漂移、塌陷 —— 这就是「多次调节后曲线异常」的根因。
 const eqStrength = ref(100)
-let eqStrengthPrev = 100
+/** 100% 强度下的各频段基准增益（dB） */
+const baseEqGains = ref<number[]>([])
 
-function handleEqStrengthChange(v: number) {
-  const ratio = eqStrengthPrev === 0 ? v / 100 : v / eqStrengthPrev
-  eqStrengthPrev = v
-  eqStrength.value = v
-  const gains = audioEngine.eqBands.value.map((b: any) =>
-    clamp(Math.round((b.preGain ?? 0) * ratio * 2) / 2, EQ_MIN_DB, EQ_MAX_DB)
+/** 采集当前频段增益作为基准曲线（预设切换 / 首次打开时调用） */
+function captureBaseEqGains() {
+  baseEqGains.value = EQ_FREQS.map((_, i) =>
+    clamp(audioEngine.eqBands.value[i]?.preGain ?? 0, EQ_MIN_DB, EQ_MAX_DB)
   )
+}
+
+/** 依据基准曲线与强度值计算并下发实际增益 */
+function applyEqStrength(v: number) {
+  const strength = clamp(Math.round(v), 0, 200)
+  eqStrength.value = strength
+  if (baseEqGains.value.length !== EQ_FREQS.length) captureBaseEqGains()
+  const k = strength / 100
+  const gains = EQ_FREQS.map((_, i) =>
+    clamp(Math.round((baseEqGains.value[i] ?? 0) * k * 2) / 2, EQ_MIN_DB, EQ_MAX_DB)
+  )
+  // 确保频段存在，否则 setEqGains 会因 eqBands 为空而静默失败
+  ensureEqBands(EQ_FREQS.length - 1)
   audioEngine.setEqGains(gains)
 }
 
-// ==================== 等响度 ====================
+function handleEqStrengthChange(v: number) {
+  applyEqStrength(v)
+}
+
+// ==================== 等响度（EQ 响度补偿） ====================
+// 语义：调整 EQ 后保持整体响度与调整前一致。
+// DSP 按各频段在整体响度中的权重，算出当前 PEQ 曲线带来的响度变化，
+// 再对输出施加等量反向增益（见 web-audio-dsp.ts 的 syncLoudness）。
+// 本组件只负责开关、强度，并展示算出来的补偿量。
 const loudnessEnabled = computed<boolean>({
   get: () => audioEngine.loudness.value.enabled,
   set: (v) => {
     audioEngine.setLoudnessEnabled(v)
   }
 })
-const loudnessGain = ref(0)
-const loudnessStatus = computed(
-  () => `等响度${loudnessEnabled.value ? '开' : '关'}: ${fmtDbCompact(loudnessGain.value)}`
+
+/** 补偿强度（0~200%），映射到 DSP 的 compensation 倍率（1 = 完全补偿） */
+const loudnessAmount = computed(() =>
+  Math.round((audioEngine.loudness.value.compensation ?? 1) * 100)
 )
 
-function handleLoudnessGain(v: number) {
-  const wasEnabled = audioEngine.loudness.value.enabled
-  loudnessGain.value = v
-  if (v !== 0 && wasEnabled) {
-    audioEngine.setLoudnessEnabled(false)
-    message.info('调节增益后等响度已自动关闭')
-  }
+function handleLoudnessAmount(v: number) {
+  audioEngine.setLoudnessParams({ compensation: clamp(Math.round(v), 0, 200) / 100 })
 }
 
-// ==================== 等响补偿（因逻辑冲突默认禁用） ====================
-const loudnessCompEnabled = ref(false)
-const loudnessCompDiff = computed(() =>
-  Math.max(0, Math.round((1 - (audioEngine.state.volume ?? 1)) * 100))
-)
-const loudnessCompStrength = computed(() =>
-  Math.round(audioEngine.loudness.value.compensation * 300) / 100
-)
-const loudnessCompThreshold = computed(() =>
-  clamp(audioEngine.loudness.value.referenceLoudness, -30, -1)
-)
-const loudnessCompStatus = computed(
-  () => `补偿中: +${loudnessCompDiff.value}% x ${loudnessCompStrength.value.toFixed(2)}`
-)
-const loudnessCompHint = computed(
-  () => `当前系统音量比基准低 ${loudnessCompDiff.value}%，正在增强高低频`
+/** 当前 PEQ 曲线带来的响度净变化（dB），与 DSP 使用同一套权重换算 */
+const eqLoudnessDelta = computed(() => computeEqLoudnessDb(normalizedGains()))
+
+/** 实际下发的补偿增益（dB，已计入强度与上下限） */
+const loudnessCompDb = computed(() => {
+  if (!loudnessEnabled.value || !eqEnabled.value) return 0
+  return clamp(
+    -eqLoudnessDelta.value * (audioEngine.loudness.value.compensation ?? 1),
+    LOUDNESS_COMP_MIN_DB,
+    LOUDNESS_COMP_MAX_DB
+  )
+})
+
+const loudnessStatus = computed(() =>
+  loudnessEnabled.value ? `补偿 ${fmtDbCompact(loudnessCompDb.value)}` : '已关闭'
 )
 
-/** 设定基准：将当前系统音量换算为参考响度并写入补偿阈值 */
-const handleSetLoudnessBaseline = () => {
-  const vol = clamp(audioEngine.state.volume ?? 1, 0.01, 1)
-  // 音量 → dB 换算（20 * log10(vol)），并钳制到阈值范围 [-30, -1]
-  const refDb = Math.round(20 * Math.log10(vol))
-  const ref = clamp(refDb, -30, -1)
+const loudnessCompHint = computed(() => {
+  if (!eqEnabled.value) return 'PEQ 已关闭（旁通），不产生响度变化，无需补偿。'
+  const delta = eqLoudnessDelta.value
+  if (Math.abs(delta) < 0.1) return '当前 PEQ 曲线几乎不改变整体响度，无需补偿。'
+  return `当前 PEQ 曲线使整体${delta > 0 ? '变响' : '变轻'} ${Math.abs(delta).toFixed(1)} dB，已自动补偿 ${fmtDbCompact(loudnessCompDb.value)}。`
+})
+
+// ==================== 低音量高低频补偿（Fletcher-Munson 近似） ====================
+// 音量越低，人耳对高低频越不敏感，因此按「音量缺口」自动提升两端。
+// 换算与 web-audio-dsp.ts 的 syncLoudness 第 2 段完全一致。
+const FOLLOW_LOW_MAX_DB = 15
+const FOLLOW_HIGH_MAX_DB = 12
+const FOLLOW_FULL_DEFICIT_DB = 30
+
+const followVolumeEnabled = computed<boolean>({
+  get: () => audioEngine.loudness.value.followVolume === true,
+  set: (v) => audioEngine.setLoudnessParams({ followVolume: v })
+})
+
+/** 补偿强度（0~200%），映射到 DSP 的 followStrength 倍率 */
+const followStrength = computed(() =>
+  Math.round((audioEngine.loudness.value.followStrength ?? 1) * 100)
+)
+
+function handleFollowStrength(v: number) {
+  audioEngine.setLoudnessParams({ followStrength: clamp(Math.round(v), 0, 200) / 100 })
+}
+
+/** 补偿基准音量（dB，0 = 满音量）：低于该值才开始提升 */
+const followReferenceDb = computed(() =>
+  clamp(Math.round(audioEngine.loudness.value.referenceLoudness ?? 0), -30, 0)
+)
+
+/** 当前播放音量换算出的 dB（满音量 = 0dB） */
+const currentVolumeDb = computed(() =>
+  20 * Math.log10(clamp(playerStore.volume || 0.0001, 0.0001, 1))
+)
+
+/** 音量缺口（dB）：比基准低多少，高于基准则为 0 */
+const followDeficit = computed(() =>
+  Math.max(0, Math.min(FOLLOW_FULL_DEFICIT_DB, followReferenceDb.value - currentVolumeDb.value))
+)
+
+/** 实际下发的高低频提升量（与 DSP 同一套换算） */
+const followBoost = computed(() => {
+  const ratio = (followDeficit.value / FOLLOW_FULL_DEFICIT_DB) * (followStrength.value / 100)
+  return {
+    low: Math.min(ratio * FOLLOW_LOW_MAX_DB, 18),
+    high: Math.min(ratio * FOLLOW_HIGH_MAX_DB, 15)
+  }
+})
+
+const followStatus = computed(() =>
+  followVolumeEnabled.value
+    ? `低频 +${followBoost.value.low.toFixed(1)} / 高频 +${followBoost.value.high.toFixed(1)} dB`
+    : '已关闭'
+)
+
+const followHint = computed(() => {
+  if (!followVolumeEnabled.value) return '关闭后不做低音量补偿，音量较小时高低频听感会变弱。'
+  if (followDeficit.value < 0.5) return '当前音量不低于补偿基准，暂不提升高低频。'
+  return `当前音量 ${fmtDbCompact(currentVolumeDb.value)}，比基准低 ${followDeficit.value.toFixed(1)} dB，已提升低频 +${followBoost.value.low.toFixed(1)} dB / 高频 +${followBoost.value.high.toFixed(1)} dB。`
+})
+
+/** 设定基准：把当前音量写入补偿阈值 */
+const handleSetFollowBaseline = () => {
+  const ref = clamp(Math.round(currentVolumeDb.value), -30, 0)
   audioEngine.setLoudnessParams({ referenceLoudness: ref })
-  message.success(`已设定基准：补偿阈值为 ${Math.abs(ref)} dB`)
+  message.success(`已按当前音量设定补偿基准：${ref} dB`)
 }
 
 // ==================== 多频段压缩 MBC ====================
@@ -528,13 +627,11 @@ const limiterEnabled = computed<boolean>({
   }
 })
 const limiterExpanded = ref(false)
-// 引擎暂未提供的参数，作为界面参数保存
-const limiterAttack = ref(5)
-const limiterRatio = ref(10)
-const limiterThreshold = ref(-6)
-const limiterPostGain = ref(0)
-const limiterStatus = computed(() => `${limiterThreshold.value} dB : ${limiterRatio.value}:1`)
+const limiterStatus = computed(
+  () => `${audioEngine.limiter.value.ceiling} dB : ${audioEngine.limiter.value.ratio ?? 20}:1`
+)
 
+// 全部参数直接写入 DSP 链（仅 Web Audio 模式生效），不再是只改本地 ref 的假接线
 const limiterParams = computed(() => [
   {
     key: 'attack',
@@ -542,9 +639,9 @@ const limiterParams = computed(() => [
     min: 1,
     max: 100,
     step: 1,
-    value: limiterAttack.value,
+    value: audioEngine.limiter.value.attack ?? 5,
     fmt: (v: number) => `${v} ms`,
-    set: (v: number) => (limiterAttack.value = v)
+    set: (v: number) => audioEngine.setLimiterParams({ attack: v })
   },
   {
     key: 'release',
@@ -562,9 +659,9 @@ const limiterParams = computed(() => [
     min: 1,
     max: 20,
     step: 1,
-    value: limiterRatio.value,
+    value: audioEngine.limiter.value.ratio ?? 20,
     fmt: (v: number) => `${v}:1`,
-    set: (v: number) => (limiterRatio.value = v)
+    set: (v: number) => audioEngine.setLimiterParams({ ratio: v })
   },
   {
     key: 'threshold',
@@ -572,9 +669,9 @@ const limiterParams = computed(() => [
     min: -12,
     max: 0,
     step: 1,
-    value: limiterThreshold.value,
+    value: audioEngine.limiter.value.ceiling,
     fmt: (v: number) => `${v} dB`,
-    set: (v: number) => (limiterThreshold.value = v)
+    set: (v: number) => audioEngine.setLimiterParams({ ceiling: v })
   },
   {
     key: 'postGain',
@@ -582,21 +679,81 @@ const limiterParams = computed(() => [
     min: -6,
     max: 6,
     step: 0.5,
-    value: limiterPostGain.value,
+    value: audioEngine.limiter.value.postGain ?? 0,
     fmt: (v: number) => fmtDb(v),
-    set: (v: number) => (limiterPostGain.value = v)
+    set: (v: number) => audioEngine.setLimiterParams({ postGain: v })
   }
 ])
 
 // ==================== 声道平衡 ====================
 const balanceEnabled = ref(false)
 const balanceExpanded = ref(false)
-const balanceL = ref(-0.1)
-const balanceR = ref(-0.1)
-const balanceStatus = computed(() => (balanceEnabled.value ? '已开启' : '已关闭'))
+/** 平衡值：-100 全左 / 0 居中 / +100 全右（单一滑块） */
+const balance = ref(0)
+const balanceStatus = computed(() => {
+  if (!balanceEnabled.value) return '已关闭'
+  if (Math.abs(balance.value) < 1) return '居中'
+  return balance.value < 0
+    ? `偏左 ${Math.abs(Math.round(balance.value))}%`
+    : `偏右 ${Math.round(balance.value)}%`
+})
+
+/**
+ * 平衡值 → 左右增益（dB）。
+ * 采用线性幅度衰减（与系统音量平衡一致）：向一侧偏移只衰减另一侧，
+ * 居中时两侧均为 0dB（不改变原音量），到端点时该侧接近静音（-60dB）。
+ */
+function balanceToGains(v: number): { left: number; right: number } {
+  const p = clamp(v, -100, 100) / 100
+  const leftAmp = Math.max(0.001, 1 - Math.max(0, p))
+  const rightAmp = Math.max(0.001, 1 + Math.min(0, p))
+  return { left: 20 * Math.log10(leftAmp), right: 20 * Math.log10(rightAmp) }
+}
+
+/** 将声道平衡设置下发到 DSP（仅 Web Audio 生效） */
+function applyBalance() {
+  const { left, right } = balanceToGains(balance.value)
+  const active = balanceEnabled.value && Math.abs(balance.value) >= 1
+  audioEngine.setChannelBalance(active, left, right)
+}
+watch([balanceEnabled, balance], applyBalance)
 
 // ==================== 音量记忆 ====================
 const volumeMemoryEnabled = ref(false)
+const VOLUME_MEMORY_KEY = 'volume-memory'
+
+/** 音量记忆：开启后记住当前音量，下次启动时恢复 */
+function saveVolumeMemory() {
+  if (!volumeMemoryEnabled.value) return
+  try {
+    localStorage.setItem(VOLUME_MEMORY_KEY, String(playerStore.volume))
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 启动时若有记忆音量则恢复（仅当音量记忆已开启） */
+function restoreVolumeMemory() {
+  if (!volumeMemoryEnabled.value) return
+  try {
+    const raw = localStorage.getItem(VOLUME_MEMORY_KEY)
+    if (raw == null) return
+    const v = Number(raw)
+    if (Number.isFinite(v) && v >= 0 && v <= 1) {
+      playerStore.setVolume(v)
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+watch(volumeMemoryEnabled, (enabled) => {
+  if (enabled) saveVolumeMemory()
+})
+watch(
+  () => playerStore.volume,
+  () => saveVolumeMemory()
+)
 
 // ==================== 界面状态持久化 ====================
 const UI_STORAGE_KEY = 'sound-effects-ui'
@@ -606,10 +763,15 @@ function loadUiState() {
     if (!raw) return
     const d = JSON.parse(raw)
     if (typeof d.balanceEnabled === 'boolean') balanceEnabled.value = d.balanceEnabled
-    if (typeof d.balanceL === 'number') balanceL.value = d.balanceL
-    if (typeof d.balanceR === 'number') balanceR.value = d.balanceR
+    if (typeof d.balance === 'number') {
+      balance.value = clamp(d.balance, -100, 100)
+    } else if (typeof d.balanceL === 'number' || typeof d.balanceR === 'number') {
+      // 兼容旧版本保存的左右声道独立增益（-6~6 dB）→ 折算为单一平衡值
+      const l = typeof d.balanceL === 'number' ? d.balanceL : 0
+      const r = typeof d.balanceR === 'number' ? d.balanceR : 0
+      balance.value = clamp(((r - l) / 12) * 100, -100, 100)
+    }
     if (typeof d.volumeMemory === 'boolean') volumeMemoryEnabled.value = d.volumeMemory
-    if (typeof d.loudnessComp === 'boolean') loudnessCompEnabled.value = d.loudnessComp
   } catch {
     /* ignore */
   }
@@ -623,10 +785,8 @@ function saveUiState() {
         UI_STORAGE_KEY,
         JSON.stringify({
           balanceEnabled: balanceEnabled.value,
-          balanceL: balanceL.value,
-          balanceR: balanceR.value,
-          volumeMemory: volumeMemoryEnabled.value,
-          loudnessComp: loudnessCompEnabled.value
+          balance: balance.value,
+          volumeMemory: volumeMemoryEnabled.value
         })
       )
     } catch {
@@ -634,14 +794,11 @@ function saveUiState() {
     }
   }, 300)
 }
-watch(
-  [balanceEnabled, balanceL, balanceR, volumeMemoryEnabled, loudnessCompEnabled],
-  saveUiState
-)
+watch([balanceEnabled, balance, volumeMemoryEnabled], saveUiState)
 
 // ==================== 底部控制栏 ====================
 const handleFooterSettings = () => {
-  message.info('更多输出设置请在系统「声音」中调整')
+  openPlaybackSettings()
 }
 
 // ==================== 生命周期 ====================
@@ -650,9 +807,15 @@ const handleResize = () => {
   if (showModal.value) drawGraph()
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // 先恢复引擎状态，再套用界面侧持久化设置，保证「随音量补偿 / 声道平衡」等不被打架
+  await audioEngine.initialize()
   loadUiState()
-  audioEngine.initialize()
+  // 应用持久化的声道平衡 / 音量记忆（此前这两项只是本地状态，从未生效）
+  applyBalance()
+  restoreVolumeMemory()
+  // 以当前曲线为 PEQ 强度基准
+  captureBaseEqGains()
   if (graphWrap.value) {
     resizeObserver = new ResizeObserver(handleResize)
     resizeObserver.observe(graphWrap.value)
@@ -690,7 +853,7 @@ export default {
           </template>
         </n-button>
         <h1 class="se-title">Stack Sound</h1>
-        <n-button quaternary circle title="刷新/重置" @click="handleReset">
+        <n-button quaternary circle title="重置为默认音效" @click="handleReset">
           <template #icon>
             <n-icon size="19"><i class="mgc_refresh_2_line"></i></n-icon>
           </template>
@@ -702,7 +865,12 @@ export default {
         <div class="se-preset-info">
           <div class="se-preset-line">
             <i class="mgc_speaker_line se-preset-speaker"></i>
-            <span class="se-preset-device">{{ deviceName }}</span>
+            <span class="se-preset-label">输出设备</span>
+          </div>
+          <span class="se-preset-device">{{ deviceName }}</span>
+          <div class="se-preset-line">
+            <i class="mgc_music_2_line se-preset-speaker"></i>
+            <span class="se-preset-label">音效预设</span>
           </div>
           <n-select
             v-model:value="selectedPresetId"
@@ -725,7 +893,7 @@ export default {
             复制当前预设
           </n-tooltip>
 
-          <n-button type="primary" secondary @click="handleGoToSound">去 Sound 里寻觅</n-button>
+          <n-button type="primary" secondary @click="handleGoToSound">输出设置</n-button>
 
           <n-tooltip trigger="hover">
             <template #trigger>
@@ -743,14 +911,12 @@ export default {
       <!-- 内容区 -->
       <n-scrollbar class="se-scroll">
         <div class="se-body">
-          <!-- EQ 均衡器曲线图 -->
+          <!-- PEQ 参数均衡器曲线图（已合并原「原EQ / 预EQ」为单一参数均衡器） -->
           <section class="se-section">
-            <div class="se-eq-tabs">
-              <n-radio-group v-model:value="eqTab" size="small">
-                <n-radio-button value="post">原EQ</n-radio-button>
-                <n-radio-button value="pre">预EQ</n-radio-button>
-              </n-radio-group>
-            </div>
+            <header class="se-sec-head">
+              <span class="se-sec-title">PEQ 参数均衡器</span>
+              <span class="se-sec-status">在曲线上拖动频点直接调节</span>
+            </header>
             <div ref="graphWrap" class="se-graph-wrap">
               <canvas
                 ref="graphCanvas"
@@ -765,22 +931,15 @@ export default {
             </div>
           </section>
 
-          <!-- EQ 强度 -->
+          <!-- PEQ 强度 -->
           <section class="se-section" :class="{ disabled: !eqEnabled }">
             <header class="se-sec-head">
-              <span class="se-sec-title">EQ 强度</span>
+              <span class="se-sec-title">PEQ 强度</span>
               <span class="se-sec-status">{{ eqEnabled ? '已开启' : '已关闭' }}</span>
               <n-switch v-model:value="eqEnabled" size="small" />
             </header>
 
-            <div class="se-mode-toggle">
-              <n-radio-group v-model:value="eqStrengthMode" size="small">
-                <n-radio-button value="overall">整体控制</n-radio-button>
-                <n-radio-button value="segmented">分段控制</n-radio-button>
-              </n-radio-group>
-            </div>
-
-            <div v-if="eqStrengthMode === 'overall'" class="se-slider-row">
+            <div class="se-slider-row">
               <span class="se-slider-label">整体强度</span>
               <n-slider
                 :value="eqStrength"
@@ -793,89 +952,95 @@ export default {
               />
               <span class="se-slider-val">{{ eqStrength }}%</span>
             </div>
-            <p v-else class="se-hint">在曲线上直接拖动频点，可单独调节每个频段。</p>
+            <p class="se-hint">在曲线上直接拖动频点，可单独调节每个频段。</p>
           </section>
 
-          <!-- 等响度 -->
+          <!-- 等响度（EQ 响度补偿） -->
           <section class="se-section">
             <header class="se-sec-head">
               <span class="se-sec-title">等响度</span>
               <span class="se-sec-status">{{ loudnessStatus }}</span>
               <n-switch v-model:value="loudnessEnabled" size="small" />
             </header>
+            <p class="se-desc">
+              调整 EQ 后自动补偿整体增益，使响度与调整前保持一致（音色改变、音量不变）。
+            </p>
+
             <div class="se-slider-row">
-              <span class="se-slider-label">整体增益</span>
+              <span class="se-slider-label">补偿强度</span>
               <n-slider
-                :value="loudnessGain"
-                :min="-12"
-                :max="12"
-                :step="0.5"
+                :value="loudnessAmount"
+                :min="0"
+                :max="200"
+                :step="5"
                 :tooltip="false"
-                @update:value="handleLoudnessGain"
+                :disabled="!loudnessEnabled"
+                @update:value="handleLoudnessAmount"
               />
-              <span class="se-slider-val">{{ fmtDb(loudnessGain) }}</span>
+              <span class="se-slider-val">{{ loudnessAmount }}%</span>
             </div>
-            <p class="se-note">调节此滑条会自动关闭等响度。</p>
+
+            <div v-if="loudnessEnabled" class="se-loudness-readout">
+              <n-tag :bordered="false" size="small" type="info">
+                <template #icon>
+                  <n-icon size="14"><i class="mgc_volume_line"></i></n-icon>
+                </template>
+                实际补偿 {{ fmtDb(loudnessCompDb) }}
+              </n-tag>
+            </div>
+
+            <p v-if="loudnessEnabled" class="se-hint">{{ loudnessCompHint }}</p>
           </section>
 
-          <!-- 等响补偿 -->
+          <!-- 低音量高低频补偿（Fletcher-Munson 近似） -->
           <section class="se-section">
             <header class="se-sec-head">
-              <span class="se-sec-title">等响补偿</span>
-              <span class="se-sec-status">{{ loudnessCompStatus }}</span>
-              <n-switch v-model:value="loudnessCompEnabled" size="small" />
+              <span class="se-sec-title">低音量补偿</span>
+              <span class="se-sec-status">{{ followStatus }}</span>
+              <n-switch v-model:value="followVolumeEnabled" size="small" />
             </header>
+            <p class="se-desc">
+              音量越低，人耳对高低频越不敏感。按音量缺口自动提升两端，小音量下听感更饱满。
+            </p>
 
-            <div class="se-comp-body" :class="{ 'is-disabled': loudnessCompEnabled }">
-              <div class="se-slider-row">
-                <span class="se-slider-label">补偿强度</span>
-                <n-slider
-                  :value="loudnessCompStrength"
-                  :min="0"
-                  :max="3"
-                  :step="0.05"
-                  :tooltip="false"
-                  @update:value="
-                    (v: any) => audioEngine.setLoudnessParams({ compensation: Math.round(v / 3 * 100) / 100 })
-                  "
-                />
-                <span class="se-slider-val">{{ loudnessCompStrength.toFixed(2) }}</span>
-              </div>
-
-              <div class="se-slider-row">
-                <span class="se-slider-label">补偿阈值</span>
-                <n-slider
-                  :value="loudnessCompThreshold"
-                  :min="-30"
-                  :max="-1"
-                  :step="1"
-                  :tooltip="false"
-                  @update:value="
-                    (v: any) => audioEngine.setLoudnessParams({ referenceLoudness: v })
-                  "
-                />
-                <span class="se-slider-val">{{ Math.abs(loudnessCompThreshold).toFixed(1) }} dB</span>
-              </div>
-              <div class="se-comp-actions">
-                <n-button
-                  size="small"
-                  secondary
-                  @click="handleSetLoudnessBaseline"
-                >
-                  <template #icon>
-                    <n-icon size="16"><i class="mgc_target_line"></i></n-icon>
-                  </template>
-                  设定基准（按当前音量）
-                </n-button>
-              </div>
-              <p class="se-note">音量低于该阈值时才开始增强高低频，数值越大（越接近 -1 dB）越早介入。</p>
-
-              <div v-if="loudnessCompEnabled" class="se-comp-mask">
-                <span>关闭等响补偿后才能设定基准</span>
-              </div>
+            <div class="se-slider-row">
+              <span class="se-slider-label">补偿强度</span>
+              <n-slider
+                :value="followStrength"
+                :min="0"
+                :max="200"
+                :step="5"
+                :tooltip="false"
+                :disabled="!followVolumeEnabled"
+                @update:value="handleFollowStrength"
+              />
+              <span class="se-slider-val">{{ followStrength }}%</span>
             </div>
 
-            <p v-if="loudnessCompEnabled" class="se-hint">{{ loudnessCompHint }}</p>
+            <div class="se-slider-row">
+              <span class="se-slider-label">补偿基准</span>
+              <n-slider
+                :value="followReferenceDb"
+                :min="-30"
+                :max="0"
+                :step="1"
+                :tooltip="false"
+                :disabled="!followVolumeEnabled"
+                @update:value="(v: any) => audioEngine.setLoudnessParams({ referenceLoudness: v })"
+              />
+              <span class="se-slider-val">{{ followReferenceDb }} dB</span>
+            </div>
+
+            <div class="se-loudness-readout">
+              <n-button size="small" secondary :disabled="!followVolumeEnabled" @click="handleSetFollowBaseline">
+                <template #icon>
+                  <n-icon size="16"><i class="mgc_target_line"></i></n-icon>
+                </template>
+                按当前音量设定基准
+              </n-button>
+            </div>
+
+            <p v-if="followVolumeEnabled" class="se-hint">{{ followHint }}</p>
           </section>
 
           <!-- 多频段压缩 MBC -->
@@ -981,34 +1146,21 @@ export default {
               :expanded-names="balanceExpanded ? ['balance'] : []"
               @update:expanded-names="(names: any) => (balanceExpanded = (names || []).includes('balance'))"
             >
-              <n-collapse-item title="折叠选项" name="balance">
+              <n-collapse-item title="平衡调节" name="balance">
                 <div class="se-params">
                   <div class="se-param">
                     <div class="se-param-head">
-                      <span class="se-slider-label">左声道 (L)</span>
-                      <span class="se-param-value">{{ fmtDb(balanceL) }}</span>
+                      <span class="se-slider-label">左</span>
+                      <span class="se-param-value">{{ balanceStatus }}</span>
+                      <span class="se-slider-label">右</span>
                     </div>
                     <n-slider
-                      :value="balanceL"
-                      :min="-6"
-                      :max="6"
-                      :step="0.1"
+                      :value="balance"
+                      :min="-100"
+                      :max="100"
+                      :step="1"
                       :tooltip="false"
-                      @update:value="(v: any) => (balanceL = v)"
-                    />
-                  </div>
-                  <div class="se-param">
-                    <div class="se-param-head">
-                      <span class="se-slider-label">右声道 (R)</span>
-                      <span class="se-param-value">{{ fmtDb(balanceR) }}</span>
-                    </div>
-                    <n-slider
-                      :value="balanceR"
-                      :min="-6"
-                      :max="6"
-                      :step="0.1"
-                      :tooltip="false"
-                      @update:value="(v: any) => (balanceR = v)"
+                      @update:value="(v: any) => (balance = v)"
                     />
                   </div>
                 </div>
@@ -1028,17 +1180,12 @@ export default {
         </div>
       </n-scrollbar>
 
-      <!-- 底部操作栏 -->
+      <!-- 底部操作栏（重置按钮统一放在顶部标题栏，此处不再重复） -->
       <footer class="se-footer">
         <div class="se-footer-group">
-          <n-button quaternary circle title="设置" @click="handleFooterSettings">
+          <n-button quaternary circle title="打开输出设置" @click="handleFooterSettings">
             <template #icon>
               <n-icon size="20"><i class="mgc_settings_3_line"></i></n-icon>
-            </template>
-          </n-button>
-          <n-button quaternary circle title="刷新/重置" @click="handleReset">
-            <template #icon>
-              <n-icon size="20"><i class="mgc_refresh_2_line"></i></n-icon>
             </template>
           </n-button>
         </div>
@@ -1110,6 +1257,11 @@ export default {
           color: v-bind('themeVars.primaryColor');
         }
 
+        .se-preset-label {
+          font-size: 12px;
+          color: var(--n-text-color-3);
+        }
+
         .se-preset-device {
           font-size: 13px;
           font-weight: 600;
@@ -1117,6 +1269,7 @@ export default {
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
+          margin-bottom: 4px;
         }
       }
 
@@ -1273,34 +1426,12 @@ export default {
     }
   }
 
-  // 等响补偿
-  .se-comp-body {
-    position: relative;
-
-    &.is-disabled {
-      .se-slider-row {
-        opacity: 0.4;
-      }
-    }
-
-    .se-comp-actions {
-      display: flex;
-      justify-content: flex-end;
-      margin-top: 12px;
-    }
-
-    .se-comp-mask {
-      position: absolute;
-      inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border-radius: 8px;
-      font-size: 13px;
-      color: var(--n-text-color-3);
-      background: var(--n-fill-color, rgba(128, 128, 128, 0.28));
-      z-index: 2;
-    }
+  // 等响度：实际补偿量读数
+  .se-loudness-readout {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
   }
 
   // 折叠区
