@@ -9,6 +9,7 @@ import SettingsLyricsSection from './Settings/SettingsLyricsSection.vue'
 import SettingsLocalSection from './Settings/SettingsLocalSection.vue'
 import SettingsSourceSection from './Settings/SettingsSourceSection.vue'
 import SettingsAboutSection from './Settings/SettingsAboutSection.vue'
+import SettingsBandSection from './Settings/SettingsBandSection.vue'
 
 const themeVars = useThemeVars()
 const { isDark } = useAutoNaiveTheme()
@@ -46,6 +47,7 @@ const menuOptions = [
   { label: '歌词设置', key: 'lyrics', icon: renderIcon('mgc_music_line') },
   { label: '本地与缓存', key: 'local', icon: renderIcon('mgc_folder_line') },
   { label: '音源与插件', key: 'source', icon: renderIcon('mgc_music_2_line') },
+  { label: '手环联动', key: 'band', icon: renderIcon('mgc_watch_2_line') },
   { label: '关于', key: 'about', icon: renderIcon('mgc_information_line') }
 ]
 
@@ -223,6 +225,18 @@ const searchOptions = [
     value: 'source.plugins',
     section: 'source',
     desc: '导入洛雪音源插件并查看支持的音源与日志'
+  },
+  {
+    label: '手环联动',
+    value: 'band.enabled',
+    section: 'band',
+    desc: '经手机中继与小米手环通信（默认关闭）'
+  },
+  {
+    label: '手机端地址',
+    value: 'band.address',
+    section: 'band',
+    desc: '配置手机端局域网 WebSocket 地址'
   }
 ]
 
@@ -237,6 +251,7 @@ const autoCompleteOptions = computed(() => {
     lyrics: '歌词',
     local: '本地',
     source: '音源',
+    band: '手环',
     about: '关于'
   }
 
@@ -495,6 +510,13 @@ watch(
 
                 <settings-source-section
                   v-else-if="activeKey === 'source'"
+                  :setting-item-bg-color="settingItemBgColor"
+                  :setting-item-border-color="settingItemBorderColor"
+                  :highlight-key="highlightedKey"
+                />
+
+                <settings-band-section
+                  v-else-if="activeKey === 'band'"
                   :setting-item-bg-color="settingItemBgColor"
                   :setting-item-border-color="settingItemBorderColor"
                   :highlight-key="highlightedKey"

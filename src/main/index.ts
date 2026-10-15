@@ -10,6 +10,7 @@ import { registerDesktopLyricHandlers } from './ipc/desktopLyric'
 import { registerTaskbarLyricHandlers } from './ipc/taskbarLyric'
 import { registerProxyHandlers } from './ipc/proxy'
 import { registerPluginManagerHandlers } from './ipc/pluginManager'
+import { registerBandHandlers } from './ipc/band'
 
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
@@ -37,6 +38,8 @@ app.whenReady().then(() => {
   registerDesktopLyricHandlers()
   registerTaskbarLyricHandlers()
   registerProxyHandlers()
+  // 手环通信（默认关闭；用户可在设置中开启）
+  registerBandHandlers()
 
   // 配置图片防盗链和跨域
   const filter = {
