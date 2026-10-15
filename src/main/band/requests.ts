@@ -98,21 +98,35 @@ export class RequestTracker<T = unknown> {
     entry.timer = this.scheduler.setTimeout(() => {
       const current = this.pending.get(entry.id)
       if (current !== entry) return
-
-      const decision = decideRetry('E_TIMEOUT', entry.attempts)
-      if (decision.retry && this.onResend) {
-        entry.attempts += 1
-        this.onResend(entry.id, entry.method, entry.attempts)
-        this.arm(entry)
-        return
-      }
-
-      this.pending.delete(entry.id)
-      const error: BandRequestError = new Error(`请求超时：${entry.method} (${entry.id})`)
-      error.code = 'E_TIMEOUT'
-      error.id = entry.id
-      entry.reject(error)
+      this.onTimeout(entry)
     }, this.timeoutMs)
+  }
+
+  /**
+   * 超时处理（§3.11）：可重试时**先按退避等待**（300ms / 900ms）再以**同一 id** 重发，
+   * 并重启超时计时；否则最终以 `E_TIMEOUT` 收尾。
+   *
+   * 关键：退避必须真正生效——旧实现算出了退避时长却立即重发（实际间隔≈超时值），
+   * 这里改为「先等退避，再重发」。退避期间仍可被 `resolve` / `reject` 打断。
+   */
+  private onTimeout(entry: Pending<T>): void {
+    const decision = decideRetry('E_TIMEOUT', entry.attempts)
+    if (decision.retry && this.onResend) {
+      entry.attempts += 1
+      entry.timer = this.scheduler.setTimeout(() => {
+        const current = this.pending.get(entry.id)
+        if (current !== entry) return
+        this.onResend?.(entry.id, entry.method, entry.attempts)
+        this.arm(entry)
+      }, decision.delayMs)
+      return
+    }
+
+    this.pending.delete(entry.id)
+    const error: BandRequestError = new Error(`请求超时：${entry.method} (${entry.id})`)
+    error.code = 'E_TIMEOUT'
+    error.id = entry.id
+    entry.reject(error)
   }
 
   /** 成功收尾：清计时器并 resolve。 */

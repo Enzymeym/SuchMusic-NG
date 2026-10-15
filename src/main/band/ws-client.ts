@@ -37,6 +37,7 @@ import {
   type JsonObject
 } from './protocol'
 import { RequestTracker } from './requests'
+import { classifyLinkFailure, type LinkFailurePhase, type LinkFailureSignal } from './link-error'
 
 /** 客户端连接状态（§3.2 手机端状态机的 Windows 对称）。 */
 export type BandClientState =
@@ -91,10 +92,31 @@ export function getWebSocketCtor(): WsCtor | undefined {
 
 /**
  * 去除 URL 中的查询串，避免令牌等敏感信息出现在日志 / 状态里（§3.12）。
+ *
+ * 说明：自基线 §4.3.1 起，令牌随**升级前**的查询串 `?token=` 携带，
+ * 因此本函数是「不把令牌写进日志 / 状态」的关键——一律从第一个 `?` 起截断，
+ * 保证 `?token=…`（以及 path 自带的查询串）都不会出现在 `getStatus().peer` 或日志中。
  */
 export function sanitizeUrl(url: string): string {
   const index = url.indexOf('?')
   return index >= 0 ? url.slice(0, index) : url
+}
+
+/** 从错误事件中读取可读消息（兼容 `event.error.message` / `event.message`）。 */
+function readErrorMessage(event: unknown): string | undefined {
+  const maybe = event as { error?: { message?: unknown }; message?: unknown } | null
+  const inner = maybe?.error?.message
+  if (typeof inner === 'string') return inner
+  if (typeof maybe?.message === 'string') return maybe.message
+  return undefined
+}
+
+/** 从关闭事件中读取关闭码 / 原因。 */
+function readCloseInfo(event: unknown): { closeCode?: number; closeReason?: string } {
+  const maybe = event as { code?: unknown; reason?: unknown } | null
+  const closeCode = typeof maybe?.code === 'number' ? maybe.code : undefined
+  const closeReason = typeof maybe?.reason === 'string' ? maybe.reason : undefined
+  return { closeCode, closeReason }
 }
 
 /** WebSocket.OPEN 常量。 */
@@ -237,6 +259,7 @@ export class BandWsClient extends EventEmitter {
 
     let socket: WsLike
     try {
+      // 注意：升级前即需携带令牌（URL 查询串，见 config.buildWsUrl，对齐基线 §4.3.1）。
       socket = new ctor(this.options.url)
     } catch (error) {
       this.setError({ code: 'E_LINK', message: `WebSocket 初始化失败：${String(error)}` })
@@ -244,6 +267,17 @@ export class BandWsClient extends EventEmitter {
       return
     }
     this.ws = socket
+
+    // 每个 socket 只收尾一次：Node 主进程的全局 WebSocket（undici）在**升级前**失败时
+    // 只触发 `error`、**不触发 `close`**（readyState 停在 CONNECTING）。若只依赖 onclose
+    // 收尾，则「升级被拒 / 连接被拒」会导致客户端永远停在 connecting、永不重连。
+    let settled = false
+    const settle = (cause: LinkFailureSignal | null): void => {
+      if (settled) return
+      settled = true
+      if (this.ws === socket) this.ws = null
+      this.handleSocketDown(cause)
+    }
 
     socket.onopen = (): void => {
       this.reconnectAttempts = 0
@@ -253,11 +287,19 @@ export class BandWsClient extends EventEmitter {
     socket.onmessage = (event): void => {
       this.handleRawMessage(event?.data)
     }
-    socket.onerror = (): void => {
-      this.emit('error', { code: 'E_LINK', message: 'WebSocket 发生错误' })
+    socket.onerror = (event): void => {
+      const errorMessage = readErrorMessage(event)
+      if (socket.readyState !== WS_OPEN) {
+        // 升级前失败：无后续 close，必须在此主动收尾（分类 + 重连）。
+        settle({ errorMessage })
+        return
+      }
+      // 已升级后的错误交由 onclose 统一收尾，避免重复处理。
+      this.emit('error', { code: 'E_LINK', message: errorMessage ?? 'WebSocket 发生错误' })
     }
-    socket.onclose = (): void => {
-      this.handleClose()
+    socket.onclose = (event): void => {
+      const { closeCode, closeReason } = readCloseInfo(event)
+      settle({ closeCode, closeReason })
     }
   }
 
@@ -379,6 +421,8 @@ export class BandWsClient extends EventEmitter {
       CAPABILITIES,
       peerCaps.filter((c): c is string => typeof c === 'string')
     )
+    // 握手成功：清除此前链路失败提示，避免 UI 残留过期错误。
+    this.lastError = null
     this.setState('ready')
     this.startKeepalive()
     // 握手完成即拉全量快照（§3.3 / 时序图阶段0）
@@ -458,7 +502,7 @@ export class BandWsClient extends EventEmitter {
     this.emit('snapshot', payload)
   }
 
-  private handleClose(): void {
+  private handleSocketDown(cause: LinkFailureSignal | null): void {
     this.ws = null
     this.clearKeepalive()
     this.tracker.rejectAll('E_LINK', '链路断开')
@@ -466,8 +510,21 @@ export class BandWsClient extends EventEmitter {
       this.setState('disabled')
       return
     }
+    // 仅在「未就绪」时给出可操作提示（§4.3 排障），避免正常会话结束刷屏。
+    if (this.state !== 'ready') {
+      const info = classifyLinkFailure({ phase: this.failurePhase(), ...(cause ?? {}) })
+      this.lastError = { code: 'E_LINK', message: info.hint }
+      this.emit('error', this.lastError)
+    }
     this.setState('disconnected')
     this.scheduleReconnect()
+  }
+
+  /** 依据当前状态推断失败阶段（供链路失败分类使用）。 */
+  private failurePhase(): LinkFailurePhase {
+    if (this.state === 'ready') return 'session'
+    if (this.state === 'handshaking') return 'handshake'
+    return 'connect'
   }
 
   /** 退避重连：1s → 2s → 4s，上限 8s（§3.11）。 */

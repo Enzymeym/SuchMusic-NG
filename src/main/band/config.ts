@@ -82,12 +82,25 @@ export async function saveBandConfig(config: BandConfig): Promise<BandConfig> {
 }
 
 /**
- * 由配置拼装 WebSocket URL，例如 ws://192.168.1.5:8787/suchmusic。
+ * 由配置拼装 WebSocket URL，例如 ws://192.168.1.5:8787/suchmusic?token=<令牌>。
  *
- * 注意：会话令牌**不**放入 URL 查询串，而是经 `sys.hello.payload.token` 传递，
- * 以避免令牌出现在任何日志 / 错误信息中（§3.12）。若手机端要求 URL 鉴权，
- * 请在此处按需追加，并同步移除对日志的打印。
+ * 依据基线 `docs/ARCH-手环通信.md` §4.3.1：手机端在 **WS 升级前**校验令牌
+ * （`request.uri.queryParameters['token']` 或 `Authorization: Bearer`），校验失败即
+ * 以 HTTP 401 拒绝、**不升级**。故令牌必须随**升级请求**携带——在此放入 URL 查询串：
+ *
+ *   ws://<host>:<port><path>?token=<encodeURIComponent(token)>
+ *
+ * 令牌同时仍冗余放入 `sys.hello.payload.token`（§4.3 兼容），但**升级前**必须带。
+ *
+ * 拼接注意：`config.path` 可能已含查询串（如 `/suchmusic?a=1`），需稳妥追加，
+ * 不得出现重复 `?`、`?&` 或 `//`；无令牌时不追加任何查询串（保持干净 URL）。
+ * 令牌经 `encodeURIComponent` 编码；打印前由 `sanitizeUrl` 脱敏（§3.12）。
  */
 export function buildWsUrl(config: BandConfig): string {
-  return `ws://${config.host}:${config.port}${config.path}`
+  const base = `ws://${config.host}:${config.port}${config.path}`
+  if (!config.token) return base
+  // path 已带查询串时用 `&` 连接；若 path 恰好以 `?` / `&` 结尾，则不再补分隔符。
+  let separator = base.includes('?') ? '&' : '?'
+  if (base.endsWith('?') || base.endsWith('&')) separator = ''
+  return `${base}${separator}token=${encodeURIComponent(config.token)}`
 }

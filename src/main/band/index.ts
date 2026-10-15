@@ -9,6 +9,7 @@ export * from './chunk'
 export * from './dedup'
 export * from './requests'
 export * from './config'
+export * from './link-error'
 export {
   BandBridge,
   getBandBridge,

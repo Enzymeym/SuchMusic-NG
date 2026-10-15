@@ -320,6 +320,16 @@ async function handleCommand(action: () => Promise<unknown>, label: string): Pro
       </n-space>
     </n-card>
 
+    <!-- 链路失败的可操作提示（令牌错误 / 地址路径错误 / 未开中继 / 非同局域网…） -->
+    <n-alert
+      v-if="status.lastError && !connected"
+      type="warning"
+      :bordered="false"
+      style="margin-top: 12px"
+    >
+      {{ status.lastError.message }}
+    </n-alert>
+
     <!-- 当前歌曲 -->
     <div class="section-group-title" style="margin-top: 24px">当前歌曲</div>
     <n-card
