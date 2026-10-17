@@ -199,6 +199,42 @@ const BPM_ENVELOPE_WINDOW_SEC = 0.05
 /** onset 间隔有效范围（毫秒）：对应 30-300 BPM 区间 */
 const ONSET_INTERVAL_MIN_MS = 200
 const ONSET_INTERVAL_MAX_MS = 2000
+/**
+ * 拍网格最低置信度：低于该值视为无法建立稳定拍网格，
+ * 过渡触发点回退到尾部 onset 吸附 / 纯时间点（保持旧行为）。
+ */
+export const GRID_MIN_CONFIDENCE = 0.3
+/** 拍网格相位搜索分辨率（相位在拍周期内按该步数离散枚举） */
+const GRID_PHASE_STEPS = 24
+/** 有效起音的最小能量跃升（RMS 增量）：低于该值视为无节奏（纯音/噪声），不建立拍网格 */
+const MIN_ONSET_JUMP = 0.005
+/** 更换候选周期所需的相对梳状响应提升（抑制半速歧义：微小优势不换周期） */
+const SCORE_REL_EPS = 0.03
+
+/**
+ * 计算能量包络（RMS 序列）。
+ * estimateBpm 与 estimateBeatGrid 共用，避免对同一段 PCM 重复扫描。
+ * @returns envelope（RMS 序列）与 windowSec（每点的时间步长，秒）
+ */
+function computeEnergyEnvelope(
+  channelData: Float32Array,
+  sampleRate: number,
+  startSec: number,
+  endSec: number
+): { envelope: Float32Array; windowSec: number } {
+  const startSample = Math.max(0, Math.min(channelData.length, Math.floor(startSec * sampleRate)))
+  const endSample = Math.max(
+    startSample + 1,
+    Math.min(channelData.length, Math.floor(endSec * sampleRate))
+  )
+  const winSamples = Math.max(1, Math.floor(BPM_ENVELOPE_WINDOW_SEC * sampleRate))
+  const count = Math.max(0, Math.floor((endSample - startSample) / winSamples))
+  const envelope = new Float32Array(count)
+  for (let i = 0; i < count; i++) {
+    envelope[i] = computeWindowRms(channelData, startSample + i * winSamples, winSamples)
+  }
+  return { envelope, windowSec: winSamples / sampleRate }
+}
 
 /**
  * 估计音频片段的 BPM
@@ -215,18 +251,8 @@ export function estimateBpm(
   startSec = 0,
   endSec = channelData.length / sampleRate
 ): number {
-  const startSample = Math.max(0, Math.min(channelData.length, Math.floor(startSec * sampleRate)))
-  const endSample = Math.max(
-    startSample + 1,
-    Math.min(channelData.length, Math.floor(endSec * sampleRate))
-  )
-  const winSamples = Math.max(1, Math.floor(BPM_ENVELOPE_WINDOW_SEC * sampleRate))
-
-  // 1) 能量包络
-  const envelope: number[] = []
-  for (let offset = startSample; offset + winSamples <= endSample; offset += winSamples) {
-    envelope.push(computeWindowRms(channelData, offset, winSamples))
-  }
+  // 1) 能量包络（与拍网格估计共用同一扫描）
+  const { envelope } = computeEnergyEnvelope(channelData, sampleRate, startSec, endSec)
   if (envelope.length < 20) return 0
 
   // 2) onset：能量相对之前约 2s 基线显著跃升
@@ -258,6 +284,196 @@ export function estimateBpm(
   while (bpm > BPM_MAX) bpm /= 2
   while (bpm < BPM_MIN) bpm *= 2
   return Math.round(bpm)
+}
+
+// ====== 拍网格（beat grid）估计与吸附 ======
+
+/**
+ * 拍网格：在估计出 BPM 的基础上，进一步求出「首拍相位」与置信度。
+ * 拍点位置 = phaseSec + n × beatPeriodSec（相对分析片段原时间轴）。
+ */
+export interface BeatGrid {
+  /** 归一化 BPM（60~180）；0 表示不可用 */
+  bpm: number
+  /** 每拍时长（秒） */
+  beatPeriodSec: number
+  /** 首拍相位（秒）：拍点 = phaseSec + n × beatPeriodSec，相对音频开头（整首歌）取模一个拍周期 */
+  phaseSec: number
+  /** 置信度（0~1）：梳状响应相对候选均值的显著度，越高越可信 */
+  confidence: number
+}
+
+/** 无效拍网格的占位返回值 */
+const EMPTY_BEAT_GRID: BeatGrid = { bpm: 0, beatPeriodSec: 0, phaseSec: 0, confidence: 0 }
+
+/**
+ * 估计音频片段的拍网格（BPM + 首拍相位 + 置信度）。
+ *
+ * 思路：与 estimateBpm 共用能量包络 → 半波整流差分得 onset 强度 → 对候选周期
+ * 在相位维度做「梳状求和」（把 onset 强度按拍点位置采样累加），取响应最高者；
+ * 置信度用最优相位响应相对全体相位响应均值的「峰均比」（真节奏显著＞1，噪声≈1）。
+ *
+ * @param channelData 单声道 PCM
+ * @param sampleRate 采样率
+ * @param startSec 分析起点（秒，相对音频开头）
+ * @param endSec 分析终点（秒）
+ * @param hintBpm 已知 BPM 提示（来自 estimateBpm）：只在其 1×/0.5×/2× 邻域搜索，加速并消歧
+ * @returns 拍网格；数据不足 / 无有效 onset 返回 bpm=0 的占位值
+ */
+export function estimateBeatGrid(
+  channelData: Float32Array,
+  sampleRate: number,
+  startSec: number,
+  endSec: number,
+  hintBpm = 0
+): BeatGrid {
+  const { envelope, windowSec } = computeEnergyEnvelope(channelData, sampleRate, startSec, endSec)
+  if (envelope.length < 40 || windowSec <= 0) return EMPTY_BEAT_GRID
+
+  // 1) onset 强度：半波整流差分（突出起音），并剔除低能量帧（静音/极弱噪声）
+  const onset = new Float32Array(envelope.length)
+  const minContentRms = Math.max(ONSET_MIN_RMS * 0.6, SILENCE_THRESHOLD * 2)
+  let totalOnset = 0
+  let maxOnset = 0
+  for (let i = 1; i < envelope.length; i++) {
+    const d = envelope[i] - envelope[i - 1]
+    const v = envelope[i] >= minContentRms && d > 0 ? d : 0
+    onset[i] = v
+    totalOnset += v
+    if (v > maxOnset) maxOnset = v
+  }
+  // 无有效起音（纯音 / 噪声 / 静音）：不存在可信拍网格
+  if (totalOnset <= 1e-6 || maxOnset < MIN_ONSET_JUMP) return EMPTY_BEAT_GRID
+  const meanOnset = totalOnset / onset.length
+
+  // 2) 候选周期（秒），按周期升序（= BPM 降序）排列：同分时保留更快的一档，抑制半速歧义
+  const periods: number[] = []
+  if (hintBpm > 0) {
+    for (const f of [1, 0.5, 2]) {
+      const p = (60 / hintBpm) * f
+      if (p > 0) periods.push(p)
+    }
+  } else {
+    for (let bpm = BPM_MAX; bpm >= BPM_MIN; bpm -= 1) periods.push(60 / bpm)
+  }
+  periods.sort((a, b) => a - b)
+
+  // 3) 逐周期做相位维梳状搜索，记录每个周期的最优归一化响应与相位均响应
+  let bestScore = -1
+  let bestPeriod = 0
+  let bestPhaseSec = 0
+  let bestPhaseMean = 0
+  for (const P of periods) {
+    const stepsPerPeriod = P / windowSec
+    // 周期至少 2 个包络步长，且整段至少含 4 拍
+    if (stepsPerPeriod < 2 || envelope.length / stepsPerPeriod < 4) continue
+    const phaseSteps = Math.max(4, Math.min(GRID_PHASE_STEPS, Math.round(stepsPerPeriod)))
+    let localBest = -1
+    let localPhaseStep = 0
+    let phaseSum = 0
+    for (let s = 0; s < phaseSteps; s++) {
+      const phaseStepsF = (s / phaseSteps) * stepsPerPeriod
+      let sum = 0
+      let count = 0
+      for (let n = 0; ; n++) {
+        const idx = phaseStepsF + n * stepsPerPeriod
+        if (idx >= onset.length - 1) break
+        const i0 = Math.floor(idx)
+        const frac = idx - i0
+        sum += onset[i0] * (1 - frac) + onset[i0 + 1] * frac
+        count++
+      }
+      if (count < 4) continue
+      const score = sum / count / meanOnset // 归一化：拍点平均 onset 相对全体均值的倍数
+      phaseSum += score
+      if (score > localBest) {
+        localBest = score
+        localPhaseStep = s
+      }
+    }
+    if (localBest < 0) continue
+    // 需要相对提升超过 SCORE_REL_EPS 才换周期：同分/微小优势时保留更早（更快）的周期，
+    // 抑制「半速周期因少采样一个拍而精度略高」的假优势。
+    if (localBest > bestScore * (1 + SCORE_REL_EPS)) {
+      bestScore = localBest
+      bestPeriod = P
+      bestPhaseSec = (localPhaseStep / phaseSteps) * P
+      bestPhaseMean = phaseSum / phaseSteps
+    }
+  }
+  if (bestScore <= 0 || bestPeriod <= 0) return EMPTY_BEAT_GRID
+
+  // 4) 置信度：最优相位对应的梳状响应相对「全体相位均值」的提升倍数（峰均比）。
+  // 真节奏音乐里拍点位置的 onset 显著高于随机相位，峰均比高；噪声/纯音则接近 1。
+  const confidence = Math.min(1, Math.max(0, (bestScore / Math.max(bestPhaseMean, 1e-9) - 1) / 2))
+
+  let bpm = 60 / bestPeriod
+  while (bpm > BPM_MAX) bpm /= 2
+  while (bpm < BPM_MIN) bpm *= 2
+  const roundedBpm = Math.round(bpm)
+  const beatPeriodSec = 60 / roundedBpm
+  // 相位转换为「相对音频开头」的绝对拍点（模一个拍周期），使调用方可直接用绝对毫秒吸附
+  const rawAbsPhase = startSec + bestPhaseSec
+  const phaseSec = ((rawAbsPhase % beatPeriodSec) + beatPeriodSec) % beatPeriodSec
+
+  return {
+    bpm: roundedBpm,
+    beatPeriodSec,
+    phaseSec,
+    confidence
+  }
+}
+
+/** 拍网格吸附选项 */
+export interface GridSnapOptions {
+  /** 最低置信度（默认 GRID_MIN_CONFIDENCE） */
+  minConfidence?: number
+  /** 乐句层级（拍数），从大到小尝试（默认 [16, 8, 4, 1]） */
+  levels?: number[]
+  /** 吸附容差（毫秒）：候选点距期望点超过该值则下沉到更小层级（默认两个拍周期，
+   *  使 4 拍小节头通常都能落在容差内、优先按小节对齐） */
+  toleranceMs?: number
+}
+
+/**
+ * 把期望时刻吸附到拍网格上最近的乐句/小节/拍边界。
+ * 从大到小尝试 levels，只接受距期望点不超过 toleranceMs 的候选；
+ * 层级 1（单拍）的最近候选必落在容差内，故网格有效时一定返回非 null。
+ * @returns 吸附后的毫秒时刻；网格无效 / 窗口非法返回 null
+ */
+export function snapMsToGrid(
+  desiredMs: number,
+  grid: BeatGrid,
+  lowerMs: number,
+  upperMs: number,
+  opts: GridSnapOptions = {}
+): number | null {
+  const minConfidence = opts.minConfidence ?? GRID_MIN_CONFIDENCE
+  const levels = opts.levels ?? [16, 8, 4, 1]
+  if (!grid || grid.bpm <= 0 || grid.confidence < minConfidence) return null
+  const periodMs = grid.beatPeriodSec * 1000
+  if (!(periodMs > 0) || upperMs < lowerMs) return null
+  const anchorMs = grid.phaseSec * 1000
+  const toleranceMs = opts.toleranceMs ?? periodMs * 2
+
+  for (const L of levels) {
+    const step = periodMs * L
+    if (!(step > 0)) continue
+    const k = Math.round((desiredMs - anchorMs) / step)
+    let best: number | null = null
+    let bestGap = Infinity
+    for (const kk of [k, k - 1, k + 1]) {
+      const cand = anchorMs + kk * step
+      if (cand < lowerMs || cand > upperMs) continue
+      const gap = Math.abs(cand - desiredMs)
+      if (gap < bestGap) {
+        bestGap = gap
+        best = cand
+      }
+    }
+    if (best !== null && bestGap <= toleranceMs) return best
+  }
+  return null
 }
 
 // ====== 调性（Key）检测与和谐兼容 ======
@@ -517,6 +733,8 @@ export interface TailDecay {
   decayRate: number
   /** 尾部窗口内检测到的起始点（拍点，相对歌曲开头，秒）。用于把过渡触发对齐到当前曲的重拍上，跨风格/节拍的切换更顺 */
   onsets?: number[]
+  /** 尾部拍网格（拍点 + 相位 + 置信度）；未分析 / 不可用则缺省 */
+  grid?: BeatGrid
 }
 
 /**
@@ -856,6 +1074,12 @@ export interface TransitionPlan {
   keyDistance: number
   /** 节奏是否匹配（差异在阈值内 / 2 倍频对齐） */
   tempoMatch: boolean
+  /** 触发点是否来自拍网格/乐句吸附（false = 未使用网格，回退到 onset / 纯时间点） */
+  barAligned: boolean
+  /** 当前曲尾部拍网格置信度（0 = 未使用网格） */
+  gridConfidence: number
+  /** 下一曲落点（原时间轴秒；未对齐小节时等于内容起点） */
+  nextDownbeatSec: number
 }
 
 /** computeTransitionPlan 入参 */
@@ -876,6 +1100,10 @@ export interface TransitionPlanParams {
   contentStartSec: number
   /** 用户配置的过渡时长（毫秒），作为基准 */
   userTransitionMs: number
+  /** 下一曲落点（原时间轴秒，已吸附到小节头）；缺省时回退为 contentStartSec */
+  nextDownbeatSec?: number
+  /** 是否启用节奏/乐句对齐（缺省 true）；false 时回退现有 onset 吸附行为 */
+  beatAlignEnabled?: boolean
 }
 
 /**
@@ -939,18 +1167,32 @@ export function computeTransitionPlan(p: TransitionPlanParams): TransitionPlan {
       triggerMs = decayMs
     }
   }
-  // 对齐到当前曲尾部最近的一个拍点（起始点）：让交叉淡化从重拍上开始，
-  // 不同风格/节拍的歌曲衔接更顺，避免落在任意节奏相位上产生脱拍感。
-  // 仅在合法窗口 [earliestMs, latestMs] 内挑选最接近期望触发点的拍点。
   const desiredTriggerMs = triggerMs
-  let bestGap = Infinity
-  for (const o of p.tail.onsets ?? []) {
-    const om = o * 1000
-    if (om < earliestMs || om > latestMs) continue
-    const gap = Math.abs(om - desiredTriggerMs)
-    if (gap < bestGap) {
-      bestGap = gap
-      triggerMs = om
+
+  // 优先级 1：拍网格 / 乐句吸附（让交叉淡化起点落在当前曲的小节 / 乐句重拍上）。
+  // 仅在启用对齐且尾部拍网格置信度足够时尝试；吸附失败则下沉到优先级 2。
+  const beatAlign = p.beatAlignEnabled ?? true
+  const tailGrid = p.tail.grid
+  let barAligned = false
+  if (beatAlign && tailGrid && tailGrid.bpm > 0) {
+    const snapped = snapMsToGrid(desiredTriggerMs, tailGrid, earliestMs, latestMs)
+    if (snapped !== null) {
+      triggerMs = snapped
+      barAligned = true
+    }
+  }
+
+  // 优先级 2：回退到尾部最近的一个 onset（起始点）吸附（现有行为）
+  if (!barAligned) {
+    let bestGap = Infinity
+    for (const o of p.tail.onsets ?? []) {
+      const om = o * 1000
+      if (om < earliestMs || om > latestMs) continue
+      const gap = Math.abs(om - desiredTriggerMs)
+      if (gap < bestGap) {
+        bestGap = gap
+        triggerMs = om
+      }
     }
   }
   triggerMs = Math.min(Math.max(triggerMs, earliestMs), latestMs)
@@ -968,18 +1210,22 @@ export function computeTransitionPlan(p: TransitionPlanParams): TransitionPlan {
   const finalDurationMs = Math.max(MIN_TRANSITION_MS, Math.min(baseDurationMs, remainingMs))
 
   // ---- 5. 下一曲起始偏移（变速后时间轴） ----
+  // 有效落点：优先使用已吸附到小节头的 nextDownbeatSec，否则回退内容起点。
   // 开头 STRETCH_APPLY_SEC 秒整体拉伸至 STRETCH_APPLY_SEC*ratio，其后为原速区。
-  // 必须把"原曲内容起点"映射到"拉伸后缓冲"的实际位置，两段位移分别计入，
+  // 必须把"原曲落点"映射到"拉伸后缓冲"的实际位置，两段位移分别计入，
   // 否则首句歌词在拉伸区之外时（常见于前奏后 10s 才开口）落点会偏后到首句结尾。
-  let startOffsetMs = Math.round(p.contentStartSec * 1000)
+  const effectiveContentStartSec = p.nextDownbeatSec ?? p.contentStartSec
+  let startOffsetMs = Math.round(effectiveContentStartSec * 1000)
   if (stretchRatio !== 1) {
-    if (p.contentStartSec < STRETCH_APPLY_SEC) {
+    if (effectiveContentStartSec < STRETCH_APPLY_SEC) {
       // 落点在拉伸区内部：整体线性换算
-      startOffsetMs = Math.round(p.contentStartSec * stretchRatio * 1000)
+      startOffsetMs = Math.round(effectiveContentStartSec * stretchRatio * 1000)
     } else {
       // 落点在拉伸区之后:拉伸区位移 + 原速区剩余
       const headStretchedSec = STRETCH_APPLY_SEC * stretchRatio
-      startOffsetMs = Math.round((headStretchedSec + (p.contentStartSec - STRETCH_APPLY_SEC)) * 1000)
+      startOffsetMs = Math.round(
+        (headStretchedSec + (effectiveContentStartSec - STRETCH_APPLY_SEC)) * 1000
+      )
     }
   }
 
@@ -991,7 +1237,10 @@ export function computeTransitionPlan(p: TransitionPlanParams): TransitionPlan {
     pitchShiftSemitones,
     startOffsetMs,
     keyDistance,
-    tempoMatch
+    tempoMatch,
+    barAligned,
+    gridConfidence: barAligned && tailGrid ? tailGrid.confidence : 0,
+    nextDownbeatSec: p.nextDownbeatSec ?? p.contentStartSec
   }
 }
 
@@ -1285,4 +1534,46 @@ export async function pitchShiftPcmAsync(
     await yieldMainThread()
   }
   return resample(normalizePhaseVocoder(state), 1 / ratio)
+}
+
+// ====== 交叉淡化曲线（等功率 / 线性） ======
+
+/** 交叉淡化曲线对：fadeOut 用于当前曲（1→0），fadeIn 用于下一曲（0→1） */
+export interface FadeCurves {
+  fadeOut: Float32Array
+  fadeIn: Float32Array
+}
+
+/** 曲线采样点数（足够平滑，同时避免 setValueCurveAtTime 过长曲线的实现差异） */
+const CURVE_POINTS = 96
+
+/**
+ * 等功率交叉淡化曲线（cos/sin）：
+ * fadeOut = cos(π/2·t)、fadeIn = sin(π/2·t)，满足 fadeOut² + fadeIn² = 1。
+ * 对不相关信号可保持合成功率恒定，消除线性曲线在中点约 3dB 的电平凹陷（感知音量坑）。
+ */
+export function buildEqualPowerCurves(n = CURVE_POINTS): FadeCurves {
+  const size = Math.max(2, Math.floor(n))
+  const fadeOut = new Float32Array(size)
+  const fadeIn = new Float32Array(size)
+  for (let i = 0; i < size; i++) {
+    const t = i / (size - 1)
+    const theta = (Math.PI / 2) * t
+    fadeOut[i] = Math.cos(theta)
+    fadeIn[i] = Math.sin(theta)
+  }
+  return { fadeOut, fadeIn }
+}
+
+/** 线性交叉淡化曲线（fadeOut = 1-t、fadeIn = t）；保留以兼容旧听感 */
+export function buildLinearCurves(n = CURVE_POINTS): FadeCurves {
+  const size = Math.max(2, Math.floor(n))
+  const fadeOut = new Float32Array(size)
+  const fadeIn = new Float32Array(size)
+  for (let i = 0; i < size; i++) {
+    const t = i / (size - 1)
+    fadeOut[i] = 1 - t
+    fadeIn[i] = t
+  }
+  return { fadeOut, fadeIn }
 }

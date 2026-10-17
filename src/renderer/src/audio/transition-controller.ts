@@ -2,13 +2,13 @@
  * 过渡调度控制器（智能过渡，扁平化）
  *
  * 重写自旧 Automix 架构（ML 模型 + Worker + 实时流式分析），简化为：
- * 1. onSongStarted：异步分析当前曲（结尾能量 / 结尾节奏 / 结尾调性），
+ * 1. onSongStarted：异步分析当前曲（结尾能量 / 结尾节奏 / 结尾调性 / 尾部拍网格），
  *    同时预解码下一首（readAudioFile IPC + loadNextFromArrayBuffer，不打断播放）
- * 2. 下一首解码后：分析其头部（节奏 / 调性 / 前奏偏移），等待当前曲分析就绪，
+ * 2. 下一首解码后：分析其头部（节奏 / 调性 / 前奏偏移 / 头部拍网格），等待当前曲分析就绪，
  *    经 computeTransitionPlan 联合决策得到触发点、过渡时长、变速比、变调量
- * 3. 对下一曲开头 STRETCH_HEAD_SEC 秒做 WSOLA 变速 + 相位声码器变调
- *    （节奏与调性向当前曲对齐，实现"完美过渡"），其余原速原调拼接
- * 4. onProgress 到达触发点：beginCrossfade 双源交叉淡化；完成回调更新 playerStore
+ * 3. 对下一曲开头 STRETCH_APPLY_SEC 秒做 WSOLA 变速（节奏向当前曲对齐），其余原速拼接
+ * 4. onProgress 进入预调度窗口：一次性把双源交叉淡化排程到精确音频时刻
+ *    （等功率曲线 + 可选 bass swap 低频避让）；完成回调更新 playerStore
  *
  * 公共 API（getTransitionController / init / onSongStarted / onProgress /
  * rearmAfterSeek / abort / dispose / isActive）与旧实现保持一致，
@@ -26,6 +26,7 @@ import {
   BPM_ANALYSIS_WINDOW_SEC,
   BEAT_TRIGGER_MARGIN_MS,
   CONTENT_ANALYSIS_SEC,
+  GRID_MIN_CONFIDENCE,
   STRETCH_APPLY_SEC,
   STRETCH_HEAD_SEC,
   TAIL_ANALYSIS_SEC,
@@ -33,6 +34,7 @@ import {
   analyzeKeyAsync,
   analyzeTail,
   computeTransitionPlan,
+  estimateBeatGrid,
   estimateBpm,
   timeStretchPcmAsync
 } from './transition-dsp'
@@ -51,8 +53,19 @@ const TRIGGER_GUARD_MS = 10000
  * 这份缓冲会在整首歌播放期间常驻内存；延迟到临近过渡点再解码，可让绝大部分播放时段
  * 只保留当前曲一份 PCM。该提前量远大于读文件 + 解码 + 特征分析的耗时（通常数秒），
  * 且始终大于 TRIGGER_GUARD_MS，保证过渡计划在触发点前就绪，不改变过渡行为。
+ *
+ * 30s 而非 60s：把「双份 PCM 并存」的高占用窗口再缩短一半，而解码预算仍有
+ * 30s − TRIGGER_GUARD_MS(10s) = 20s，大于 PRELOAD_DECODE_TIMEOUT_MS(15s)。
  */
-const PRELOAD_LEAD_MS = 60000
+const PRELOAD_LEAD_MS = 30000
+/**
+ * 预调度提前量（毫秒）：进入该窗口即把交叉淡化一次性排程到精确的音频时刻，
+ * 之后不再依赖 PlayerBar 250ms 轮询的判定精度（消除最多半拍的触发抖动）。
+ */
+const PRE_SCHEDULE_LEAD_MS = 500
+/** 等功率曲线的感知接管点在 50% 处；线性曲线沿用旧折中值 0.44 */
+const NEXT_LANDING_EARLY_RATIO_EQUAL_POWER = 0.5
+const NEXT_LANDING_EARLY_RATIO_LINEAR = 0.44
 
 
 /** 为 Promise 加超时：超时 reject（调用方 catch 降级），避免挂起的异步调用阻塞过渡流程 */
@@ -112,7 +125,17 @@ export class TransitionController {
   private preparing = false
   /** 当前曲异步分析（onSongStarted 启动，prepareNext 等待其完成） */
   private currentAnalysis: Promise<CurrentAnalysis> | null = null
+  /** 延迟切换 UI 曲目的定时器（预调度窗口内等待真正起播），中断/复位时清除 */
+  private uiSwitchTimer: number | null = null
   private initialized = false
+
+  /** 清除延迟 UI 切换定时器（过渡被中断/复位时调用，避免切回已作废的下一曲） */
+  private clearUiSwitchTimer(): void {
+    if (this.uiSwitchTimer !== null) {
+      clearTimeout(this.uiSwitchTimer)
+      this.uiSwitchTimer = null
+    }
+  }
 
   /** 当前是否为 Web Audio 模式（仅该模式支持交叉淡化） */
   private isWebAudioMode(): boolean {
@@ -150,6 +173,7 @@ export class TransitionController {
    * 启动当前曲分析 + 下一首预解码（并行，均不打断播放）
    */
   onSongStarted(song: PlayerSong): void {
+    this.clearUiSwitchTimer()
     this.active = this.player.transitionEnabled && this.isWebAudioMode() && this.isLocalFile(song)
     this.trackId = String(song.id ?? '')
     this.plan = null
@@ -170,7 +194,8 @@ export class TransitionController {
 
   /**
    * 播放进度更新（PlayerBar 进度轮询调用）
-   * 到达触发点且过渡计划就绪时执行交叉淡化
+   * 进入预调度窗口（距触发点 ≤ PRE_SCHEDULE_LEAD_MS）时一次性把交叉淡化
+   * 排程到精确音频时刻并执行，之后不再依赖轮询精度
    */
   onProgress(positionMs: number): void {
     if (!this.active || this.executed) return
@@ -190,8 +215,9 @@ export class TransitionController {
       return
     }
 
-    if (positionMs >= this.plan.triggerMs) {
-      this.executeTransition()
+    // 进入预调度窗口即一次性排程到精确音频时刻（消除轮询粒度带来的触发抖动）
+    if (this.plan.triggerMs - positionMs <= PRE_SCHEDULE_LEAD_MS) {
+      this.executeTransition(positionMs)
     }
   }
 
@@ -216,6 +242,7 @@ export class TransitionController {
 
   /** 放弃当前过渡流程（用户手动切歌 / seek / pause 时调用） */
   abort(): void {
+    this.clearUiSwitchTimer()
     this.active = false
     this.executed = false
     this.plan = null
@@ -229,6 +256,7 @@ export class TransitionController {
     if (!this.initialized) return
     this.initialized = false
     this.active = false
+    this.clearUiSwitchTimer()
     audioEngine.setOnCrossfadeComplete(null)
   }
 
@@ -254,6 +282,15 @@ export class TransitionController {
         analyzeKeyAsync(channel, sampleRate, TAIL_ANALYSIS_SEC)
       ])
       if (!this.active || this.trackId !== trackId) return EMPTY_ANALYSIS
+      // 尾部拍网格（拍点相位 + 置信度）：以估计 BPM 为提示，对尾部窗口做梳状对齐，
+      // 供 computeTransitionPlan 把触发点吸附到小节/乐句重拍。失败则保持缺省，回退 onset 吸附。
+      try {
+        const tailStartSec = Math.max(0, durationSec - TAIL_ANALYSIS_SEC)
+        const grid = estimateBeatGrid(channel, sampleRate, tailStartSec, durationSec, bpm || 0)
+        if (grid.bpm > 0) tail.grid = grid
+      } catch (e) {
+        console.warn('[TransitionController] 尾部拍网格分析失败:', e)
+      }
       return { tail, bpm, key }
     } catch (e) {
       console.warn('[TransitionController] 当前曲分析失败:', e)
@@ -328,6 +365,16 @@ export class TransitionController {
       ])
       if (!this.active || this.trackId !== targetTrackId) return
 
+      // 下一曲头部拍网格：用于把落点吸附到小节头（重拍），使 B 的重拍/首句落在 A 的拍点上
+      const nextGrid = estimateBeatGrid(
+        channel,
+        sampleRate,
+        0,
+        Math.min(CONTENT_ANALYSIS_SEC, channel.length / sampleRate),
+        nextBpm || 0
+      )
+      const beatAlign = this.player.transitionBeatAlign
+
       // 下一曲歌词预取：prepareNext 时 next.lyrics 通常尚未加载（歌词在切歌后才拉取），
       // 若为空则按网易云 ID / 标题歌手在线获取，否则内容起点只能靠音频检测而落不到首句。
       const nextLyrics = next.lyrics || (await this.fetchNextLyrics(next))
@@ -359,6 +406,31 @@ export class TransitionController {
       )
       if (!this.active || this.trackId !== targetTrackId) return
 
+      // 落点吸附到下一曲的小节头（原时间轴）：使 B 的重拍与 A 的拍点对齐，且最多提前一拍
+      // （避免截掉首句）。必须在原时间轴吸附，之后才交给变速时间轴映射（见 computeTransitionPlan）。
+      let nextDownbeatSec = contentStartSec
+      if (beatAlign && nextGrid.bpm > 0 && nextGrid.confidence >= GRID_MIN_CONFIDENCE) {
+        const periodMs = nextGrid.beatPeriodSec * 1000
+        const anchorMs = nextGrid.phaseSec * 1000
+        const barStepMs = periodMs * 4
+        const contentMs = contentStartSec * 1000
+        const k = Math.round((contentMs - anchorMs) / barStepMs)
+        let candMs = anchorMs + k * barStepMs
+        // 允许最多提前一拍；若最近小节头早于该下限，则顺延一个小节
+        if (candMs < contentMs - periodMs) candMs += barStepMs
+        const audioDurationMs = (channel.length / sampleRate) * 1000
+        if (candMs >= 0 && candMs <= audioDurationMs) {
+          nextDownbeatSec = candMs / 1000
+        }
+      }
+      console.log('[TransitionController] 下一曲落点', {
+        title: next.title,
+        contentStartSec,
+        nextDownbeatSec,
+        gridConfidence: nextGrid.confidence,
+        nextBpm
+      })
+
       // 等待当前曲分析就绪（与上一首预解码并行；失败时为安全默认值）
       const current = this.currentAnalysis
         ? await this.currentAnalysis
@@ -376,8 +448,10 @@ export class TransitionController {
         nextBpm,
         currentKey: current.key,
         nextKey,
-        contentStartSec,
-        userTransitionMs: this.player.transitionDuration || DEFAULT_TRANSITION_MS
+        contentStartSec: nextDownbeatSec,
+        nextDownbeatSec,
+        userTransitionMs: this.player.transitionDuration || DEFAULT_TRANSITION_MS,
+        beatAlignEnabled: beatAlign
       })
 
       // crossfade 类型：固定时长、固定倒数触发点（不做节拍提前量），其余计划参数保留
@@ -472,35 +546,64 @@ export class TransitionController {
   }
 
   /** 执行过渡（统一为双源交叉淡化：两首歌同时淡入和淡出） */
-  private executeTransition(): void {
+  private executeTransition(currentPositionMs: number): void {
     if (this.executed || !this.pendingSong || !this.plan) return
     this.executed = true
     this.player.setTransitioning(true)
 
     const fadeMs = this.plan.transitionDurationMs
+    const curve = this.player.transitionCurve
+    const bassSwap = this.player.transitionBassSwap
+
     // 让"首句歌词开始"落在交叉淡化中段、两曲音量大致持平的感知接管点，
     // 而不是淡入起点或淡出尾端：
     // - 从淡入起点就播首句：首句在低音量淡入期被"吃掉"，淡完后已是首句结尾；
     // - 退回整段 fadeMs：又会在淡出期提前暴露一大段前奏，显得过早。
-    // 对称线性交叉淡化在约 50% 时长处两曲等响，理论中点为一半淡入时长，
-    // 取 0.44 为折中（首句贴近淡出期、前奏暴露适中）。
-    const backoffMs = Math.round(fadeMs * 0.44)
+    // 等功率曲线中点在 50%（cos45°=sin45°≈0.707，两曲等响）；线性曲线沿用旧折中值 0.44。
+    const landingRatio =
+      curve === 'linear' ? NEXT_LANDING_EARLY_RATIO_LINEAR : NEXT_LANDING_EARLY_RATIO_EQUAL_POWER
+    const backoffMs = Math.round(fadeMs * landingRatio)
     const effectiveOffsetMs = Math.max(0, this.plan.startOffsetMs - backoffMs)
-    const ok = audioEngine.beginCrossfade(fadeMs, effectiveOffsetMs)
+
+    // 精确调度：把交叉淡化排程到 triggerMs 对应的音频时刻，而非"下一次轮询才启动"。
+    // startDelayMs 补偿当前进度与触发点的差值，抖动由 AudioContext 时钟保证（采样级）。
+    const startDelayMs = Math.max(0, Math.round(this.plan.triggerMs - currentPositionMs))
+
+    const ok = audioEngine.beginCrossfade(fadeMs, effectiveOffsetMs, startDelayMs, {
+      curve,
+      bassSwap
+    })
     if (!ok) {
       // 预解码失败或引擎不可用：回退到常规切歌路径
       this.rollback()
       return
     }
 
-    // 交叉淡化已启动：下一首此刻已在淡入，立即切换歌曲信息，
-    // 避免 UI（PlayerBar/PlayerPage/SMTC 等）在淡化期间仍显示旧曲信息
-    this.player.setPosition(this.plan.startOffsetMs)
-    this.player.setTransitionConsumed(true)
-    this.player.previewTransitionSong(this.pendingSong, this.pendingIndex)
-    const nextAudio = audioEngine.nextAudioBuffer
-    if (nextAudio) {
-      this.player.setDuration(Math.round(nextAudio.duration * 1000))
+    const pendingSong = this.pendingSong
+    const pendingIndex = this.pendingIndex
+    const startOffsetMs = this.plan.startOffsetMs
+
+    // 交叉淡化起播后才切换歌曲信息，避免 UI（PlayerBar/PlayerPage/SMTC）在延迟窗口内
+    // 提前切到下一曲、导致进度条跳变（引擎在起播前仍报当前曲位置）
+    const applyUiSwitch = (): void => {
+      this.player.setPosition(startOffsetMs)
+      this.player.setTransitionConsumed(true)
+      this.player.previewTransitionSong(pendingSong, pendingIndex)
+      const nextAudio = audioEngine.nextAudioBuffer
+      if (nextAudio) {
+        this.player.setDuration(Math.round(nextAudio.duration * 1000))
+      }
+    }
+
+    if (startDelayMs > 0) {
+      this.clearUiSwitchTimer()
+      this.uiSwitchTimer = window.setTimeout(() => {
+        this.uiSwitchTimer = null
+        // 若期间被中断（切歌/seek/pause）则已 clearUiSwitchTimer，回调不会到达此处
+        applyUiSwitch()
+      }, startDelayMs)
+    } else {
+      applyUiSwitch()
     }
   }
 
@@ -530,6 +633,7 @@ export class TransitionController {
 
   /** 重置单次过渡状态（过渡完成 / 中断共用） */
   private reset(): void {
+    this.clearUiSwitchTimer()
     this.active = false
     this.executed = false
     this.plan = null

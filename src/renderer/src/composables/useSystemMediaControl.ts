@@ -88,10 +88,15 @@ export function useSystemMediaControl(): void {
   // 上次上报的歌曲标识与进度，用于节流判断
   let lastSentSongKey = ''
   let lastSentPositionMs = -1
+  /**
+   * 上次上报的封面：进度上报是 1Hz 的，若每次都把数 MB 的 data URL 克隆过 IPC，
+   * 主进程还要每秒 base64 解码 + 写盘。封面只在真正变化时才携带。
+   */
+  let lastSentCover = ''
 
   /**
    * 构建状态并推送给主进程
-   * @param force 是否强制上报（忽略节流）
+   * @param force 是否强制上报（忽略进度节流）
    */
   const pushStatus = async (force = false): Promise<void> => {
     const song = player.currentSong
@@ -117,10 +122,17 @@ export function useSystemMediaControl(): void {
       title: song?.title,
       artist: song?.artist,
       album: song?.album,
-      cover,
       durationMs: song?.durationMs,
       playing: player.isPlaying,
       positionMs
+    }
+
+    // 仅在封面变化时携带该字段：主进程按「键不存在则沿用旧值」做增量合并，
+    // 因此不能写成 cover: undefined（会被结构化克隆丢弃，但语义上仍是「未变化」）
+    const coverKey = cover ?? ''
+    if (coverKey !== lastSentCover) {
+      status.cover = coverKey
+      lastSentCover = coverKey
     }
 
     window.api.mediaControl.update(status)

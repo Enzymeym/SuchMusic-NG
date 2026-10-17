@@ -12,8 +12,83 @@
  */
 import { promises as fs } from 'fs'
 
-// 元数据块几乎总是位于文件头部，只需读取前 16MB 即可覆盖绝大多数情况
+// 元数据块几乎总是位于文件头部，只需读取前 16MB 即可覆盖绝大多数情况（硬上限）
 const MAX_PROBE_BYTES = 16 * 1024 * 1024
+// 首段探测窗口：绝大多数文件的标签/封面块都在 64KB 内，只有不足以覆盖完整
+// 元数据块时才按 4 倍步进扩容（fillMeta 并发 3，旧实现固定 Buffer.alloc(16MB)
+// 会在瞬时占用 48MB 零填充内存）
+const HEAD_PROBE_BYTES = 64 * 1024
+
+/** 从文件头读取 len 字节（不超过文件大小） */
+async function readRange(
+  fd: Awaited<ReturnType<typeof fs.open>>,
+  len: number
+): Promise<Buffer> {
+  let buf = Buffer.alloc(len)
+  const { bytesRead } = await fd.read(buf, 0, len, 0)
+  buf = bytesRead < len ? buf.subarray(0, bytesRead) : buf
+  return buf
+}
+
+/** 读取 ID3v2 标签长度（syncsafe 整数）；数据不足或非法返回 null */
+function readId3TagSize(buf: Buffer): number | null {
+  if (buf.length < 10) return null
+  if (buf[0] !== 0x49 || buf[1] !== 0x44 || buf[2] !== 0x33) return null
+  const size = (
+    ((buf[6] & 0x7f) << 21) |
+    ((buf[7] & 0x7f) << 14) |
+    ((buf[8] & 0x7f) << 7) |
+    (buf[9] & 0x7f)
+  ) >>> 0
+  return size > 0 ? size : null
+}
+
+/**
+ * 计算 FLAC 元数据块区间的结束位置。
+ * @returns end：已知元数据块结束偏移；complete：是否已在 buf 内走完全部元数据块
+ */
+function flacMetadataRange(
+  buf: Buffer,
+  flacAt: number
+): { end: number; complete: boolean } {
+  let offset = flacAt + 4
+  for (;;) {
+    if (offset + 4 > buf.length) return { end: offset, complete: false }
+    const header = buf[offset]
+    const isLast = (header & 0x80) !== 0
+    const length = (buf[offset + 1] << 16) | (buf[offset + 2] << 8) | buf[offset + 3]
+    offset += 4 + length
+    if (isLast) return { end: offset, complete: true }
+    if (offset >= buf.length) return { end: offset, complete: false }
+  }
+}
+
+/** 当前探测窗口是否还不足以覆盖完整元数据块（需要继续扩容） */
+function needsMoreBytes(buf: Buffer, fileSize: number): boolean {
+  if (buf.length >= fileSize) return false
+
+  const id3Size = readId3TagSize(buf)
+  if (id3Size !== null && buf.length < 10 + id3Size) return true
+
+  const flacAt = buf.indexOf('fLaC')
+  if (flacAt >= 0 && !flacMetadataRange(buf, flacAt).complete) return true
+
+  // MP3 / MPEG：没有 Xing/Info 头时，时长依赖「整个文件在缓冲区内」逐帧统计。
+  // 旧实现总是读到 min(fileSize,16MB)，这里对 ≤16MB 的 MPEG 文件保持同样的完整读取，
+  // 避免时长从精确帧数退化为码率估算（VBR 文件会明显不准）。
+  const audioStart = id3Size !== null ? 10 + id3Size : 0
+  const isMpeg =
+    buf.length > audioStart + 4 && buf[audioStart] === 0xff && (buf[audioStart + 1] & 0xe0) === 0xe0
+  if (isMpeg && fileSize <= MAX_PROBE_BYTES) {
+    const header = parseMpegHeader(buf, audioStart)
+    if (header) {
+      const xing = findXing(buf, audioStart, header)
+      if (!xing || xing.frames <= 0) return true
+    }
+  }
+
+  return false
+}
 
 export interface ManualMeta {
   durationMs?: number
@@ -38,10 +113,14 @@ export async function readMetaManually(filePath: string): Promise<ManualMeta | n
     try {
       const stat = await fd.stat()
       fileSize = stat.size
-      const toRead = Math.min(fileSize, MAX_PROBE_BYTES)
-      buf = Buffer.alloc(toRead)
-      const { bytesRead } = await fd.read(buf, 0, toRead, 0)
-      buf = bytesRead < toRead ? buf.subarray(0, bytesRead) : buf
+      // 两段式读取：先取 64KB，仅在元数据块超出窗口时按 4 倍扩容，
+      // 上限仍是 MAX_PROBE_BYTES（与旧行为一致，只是不再无脑读 16MB）
+      let probe = Math.min(fileSize, HEAD_PROBE_BYTES)
+      buf = await readRange(fd, probe)
+      while (probe < fileSize && probe < MAX_PROBE_BYTES && needsMoreBytes(buf, fileSize)) {
+        probe = Math.min(fileSize, MAX_PROBE_BYTES, probe * 4)
+        buf = await readRange(fd, probe)
+      }
     } finally {
       await fd.close()
     }

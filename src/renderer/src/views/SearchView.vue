@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { NDropdown, useMessage } from 'naive-ui'
+import { NAlert, NDropdown, useMessage } from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import { usePlayerStore } from '../stores/playerStore'
+import type { PlayerSong } from '../stores/playerStore'
 import { useLocalMusicStore } from '../stores/localMusicStore'
+import { useSourcePluginStore } from '../stores/sourcePluginStore'
+import { normalizeSourceKey, resolvePluginUrlDetailed } from '../utils/pluginSource'
 
 const route = useRoute()
 const playerStore = usePlayerStore()
@@ -14,22 +17,37 @@ const message = useMessage()
 const keywords = ref('')
 
 // ===== 平台下拉菜单 =====
-type SearchTab = 'local' | 'netease'
+type SearchTab = 'local' | 'netease' | 'qq'
 const activeTab = ref<SearchTab>('local')
 
 // 平台选项（作为下拉菜单放入标题中）
 const platformOptions = [
   { label: '本地', key: 'local' },
-  { label: '网易云', key: 'netease' }
+  { label: '网易云', key: 'netease' },
+  { label: 'QQ音乐', key: 'qq' }
 ]
 
-const platformLabel = computed(() =>
-  activeTab.value === 'netease' ? '网易云' : '本地'
-)
+const platformLabel = computed(() => {
+  switch (activeTab.value) {
+    case 'netease':
+      return '网易云'
+    case 'qq':
+      return 'QQ音乐'
+    default:
+      return '本地'
+  }
+})
 
-const platformIcon = computed(() =>
-  activeTab.value === 'netease' ? 'mgc_netease_music_line' : 'mgc_computer_line'
-)
+const platformIcon = computed(() => {
+  switch (activeTab.value) {
+    case 'netease':
+      return 'mgc_netease_music_line'
+    case 'qq':
+      return 'mgc_qq_fill'
+    default:
+      return 'mgc_computer_line'
+  }
+})
 
 const onPlatformSelect = (key: string | number) => {
   activeTab.value = String(key) as SearchTab
@@ -71,7 +89,8 @@ const handleSongClick = async (song: any) => {
     durationMs: song.dt || 0,
     album: song.al?.name,
     filePath: song.filePath,
-    lyrics: song.lyrics,
+    // 歌词不再常驻响应式 songs，按需取（未命中由 PlayerBar 兜底异步拉取）
+    lyrics: localMusicStore.getLyrics(song) || undefined,
     source: 'local',
     sourceSongId: song.id
   }
@@ -197,11 +216,153 @@ const handleNeteaseSongClick = async (song: any) => {
   }
 }
 
+// ===== QQ 音乐搜索（vkeys API 搜索 + 音源插件解析播放） =====
+const qqSongs = ref<any[]>([])
+const qqLoading = ref(false)
+const qqLoadMore = ref(false)
+const qqHasMore = ref(false)
+const qqSearched = ref(false)
+
+// 已加载插件里是否存在可解析 QQ 音源（tx / qq / tencent）的插件
+const sourcePluginStore = useSourcePluginStore()
+const hasQQSourcePlugin = computed(() =>
+  sourcePluginStore.plugins.some(
+    (plugin) =>
+      plugin.enabled &&
+      plugin.state === 'running' &&
+      (plugin.capabilities?.sources ?? []).some((source) => {
+        if (normalizeSourceKey(source.key) !== 'tx') return false
+        // actions 为空视为「按插件类型默认支持播放地址」
+        return source.actions.length === 0 || source.actions.includes('musicUrl')
+      })
+  )
+)
+
+/** 主进程 SourceTrack → SongList 兼容结构 */
+const mapQQItem = (t: any) => ({
+  id: `tx-${t.id}`,
+  name: t.title,
+  ar: [{ name: t.artist || '未知歌手' }],
+  al: { name: t.album || '未知专辑', picUrl: t.coverUrl || '' },
+  dt: t.durationMs || 0,
+  picUrl: t.coverUrl || '',
+  source: 'tx',
+  sourceSongId: t.id,
+  sourceKey: 'tx',
+  pluginId: t.pluginId || '',
+  trackRef: t.ref
+})
+
+// 执行 QQ 音乐搜索
+const doSearchQQ = async (offset: number, reset: boolean) => {
+  const kw = keywords.value.trim()
+  if (!kw) return
+  const seq = ++requestSeq
+  qqLoading.value = true
+  if (reset) {
+    qqSongs.value = []
+    qqLoadMore.value = false
+  } else {
+    qqLoadMore.value = true
+  }
+  try {
+    const res = await window.api.sources.qqSearch(kw, PAGE_SIZE, offset)
+    if (seq !== requestSeq) return // 过期结果，丢弃
+    if (!res?.success) throw new Error(res?.error || '搜索失败')
+    const items = (res.items || []).map(mapQQItem)
+    qqSongs.value = reset ? items : [...qqSongs.value, ...items]
+    qqHasMore.value = !!res.hasMore
+    qqSearched.value = true
+  } catch (e: any) {
+    console.error('[SearchView] QQ 音乐搜索失败:', e)
+    if (seq === requestSeq) {
+      message.error(e?.message || '搜索失败，请稍后重试')
+    }
+  } finally {
+    if (seq === requestSeq) {
+      qqLoading.value = false
+      qqLoadMore.value = false
+    }
+  }
+}
+
+const searchQQFromStart = () => {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    doSearchQQ(0, true)
+  }, 300)
+}
+
+const handleQQScroll = (e: Event) => {
+  const target = e.target as HTMLElement
+  if (!target || typeof target.scrollTop !== 'number') return
+  const nearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 150
+  if (nearBottom && qqHasMore.value && !qqLoading.value && !qqLoadMore.value) {
+    doSearchQQ(qqSongs.value.length, false)
+  }
+}
+
+// 解析 QQ 曲目为可播放对象：播放地址来自音源插件（未加载插件时返回 null）
+const buildQQPlayerBase = (song: any): PlayerSong => ({
+  id: song.id,
+  title: song.name,
+  artist: getSongArtist(song),
+  cover: song.picUrl || song.al?.picUrl || '',
+  durationMs: song.dt || 0,
+  album: typeof song.al?.name === 'string' ? song.al.name : undefined,
+  source: 'tx',
+  sourceKey: 'tx',
+  sourceSongId: song.sourceSongId,
+  trackRef: song.trackRef
+})
+
+/** 解析结果：成功返回曲目，失败保留主进程给出的真实原因 */
+const resolveQQSongDetail = async (
+  song: any
+): Promise<{ song: PlayerSong | null; error?: string; code?: string }> => {
+  const base = buildQQPlayerBase(song)
+  const detail = await resolvePluginUrlDetailed(base)
+  if (!detail.url) return { song: null, error: detail.error, code: detail.code }
+  return {
+    song: { ...base, filePath: detail.url, requestHeaders: detail.requestHeaders }
+  }
+}
+
+const resolveQQSong = async (song: any): Promise<PlayerSong | null> => {
+  const { song: resolved } = await resolveQQSongDetail(song)
+  return resolved
+}
+
+// 处理 QQ 音乐歌曲点击播放
+const handleQQSongClick = async (song: any) => {
+  const loadingMsg = message.loading('正在获取播放地址…', { duration: 0 })
+  try {
+    const detail = await resolveQQSongDetail(song)
+    loadingMsg.destroy()
+    if (!detail.song) {
+      // 不再把所有失败都说成「未找到音源插件」：
+      // 主进程会区分「没有插件 / 插件停用 / 插件加载失败 / 插件解析失败」并给出原因
+      const hint = detail.code === 'NO_PLUGIN' ? '（请在「设置 → 音源插件」中导入并启用）' : ''
+      message.error(`${detail.error || '音源插件未能解析出播放地址'}${hint}`, { duration: 8000 })
+      return
+    }
+    playerStore.setCurrentSong(detail.song)
+    playerStore.recordPlay(detail.song)
+  } catch (e) {
+    loadingMsg.destroy()
+    console.error('[SearchView] 获取 QQ 音乐播放地址失败:', e)
+    message.error('获取播放地址失败，请稍后重试')
+  }
+}
+
 // ===== 路由关键词同步 =====
 onMounted(() => {
   if (route.query.q) {
     keywords.value = String(route.query.q)
   }
+  // 同步音源插件列表，用于「QQ 音乐」标签页的前置可用性提示
+  sourcePluginStore.initListeners()
+  void sourcePluginStore.refresh()
 })
 
 watch(() => route.query, (newQuery) => {
@@ -212,30 +373,38 @@ watch(() => route.query, (newQuery) => {
 
 // ===== 标签/关键词变化 =====
 watch(keywords, () => {
-  if (activeTab.value !== 'netease') return
+  if (activeTab.value === 'local') return
   if (!keywords.value.trim()) {
     // 清空关键词：回到热搜状态
-    neteaseSongs.value = []
-    neteaseSearched.value = false
-    neteaseHasMore.value = false
-    neteaseTotal.value = 0
+    if (activeTab.value === 'netease') {
+      neteaseSongs.value = []
+      neteaseSearched.value = false
+      neteaseHasMore.value = false
+      neteaseTotal.value = 0
+    } else {
+      qqSongs.value = []
+      qqSearched.value = false
+      qqHasMore.value = false
+    }
     loadHotSearch()
     return
   }
-  searchNeteaseFromStart()
+  if (activeTab.value === 'netease') searchNeteaseFromStart()
+  else searchQQFromStart()
 })
 
 watch(activeTab, (tab) => {
-  if (tab === 'netease') {
-    if (!keywords.value.trim()) {
-      loadHotSearch()
-    } else {
-      searchNeteaseFromStart()
-    }
+  if (tab === 'local') return
+  if (!keywords.value.trim()) {
+    loadHotSearch()
+  } else if (tab === 'netease') {
+    searchNeteaseFromStart()
+  } else {
+    searchQQFromStart()
   }
 })
 
-// 简化后的搜索结果数量文案（本地/网易云统一为「共 X 首」）
+// 简化后的搜索结果数量文案（本地/网易云统一为「共 X 首」，QQ 无总数接口故显示已加载数量）
 const resultCountText = computed(() => {
   if (activeTab.value === 'local') {
     if (!keywords.value.trim() || searchResults.value.length === 0) return ''
@@ -243,6 +412,9 @@ const resultCountText = computed(() => {
   }
   if (activeTab.value === 'netease' && neteaseSearched.value) {
     return `共 ${neteaseTotal.value} 首`
+  }
+  if (activeTab.value === 'qq' && qqSearched.value) {
+    return `已加载 ${qqSongs.value.length} 首`
   }
   return ''
 })
@@ -294,7 +466,7 @@ const resultCountText = computed(() => {
       </template>
 
       <!-- 网易云搜索 -->
-      <template v-else>
+      <template v-else-if="activeTab === 'netease'">
         <!-- 热搜推荐 -->
         <div v-if="!keywords" class="netease-hot">
           <p class="hot-title">热搜推荐</p>
@@ -332,6 +504,55 @@ const resultCountText = computed(() => {
           <p>请输入关键词搜索网易云音乐</p>
         </div>
       </template>
+
+      <!-- QQ 音乐搜索（vkeys API 搜索，播放地址由音源插件提供） -->
+      <template v-else>
+        <!-- 插件缺失前置提示：避免点了歌才发现「未找到音源插件」 -->
+        <n-alert
+          v-if="!hasQQSourcePlugin && (qqSongs.length > 0 || keywords)"
+          class="plugin-missing-alert"
+          type="warning"
+          :bordered="false"
+        >
+          未检测到可解析 QQ 音乐的音源插件，点击播放会失败。请到「设置 → 音源插件」导入并启用洛雪 / 澜音音源。
+        </n-alert>
+        <!-- 热搜推荐 -->
+        <div v-if="!keywords" class="netease-hot">
+          <p class="hot-title">热搜推荐</p>
+          <div class="hot-list">
+            <span
+              v-for="(item, i) in hotSearches"
+              :key="item.searchWord"
+              class="hot-item"
+              @click="onHotSearchClick(item.searchWord)"
+            >{{ i + 1 }}. {{ item.searchWord }}</span>
+          </div>
+          <p class="hint">搜索 QQ 音乐曲库，播放地址由已加载的洛雪 / 澜音音源插件提供</p>
+        </div>
+
+        <!-- 搜索结果 -->
+        <SongList
+          v-else-if="qqSongs.length > 0"
+          :songs="qqSongs"
+          :loading="qqLoading"
+          :load-more="qqLoadMore"
+          :get-playable-song="resolveQQSong"
+          @song-click="handleQQSongClick"
+          @scroll="handleQQScroll"
+        />
+
+        <div v-else-if="qqLoading" class="empty-state">
+          <p>正在搜索「{{ keywords }}」…</p>
+        </div>
+
+        <div v-else-if="qqSearched" class="empty-state">
+          <p>未找到与"{{ keywords }}"相关的 QQ 音乐歌曲</p>
+        </div>
+
+        <div v-else class="empty-state">
+          <p>请输入关键词搜索 QQ 音乐</p>
+        </div>
+      </template>
     </div>
   </div>
 </template>
@@ -350,6 +571,12 @@ const resultCountText = computed(() => {
   flex-direction: column;
   gap: 12px;
   margin-bottom: 16px;
+}
+
+/* 音源插件缺失提示：常驻在结果列表上方，不参与滚动 */
+.plugin-missing-alert {
+  flex: 0 0 auto;
+  margin-bottom: 12px;
 }
 
 .header-top {

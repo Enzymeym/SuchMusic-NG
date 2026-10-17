@@ -9,6 +9,10 @@ import {
   computeRms,
   detectOnset,
   estimateBpm,
+  estimateBeatGrid,
+  snapMsToGrid,
+  buildEqualPowerCurves,
+  buildLinearCurves,
   analyzeKey,
   analyzeKeyAsync,
   camelotDistance,
@@ -24,9 +28,10 @@ import {
   pitchShiftPcmAsync,
   SILENCE_THRESHOLD,
   MIN_TRANSITION_MS,
-  MAX_TRANSITION_MS
+  MAX_TRANSITION_MS,
+  GRID_MIN_CONFIDENCE
 } from '../transition-dsp'
-import type { MusicKey } from '../transition-dsp'
+import type { BeatGrid, MusicKey } from '../transition-dsp'
 
 const SR = 44100
 
@@ -429,5 +434,153 @@ describe('相位声码器变调（变调不变速）', () => {
     const input = makeTone(1, 440, 0.8)
     const asyncOut = await pitchShiftPcmAsync(input, 12)
     expect(Math.abs(asyncOut.length - input.length)).toBeLessThanOrEqual(2)
+  })
+})
+
+describe('拍网格估计（estimateBeatGrid）', () => {
+  it('120 BPM 脉冲音：BPM 与相位正确、置信度高', () => {
+    const grid = estimateBeatGrid(makeClickTrack(120, 30), SR, 0, 30, 120)
+    expect(Math.abs(grid.bpm - 120)).toBeLessThanOrEqual(2)
+    expect(grid.confidence).toBeGreaterThan(GRID_MIN_CONFIDENCE)
+    // 相位：脉冲位于每拍起点（窗口对齐），相位应接近 0 或一整个周期
+    const period = grid.beatPeriodSec
+    const distToBeat = Math.min(grid.phaseSec, period - grid.phaseSec)
+    expect(distToBeat).toBeLessThan(0.06)
+  })
+
+  it('无提示 BPM 时也能建立网格（全区间枚举）', () => {
+    const grid = estimateBeatGrid(makeClickTrack(120, 30), SR, 0, 30, 0)
+    expect(Math.abs(grid.bpm - 120)).toBeLessThanOrEqual(2)
+    expect(grid.confidence).toBeGreaterThan(GRID_MIN_CONFIDENCE)
+  })
+
+  it('纯音（无起音）返回不可用网格', () => {
+    const grid = estimateBeatGrid(makeTone(30, 440, 0.8), SR, 0, 30, 0)
+    expect(grid.bpm).toBe(0)
+    expect(grid.confidence).toBe(0)
+  })
+
+  it('数据不足返回不可用网格', () => {
+    const grid = estimateBeatGrid(makeClickTrack(120, 1), SR, 0, 1, 120)
+    expect(grid.bpm).toBe(0)
+    expect(grid.confidence).toBe(0)
+  })
+})
+
+describe('拍网格吸附（snapMsToGrid）', () => {
+  const grid120: BeatGrid = { bpm: 120, beatPeriodSec: 0.5, phaseSec: 0, confidence: 1 }
+
+  it('优先小节 / 乐句层级（容差内取更大层级）', () => {
+    // 期望 1500ms：最近小节头 2000ms（距 500ms ≤ 容差 2 拍 = 1000ms）
+    expect(snapMsToGrid(1500, grid120, 0, 10000)).toBe(2000)
+    // 期望 3400ms：8 拍候选 4000ms（距 600ms ≤ 容差），优先于 1 拍候选 3500
+    expect(snapMsToGrid(3400, grid120, 0, 10000)).toBe(4000)
+  })
+
+  it('窗口内无小节头时下沉到单拍', () => {
+    // 窗口 [3250, 3550]：唯一拍点 3500 在窗内，小节头 2000/4000 均出窗
+    expect(snapMsToGrid(3400, grid120, 3250, 3550)).toBe(3500)
+  })
+
+  it('窗口内无任何网格点返回 null', () => {
+    expect(snapMsToGrid(3230, grid120, 3201, 3249)).toBeNull()
+  })
+
+  it('相位偏移生效：拍点位于 phase + n×period', () => {
+    const gridPhase: BeatGrid = { bpm: 120, beatPeriodSec: 0.5, phaseSec: 0.2, confidence: 1 }
+    // 拍点 = 200 + 500n → 2200 本身即网格点
+    expect(snapMsToGrid(2200, gridPhase, 0, 10000)).toBe(2200)
+  })
+
+  it('窗口非法 / 置信度不足返回 null', () => {
+    expect(snapMsToGrid(1000, grid120, 5000, 0)).toBeNull()
+    expect(snapMsToGrid(1000, { ...grid120, confidence: 0.1 }, 0, 5000)).toBeNull()
+  })
+})
+
+describe('过渡点拍网格吸附（computeTransitionPlan）', () => {
+  const tailGridded = {
+    peakRms: 0.8,
+    decayStartSec: 230.3,
+    decayRate: 0.1,
+    grid: { bpm: 120, beatPeriodSec: 0.5, phaseSec: 0, confidence: 0.9 }
+  }
+  const base = {
+    durationMs: 240000,
+    currentBpm: 120,
+    nextBpm: 120,
+    currentKey: null,
+    nextKey: null,
+    contentStartSec: 0,
+    userTransitionMs: 5000
+  }
+
+  it('网格有效时触发点吸附到网格（barAligned=true），且仍落在合法窗口内', () => {
+    // latest = 240000-5000-1200 = 233800，earliest = 228800；衰减起点 230300 → 吸附到 230000
+    const plan = computeTransitionPlan({ ...base, tail: tailGridded })
+    expect(plan.barAligned).toBe(true)
+    expect(plan.gridConfidence).toBeCloseTo(0.9, 5)
+    expect(plan.triggerMs).toBe(230000)
+    expect(plan.triggerMs).toBeGreaterThanOrEqual(228800)
+    expect(plan.triggerMs).toBeLessThanOrEqual(233800)
+  })
+
+  it('关闭节奏对齐时回退到衰减起点（旧行为）', () => {
+    const plan = computeTransitionPlan({ ...base, tail: tailGridded, beatAlignEnabled: false })
+    expect(plan.barAligned).toBe(false)
+    expect(plan.gridConfidence).toBe(0)
+    expect(plan.triggerMs).toBe(230300)
+  })
+
+  it('网格置信度不足时不吸附', () => {
+    const lowGrid = {
+      ...tailGridded,
+      grid: { bpm: 120, beatPeriodSec: 0.5, phaseSec: 0, confidence: 0.1 }
+    }
+    const plan = computeTransitionPlan({ ...base, tail: lowGrid })
+    expect(plan.barAligned).toBe(false)
+    expect(plan.triggerMs).toBe(230300)
+  })
+
+  it('nextDownbeatSec 透传，并作为落点参与变速时间轴映射', () => {
+    const plan = computeTransitionPlan({
+      ...base,
+      tail: { peakRms: 0.8, decayStartSec: -1, decayRate: 0 },
+      contentStartSec: 5,
+      nextDownbeatSec: 4.5,
+      userTransitionMs: 3000
+    })
+    expect(plan.nextDownbeatSec).toBe(4.5)
+    expect(plan.startOffsetMs).toBe(Math.round(4500 * plan.stretchRatio))
+  })
+})
+
+describe('交叉淡化曲线', () => {
+  it('等功率曲线满足 fadeOut² + fadeIn² ≈ 1（合成电平恒定）', () => {
+    const { fadeOut, fadeIn } = buildEqualPowerCurves(64)
+    expect(fadeOut.length).toBe(64)
+    expect(fadeIn.length).toBe(64)
+    expect(fadeOut[0]).toBeCloseTo(1, 6)
+    expect(fadeIn[0]).toBeCloseTo(0, 6)
+    expect(fadeOut[63]).toBeCloseTo(0, 6)
+    expect(fadeIn[63]).toBeCloseTo(1, 6)
+    for (let i = 0; i < 64; i++) {
+      expect(fadeOut[i] * fadeOut[i] + fadeIn[i] * fadeIn[i]).toBeCloseTo(1, 5)
+    }
+  })
+
+  it('线性曲线：端点 1→0 / 0→1，中点为 0.5', () => {
+    const { fadeOut, fadeIn } = buildLinearCurves(65)
+    expect(fadeOut[0]).toBeCloseTo(1, 6)
+    expect(fadeIn[0]).toBeCloseTo(0, 6)
+    expect(fadeOut[64]).toBeCloseTo(0, 6)
+    expect(fadeIn[64]).toBeCloseTo(1, 6)
+    expect(fadeOut[32]).toBeCloseTo(0.5, 6)
+    expect(fadeIn[32]).toBeCloseTo(0.5, 6)
+  })
+
+  it('曲线长度下限保护（n<2 时按 2 处理）', () => {
+    expect(buildEqualPowerCurves(1).fadeOut.length).toBe(2)
+    expect(buildLinearCurves(0).fadeIn.length).toBe(2)
   })
 })

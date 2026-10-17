@@ -178,6 +178,66 @@ declare global {
         onPlaylistOp: (callback: (request: any) => void) => () => void
         respondPlaylistOp: (response: { requestId: string; success: boolean; error?: string; result?: any }) => Promise<void>
       }
+      sources: {
+        list: () => Promise<{ success: boolean; plugins?: any[] }>
+        selectFile: () => Promise<{ success: boolean; filePath?: string; canceled?: boolean }>
+        inspect: (filePath: string) => Promise<{
+          success: boolean
+          kind?: 'lx' | 'ceru'
+          name?: string
+          version?: string
+          error?: string
+        }>
+        load: (filePath: string) => Promise<{ success: boolean; info?: any; error?: string }>
+        remove: (pluginId: string) => Promise<{ success: boolean; error?: string }>
+        setEnabled: (pluginId: string, enabled: boolean) => Promise<{
+          success: boolean
+          info?: any
+          error?: string
+        }>
+        setPreferences: (
+          pluginId: string,
+          patch: { sources?: string[] | null; quality?: string | null }
+        ) => Promise<{ success: boolean; settings?: any; info?: any; error?: string }>
+        search: (req: any) => Promise<{ success: boolean; items?: any[]; nextCursor?: string; error?: string }>
+        resolveUrl: (req: any) => Promise<{
+          success: boolean
+          result?: any
+          error?: string
+          /** NO_PLUGIN / PLUGIN_DISABLED / PLUGIN_ERROR / UNSUPPORTED_ACTION / RESOLVE_FAILED */
+          code?: string
+        }>
+        lyric: (req: any) => Promise<{ success: boolean; result?: any; error?: string }>
+        pic: (req: any) => Promise<{ success: boolean; result?: any; error?: string }>
+        playlistCategories: (
+          pluginId: string
+        ) => Promise<{ success: boolean; items?: any[]; error?: string }>
+        playlistSearch: (req: any) => Promise<{
+          success: boolean
+          items?: any[]
+          nextCursor?: string
+          error?: string
+        }>
+        playlistList: (req: any) => Promise<{
+          success: boolean
+          items?: any[]
+          nextCursor?: string
+          error?: string
+        }>
+        playlistGet: (req: any) => Promise<{
+          success: boolean
+          items?: any[]
+          nextCursor?: string
+          meta?: any
+          error?: string
+        }>
+        qqSearch: (
+          query: string,
+          limit?: number,
+          offset?: number
+        ) => Promise<{ success: boolean; items?: any[]; total?: number; hasMore?: boolean; error?: string }>
+        onNotice: (callback: (data: any) => void) => () => void
+      }
     }
   }
 }

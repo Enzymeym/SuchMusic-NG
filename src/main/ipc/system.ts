@@ -7,7 +7,11 @@ import { getActiveNeteaseCookie } from '../services/neteaseService'
 
 export function registerSystemHandlers(): void {
   // 获取主进程内存统计报告（用于验证内存优化效果）
-  ipcMain.handle('memory:get-report', () => mainMemoryMonitor.getReport())
+  // 生产环境不再常驻周期采样，改为按需采集一次，保证返回值反映「刚刚」的状态
+  ipcMain.handle('memory:get-report', () => {
+    mainMemoryMonitor.getSnapshot()
+    return mainMemoryMonitor.getReport()
+  })
 
   // 检查文件是否存在
   ipcMain.handle('system:fs-exists', async (_event, filePath: string) => {
@@ -126,7 +130,7 @@ export function registerSystemHandlers(): void {
   })
 
   // 下载音乐文件
-  ipcMain.handle('system:download-music', async (_event, { url, filename, dir }: { url: string, filename: string, dir: string }) => {
+  ipcMain.handle('system:download-music', async (_event, { url, filename, dir, headers: extraHeaders }: { url: string, filename: string, dir: string, headers?: Record<string, string> }) => {
     const targetDir = dir || app.getPath('music')
     // 目标目录可能不存在（自定义目录被删除 / 新装系统默认音乐目录未创建），先确保存在
     await fs.mkdir(targetDir, { recursive: true })
@@ -141,18 +145,27 @@ export function registerSystemHandlers(): void {
     )
 
     try {
+      // 插件音源（洛雪 / 澜音）会带回自签名 CDN 所需的请求头（Referer / Cookie 等），
+      // 此时优先使用插件提供的头，避免被网易云的登录态覆盖；否则回退到网易云默认头。
+      const headers: Record<string, string> = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+      }
+      if (extraHeaders && Object.keys(extraHeaders).length > 0) {
+        Object.assign(headers, extraHeaders)
+      } else {
+        const cookie = getActiveNeteaseCookie()
+        if (cookie) headers.Cookie = cookie
+        headers.Referer = 'https://music.163.com'
+      }
+
       const response = await axios({
         url,
         method: 'GET',
         responseType: 'stream',
         maxRedirects: 5,
         // 附加登录态，保证登录后获取的高音质 CDN 地址可正常下载
-        headers: {
-          Cookie: getActiveNeteaseCookie() || undefined,
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-          Referer: 'https://music.163.com'
-        }
+        headers
       })
 
       const writer = createWriteStream(tempPath)

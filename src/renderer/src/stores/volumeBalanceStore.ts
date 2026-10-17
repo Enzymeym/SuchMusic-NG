@@ -118,7 +118,9 @@ export const useVolumeBalanceStore = defineStore('volumeBalance', () => {
     let done = 0
     let failed = 0
 
-    const concurrency = 2
+    // 主进程侧已改为流式解码（内存恒定），但流式不可用时会回退整曲解码，
+    // 因此这里保持串行，避免极端情况下多首整曲 PCM 同时驻留主进程
+    const concurrency = 1
     for (let i = 0; i < targets.length && !cancelRequested.value; i += concurrency) {
       const batch = targets.slice(i, i + concurrency)
       await Promise.all(

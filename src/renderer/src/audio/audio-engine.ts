@@ -8,6 +8,7 @@
  */
 
 import { webAudioOutputEngine } from './web-audio-engine'
+import type { CrossfadeOptions } from './web-audio-engine'
 import type {
   EqBandSettings,
   CompressorParams,
@@ -692,10 +693,22 @@ class AudioEngine {
    * 前置条件：正在播放且已通过 loadNextFromArrayBuffer 预解码
    * @param durationMs 交叉淡化时长（毫秒）
    * @param nextStartOffsetMs 下一曲起始偏移（毫秒，跳过前奏），默认 0
+   * @param startDelayMs 延迟启动（毫秒）：把过渡排程到未来精确音频时刻，默认 0（立即）
+   * @param options 曲线类型与低频避让开关
    */
-  public beginCrossfade(durationMs: number, nextStartOffsetMs: number = 0): boolean {
+  public beginCrossfade(
+    durationMs: number,
+    nextStartOffsetMs: number = 0,
+    startDelayMs: number = 0,
+    options: CrossfadeOptions = {}
+  ): boolean {
     if (isWebAudioMode()) {
-      return webAudioOutputEngine.beginCrossfade(durationMs, nextStartOffsetMs)
+      return webAudioOutputEngine.beginCrossfade(
+        durationMs,
+        nextStartOffsetMs,
+        startDelayMs,
+        options
+      )
     }
     return false
   }

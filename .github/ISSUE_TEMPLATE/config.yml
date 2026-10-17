@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📦 下载最新版本与更新日志
+    url: https://github.com/Enzymeym/SuchMusic-NG/releases
+    about: 安装包、更新日志与历史版本都在这里，提问前建议先看是否有新版本已修复。
+  - name: 📖 使用说明与常见问题
+    url: https://github.com/Enzymeym/SuchMusic-NG#readme
+    about: 安装、更新与基本使用方式，提问前建议先看一眼。

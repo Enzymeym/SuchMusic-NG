@@ -31,6 +31,9 @@ app.use(pinia).use(router).mount('#app')
 // 启动渲染进程内存监控（用于验证内存优化效果）
 rendererMemoryMonitor.start()
 if (import.meta.env.DEV) {
+  // 内存基线采集工具（仅开发环境）。控制台用 __memProbe.mk('label') 打点、dump() 导出
+  void import('./utils/memProbe').then((m) => m.installMemProbe())
+
   // 统计当前 DOM 元素数量（辅助判断 DOM/图片位图占用）
   const countDomNodes = (): number => {
     let count = 0

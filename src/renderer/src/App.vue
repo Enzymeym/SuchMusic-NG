@@ -117,7 +117,8 @@ watch(
       // 开始播放，启动定时保存
       if (saveInterval) clearInterval(saveInterval)
       saveInterval = setInterval(() => {
-        playerStore.savePlayerState()
+        // 只写进度（几字节），不再每 5s 序列化整条播放队列
+        playerStore.savePosition()
       }, 5000)
     } else {
       // 停止播放，清除定时器并立即保存一次

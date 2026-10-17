@@ -15,6 +15,22 @@
  */
 
 import { WebAudioDspChain } from './web-audio-dsp'
+import { buildEqualPowerCurves, buildLinearCurves, type FadeCurves } from './transition-dsp'
+
+/** 低频避让（bass swap）高通频率下限（Hz）：约等于全通 */
+const BASS_SWAP_HP_MIN = 20
+/** 低频避让（bass swap）高通频率上限（Hz）：淡出期把低频基本移除，避免两轨低频叠加 */
+const BASS_SWAP_HP_MAX = 250
+/** 交叉淡化曲线分段数：用折线逼近等功率曲线（等功率为曲线，需多点拟合） */
+const FADE_CURVE_SEGMENTS = 64
+
+/** 交叉淡化选项 */
+export interface CrossfadeOptions {
+  /** 淡变曲线类型（默认等功率） */
+  curve?: 'equalPower' | 'linear'
+  /** 是否启用低频避让 bass swap（默认启用） */
+  bassSwap?: boolean
+}
 
 export class WebAudioOutputEngine {
   private audioContext: AudioContext | null = null
@@ -30,6 +46,14 @@ export class WebAudioOutputEngine {
   private gainA: GainNode | null = null
   /** 下一曲子增益（交叉淡化用），初始 1 */
   private gainB: GainNode | null = null
+  /** 当前曲低频避让高通滤波（bass swap），默认 20Hz 全通 */
+  private filterA: BiquadFilterNode | null = null
+  /** 下一曲低频避让高通滤波（bass swap） */
+  private filterB: BiquadFilterNode | null = null
+  /** 交叉淡化实际起播时刻（context.currentTime 基准）；用于延迟排程期间的位置换算 */
+  private crossfadeStartAt = 0
+  /** 交叉淡化下一曲起始偏移（秒） */
+  private crossfadeOffsetSec = 0
 
   private audioBuffer: AudioBuffer | null = null
   /** 下一曲解码缓冲（Automix 预加载，不打断当前播放） */
@@ -356,6 +380,10 @@ export class WebAudioOutputEngine {
     this.masterGain = null
     this.gainA = null
     this.gainB = null
+    this.filterA = null
+    this.filterB = null
+    this.crossfadeStartAt = 0
+    this.crossfadeOffsetSec = 0
     this.audioBuffer = null
     this.nextBuffer = null
     this.onCrossfadeCompleteRef = null
@@ -426,19 +454,26 @@ export class WebAudioOutputEngine {
 
     const ctx = this.audioContext
 
-    // 确保子增益节点存在（懒创建；AudioNode.connect 对同一输出/输入对是幂等的）
+    // 确保子增益 + 低频避让滤波存在（懒创建；AudioNode.connect 对同一输出/输入对是幂等的）
     if (!this.gainA) {
       this.gainA = ctx.createGain()
       this.gainA.gain.value = 1.0
       this.gainA.connect(this.masterGain)
     }
+    if (!this.filterA) {
+      this.filterA = ctx.createBiquadFilter()
+      this.filterA.type = 'highpass'
+      this.filterA.frequency.value = BASS_SWAP_HP_MIN
+      this.filterA.Q.value = 0.707
+      this.filterA.connect(this.gainA)
+    }
 
     this.sourceA = ctx.createBufferSource()
     this.sourceA.buffer = this.audioBuffer
 
-    // 连接链路：sourceA -> gainA -> masterGain -> [可选 DSP 链] -> [可选 AnalyserNode] -> destination
+    // 连接链路：sourceA -> filterA(bass swap) -> gainA -> masterGain -> [可选 DSP 链] -> [可选 AnalyserNode] -> destination
     // 用户音量（masterGain）放在 DSP 链之前，让限制器/软限幅器捕获 boost 后的峰值
-    this.sourceA.connect(this.gainA)
+    this.sourceA.connect(this.filterA)
 
     // 单一路径路由：先断开 masterGain 的全部旧输出（可能残留 init 遗留的 destination 直连），
     // 避免干/湿双路并联导致的「重音」及「EQ 被干声掩盖听不出效果」
@@ -460,13 +495,21 @@ export class WebAudioOutputEngine {
     }
 
     const now = ctx.currentTime
-    // 复位子增益
+    // 复位子增益与低频避让滤波（清掉可能残留的自动化）
     try {
       this.gainA.gain.cancelScheduledValues(now)
     } catch {
       /* 忽略 */
     }
     this.gainA.gain.value = 1.0
+    if (this.filterA) {
+      try {
+        this.filterA.frequency.cancelScheduledValues(now)
+      } catch {
+        /* 忽略 */
+      }
+      this.filterA.frequency.value = BASS_SWAP_HP_MIN
+    }
 
     const offset = this._pausedOffset > 0 ? this._pausedOffset : offsetSeconds
     this._pausedOffset = 0
@@ -487,12 +530,13 @@ export class WebAudioOutputEngine {
       return
     }
 
+    // 先捕获播放位置再打断过渡：交叉淡化期间需按下一曲时间轴计算位置。
+    // getPositionSeconds 依赖 _isPlaying=true 才会计算，若先置 false 将永远读到 _pausedOffset
+    const pos = this.getPositionSeconds()
+
     // 若处于交叉淡化中，打断并清理（复位增益、停止 sourceB、触发 onended 供上层感知）
     this.interruptCrossfade()
 
-    // 先捕获播放位置再翻转状态标志（getPositionSeconds 依赖 _isPlaying=true 才会计算，
-    // 若先置 false 将永远读到 _pausedOffset，导致暂停后位置丢失）
-    const pos = this.audioContext.currentTime - this._startTime
     this._pausedOffset = Math.max(0, pos)
     this._isPaused = true
     this._isPlaying = false
@@ -560,13 +604,25 @@ export class WebAudioOutputEngine {
   /**
    * 开始交叉淡化过渡到下一曲
    * 前置条件：正在播放（sourceA 活跃）且 nextBuffer 存在，否则返回 false
-   * 使用 AudioParam 精确时间调度（setValueAtTime + linearRampToValueAtTime），非 JS 定时器步进
+   *
+   * 使用 AudioParam 精确时间调度（非 JS 定时器步进）：
+   * - 淡变曲线为等功率（cos/sin）或线性，用折线（多点 linearRamp）逼近；
+   * - 支持 startDelayMs 把过渡排程到未来某个精确音频时刻，消除「轮询粒度」带来的
+   *   触发抖动（调用方在临近触发点时一次性排程，之后不再依赖轮询精度）；
+   * - 可选低频避让（bass swap）：淡出曲低频先撤、淡入曲低频后进，避免两轨低频叠加。
    *
    * @param durationMs 交叉淡化时长（毫秒）
    * @param nextStartOffsetMs 下一曲起始偏移（毫秒），用于跳过前奏；默认 0（从头播放）
+   * @param startDelayMs 延迟启动（毫秒）：0 = 立即；>0 = 排程到 ctx.currentTime + delay 起播
+   * @param options 曲线类型与低频避让开关
    * @returns 是否成功启动
    */
-  beginCrossfade(durationMs: number, nextStartOffsetMs: number = 0): boolean {
+  beginCrossfade(
+    durationMs: number,
+    nextStartOffsetMs: number = 0,
+    startDelayMs: number = 0,
+    options: CrossfadeOptions = {}
+  ): boolean {
     if (!this.audioContext || !this.masterGain) return false
     if (!this._isPlaying || !this.sourceA) return false
     if (!this.nextBuffer) return false
@@ -575,6 +631,9 @@ export class WebAudioOutputEngine {
     const ctx = this.audioContext
     const now = ctx.currentTime
     const dur = Math.max(0, durationMs / 1000)
+    const delay = Math.max(0, startDelayMs / 1000)
+    const startAt = now + delay
+    const endAt = startAt + dur
 
     // 下一曲起始偏移（跳过前奏），钳制在缓冲时长内
     const offsetSec = Math.max(
@@ -582,33 +641,56 @@ export class WebAudioOutputEngine {
       Math.min(nextStartOffsetMs / 1000, Math.max(0, this.nextBuffer.duration - 0.01))
     )
 
-    // 确保 gainB 子增益节点存在（懒创建，初始 1，淡入前先置 0）
+    const curveType = options.curve ?? 'equalPower'
+    const bassSwap = options.bassSwap ?? true
+    const curves: FadeCurves =
+      curveType === 'linear'
+        ? buildLinearCurves(FADE_CURVE_SEGMENTS)
+        : buildEqualPowerCurves(FADE_CURVE_SEGMENTS)
+
+    // 确保 gainB / filterB 节点存在（懒创建；AudioNode.connect 对同一输出/输入对是幂等的）
     if (!this.gainB) {
       this.gainB = ctx.createGain()
       this.gainB.gain.value = 1.0
       this.gainB.connect(this.masterGain)
     }
+    if (!this.filterB) {
+      this.filterB = ctx.createBiquadFilter()
+      this.filterB.type = 'highpass'
+      this.filterB.frequency.value = BASS_SWAP_HP_MIN
+      this.filterB.Q.value = 0.707
+      this.filterB.connect(this.gainB)
+    }
 
-    // 创建并接线 sourceB（下一曲）
+    // 创建并接线 sourceB（下一曲）：sourceB -> filterB(bass swap) -> gainB -> masterGain
     const srcB = ctx.createBufferSource()
     srcB.buffer = this.nextBuffer
-    srcB.connect(this.gainB)
+    srcB.connect(this.filterB)
     this.sourceB = srcB
 
-    // 精确时间调度：gainA → 0，gainB: 0 → 1
     try {
+      // 淡变曲线：gainA 1→0，gainB 0→1
       if (this.gainA) {
-        this.gainA.gain.cancelScheduledValues(now)
-        this.gainA.gain.setValueAtTime(this.gainA.gain.value, now)
-        this.gainA.gain.linearRampToValueAtTime(0, now + dur)
+        this.applyFadeCurve(this.gainA.gain, curves.fadeOut, now, startAt, dur)
       }
-      this.gainB.gain.cancelScheduledValues(now)
-      this.gainB.gain.setValueAtTime(0, now)
-      this.gainB.gain.linearRampToValueAtTime(1, now + dur)
+      this.applyFadeCurve(this.gainB.gain, curves.fadeIn, now, startAt, dur)
 
-      // 记录 sourceB 的起始时间：减去起始偏移，收尾后 position getter 返回源B 的真实曲内位置
-      this._startTime = now - offsetSec
+      // 低频避让（bass swap）：A 淡出期把低频快速切掉（20→250Hz）；
+      // B 起播时高频进入（250Hz），到淡入结束回落全通（→20Hz），低频后进。
+      if (bassSwap && this.filterA && this.filterB) {
+        const midAt = startAt + dur * 0.5
+        this.filterA.frequency.cancelScheduledValues(now)
+        this.filterA.frequency.setValueAtTime(this.filterA.frequency.value, now)
+        this.filterA.frequency.linearRampToValueAtTime(BASS_SWAP_HP_MAX, midAt)
 
+        this.filterB.frequency.cancelScheduledValues(now)
+        this.filterB.frequency.setValueAtTime(BASS_SWAP_HP_MAX, startAt)
+        this.filterB.frequency.linearRampToValueAtTime(BASS_SWAP_HP_MIN, endAt)
+      }
+
+      // 记录交叉淡化实际起播时刻与偏移：延迟窗口内位置仍报当前曲，起播后才切到下一曲时间轴
+      this.crossfadeStartAt = startAt
+      this.crossfadeOffsetSec = offsetSec
       this._isCrossfading = true
 
       // 兜底：sourceA 异常未触发 onended 时强制收尾（finalizeCrossfade 幂等，可防重入）
@@ -616,13 +698,15 @@ export class WebAudioOutputEngine {
         () => {
           this.finalizeCrossfade()
         },
-        dur * 1000 + 200
+        (delay + dur) * 1000 + 200
       )
 
-      srcB.start(now, offsetSec)
+      srcB.start(startAt, offsetSec)
     } catch (err) {
       // 调度或启动失败：清理本次交叉淡化产生的状态，避免"UI 已切换但音频无过渡"的半损坏状态
       this._isCrossfading = false
+      this.crossfadeStartAt = 0
+      this.crossfadeOffsetSec = 0
       if (this.crossfadeFallbackTimer !== null) {
         clearTimeout(this.crossfadeFallbackTimer)
         this.crossfadeFallbackTimer = null
@@ -635,6 +719,14 @@ export class WebAudioOutputEngine {
         if (this.gainB) {
           this.gainB.gain.cancelScheduledValues(now)
           this.gainB.gain.value = 1.0
+        }
+        if (this.filterA) {
+          this.filterA.frequency.cancelScheduledValues(now)
+          this.filterA.frequency.value = BASS_SWAP_HP_MIN
+        }
+        if (this.filterB) {
+          this.filterB.frequency.cancelScheduledValues(now)
+          this.filterB.frequency.value = BASS_SWAP_HP_MIN
         }
       } catch {
         /* 忽略清理异常 */
@@ -650,6 +742,35 @@ export class WebAudioOutputEngine {
       return false
     }
     return true
+  }
+
+  /**
+   * 用折线（多点 linearRampToValueAtTime）逼近淡变曲线。
+   * 相比 setValueCurveAtTime，linearRamp 的取消语义（cancelScheduledValues 按 endTime）
+   * 与既有实现一致，seek/pause 打断时不会残留未取消的曲线。
+   * @param param 目标 AudioParam
+   * @param curve 归一化曲线值（长度 ≥2）
+   * @param now 当前 ctx 时刻（固定起点用）
+   * @param startAt 曲线起点时刻
+   * @param dur 曲线时长（秒）
+   */
+  private applyFadeCurve(
+    param: AudioParam,
+    curve: Float32Array,
+    now: number,
+    startAt: number,
+    dur: number
+  ): void {
+    const n = curve.length
+    if (n < 2) return
+    param.cancelScheduledValues(now)
+    // 固定当前值，避免延迟窗口内沿用旧自动化
+    param.setValueAtTime(param.value, now)
+    if (startAt > now) param.setValueAtTime(curve[0], startAt)
+    for (let i = 1; i < n; i++) {
+      const t = startAt + (dur * i) / (n - 1)
+      param.linearRampToValueAtTime(curve[i], t)
+    }
   }
 
   /**
@@ -755,6 +876,27 @@ export class WebAudioOutputEngine {
       this.gainB.gain.value = 1.0
     }
 
+    // 低频避让滤波同步交换并复位为全通（bass swap 只作用于过渡期）
+    const oldFilterA = this.filterA
+    this.filterA = this.filterB
+    this.filterB = oldFilterA
+    for (const f of [this.filterA, this.filterB]) {
+      if (!f) continue
+      try {
+        f.frequency.cancelScheduledValues(now)
+      } catch {
+        /* 忽略 */
+      }
+      f.frequency.value = BASS_SWAP_HP_MIN
+    }
+
+    // 位置时间轴落到下一曲：起播时刻 - 起始偏移，使 position = 曲内位置
+    if (this.crossfadeStartAt > 0) {
+      this._startTime = this.crossfadeStartAt - this.crossfadeOffsetSec
+    }
+    this.crossfadeStartAt = 0
+    this.crossfadeOffsetSec = 0
+
     // audioBuffer 引用指向下一曲，同步元数据
     if (this.nextBuffer) {
       this.audioBuffer = this.nextBuffer
@@ -803,6 +945,21 @@ export class WebAudioOutputEngine {
       }
       this.gainB.gain.value = 1.0
     }
+
+    // 复位低频避让滤波为全通（取消未完成的 frequency 自动化）
+    for (const f of [this.filterA, this.filterB]) {
+      if (!f) continue
+      try {
+        f.frequency.cancelScheduledValues(now)
+      } catch {
+        /* 忽略 */
+      }
+      f.frequency.value = BASS_SWAP_HP_MIN
+    }
+
+    // 清空交叉淡化排程状态（延迟窗口内被中断时，未起播的 sourceB 已被 stop 取消）
+    this.crossfadeStartAt = 0
+    this.crossfadeOffsetSec = 0
 
     // 停止并断开 sourceB
     if (this.sourceB) {
@@ -858,7 +1015,12 @@ export class WebAudioOutputEngine {
    */
   getPositionSeconds(): number {
     if (!this.audioContext || !this._isPlaying) return this._pausedOffset
-    const elapsed = this.audioContext.currentTime - this._startTime
+    const now = this.audioContext.currentTime
+    // 交叉淡化：起播后位置切到下一曲时间轴；起播前（延迟排程窗口）仍报当前曲位置
+    if (this._isCrossfading && this.crossfadeStartAt > 0 && now >= this.crossfadeStartAt) {
+      return Math.max(0, now - this.crossfadeStartAt + this.crossfadeOffsetSec)
+    }
+    const elapsed = now - this._startTime
     return Math.max(0, elapsed)
   }
 

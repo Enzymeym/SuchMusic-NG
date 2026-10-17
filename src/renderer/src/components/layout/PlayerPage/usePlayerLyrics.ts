@@ -1,7 +1,9 @@
 import { ref, computed, watch } from 'vue'
 import { usePlayerStore } from '../../../stores/playerStore'
+import type { PlayerSong } from '../../../stores/playerStore'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { parseLyricsToCore } from '../../../utils/lyric/lyricParser'
+import { fetchPluginLyric, isPluginSong } from '../../../utils/pluginSource'
 
 /**
  * 歌词相关的组合式函数
@@ -145,8 +147,7 @@ export function usePlayerLyrics() {
   }
 
   // 通过歌曲名 + 歌手名模糊匹配获取网易云歌词（支持本地缓存）
-  async function fetchLyricsByMatch(title: string, artist: string) {
-    if (fetchingLyrics.value) return
+  async function fetchLyricsByMatch(title: string, artist: string) {    if (fetchingLyrics.value) return
     fetchingLyrics.value = true
     try {
       const result = await window.electron.ipcRenderer.invoke('lyric:fetch-local', {
@@ -177,6 +178,26 @@ export function usePlayerLyrics() {
     }
   }
 
+  // 通过音源插件（洛雪 / 澜音）获取歌词；插件无歌词时回退到歌名 + 歌手匹配
+  async function fetchPluginLyrics(song: PlayerSong) {
+    const songId = song.id
+    try {
+      const result = await fetchPluginLyric(song)
+      if (!player.currentSong) return
+      if (manualLyricsSongId.value === player.currentSong.id) return
+      // 校验歌曲是否已切换
+      if (player.currentSong.id !== songId) return
+      if (!result || (!result.lyrics && !result.translatedLyrics)) {
+        fetchLyricsByMatch(song.title, song.artist)
+        return
+      }
+      if (result.lyrics) player.setLyrics(result.lyrics)
+      if (result.translatedLyrics) player.setTranslatedLyrics(result.translatedLyrics)
+    } catch (e) {
+      console.warn('[usePlayerLyrics] Failed to fetch plugin lyrics:', e)
+    }
+  }
+
   // 监听当前歌曲变化，尝试在线获取歌词
   // 同时监听「是否已有歌词」：单曲循环重播（id 不变但歌词对象被重建）时，
   // 若歌词仍然缺失也能重新触发一次拉取，避免歌词区永久为空。
@@ -194,6 +215,12 @@ export function usePlayerLyrics() {
       // 如果已有歌词或已手动选择，跳过
       if (song.lyrics) return
       if (manualLyricsSongId.value === newId) return
+
+      // 音源插件曲目（洛雪 / 澜音 / 内置 QQ 搜索的 tx 源）：优先走插件歌词
+      if (isPluginSong(song)) {
+        void fetchPluginLyrics(song)
+        return
+      }
 
       // 网易云歌曲已有 sourceSongId 的，直接通过 ID 获取
       if (isWySong(song.source) && song.sourceSongId) {

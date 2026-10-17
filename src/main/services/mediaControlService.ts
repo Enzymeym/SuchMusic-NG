@@ -68,6 +68,12 @@ let lastPositionSent: number | null = null;
 const commandDedupMap = new Map<string, number>();
 /** 封面缓存目录 */
 let coverDir: string | null = null;
+/**
+ * 封面本地化结果缓存：渲染层每秒上报进度时都会带上同一张封面，
+ * 若每次都 base64 解码 + writeFileSync，会产生 1Hz 的数 MB 垃圾与同步 IO。
+ * 命中同一 src 时直接复用上次的文件路径。
+ */
+let coverMemo: { src: string; path: string } | null = null;
 
 /**
  * 加载原生模块（统一路径解析 + 失败降级）
@@ -113,6 +119,11 @@ function getCoverDir(): string {
 function localizeCover(cover?: string): string {
   if (!cover) return '';
 
+  // 同一张封面只处理一次（进度上报是 1Hz 的）
+  if (coverMemo && coverMemo.src === cover) return coverMemo.path;
+
+  let result = '';
+
   // data: URL → 解码并落盘为文件，原生模块通过文件路径读取
   if (cover.startsWith('data:')) {
     try {
@@ -124,25 +135,22 @@ function localizeCover(cover?: string): string {
       const buffer = match[2] ? Buffer.from(match[3], 'base64') : Buffer.from(decodeURIComponent(match[3]), 'utf8');
       const filePath = join(getCoverDir(), `current-cover.${ext}`);
       writeFileSync(filePath, buffer);
-      return filePath;
+      result = filePath;
     } catch (error: any) {
       console.warn('[MediaControl] 写入封面文件失败，降级为空封面:', error?.message ?? error);
       return '';
     }
+  } else if (/^https?:\/\//i.test(cover)) {
+    // http(s): URL → 原样透传（由原生模块自行下载）
+    result = cover;
+  } else if (cover.startsWith('file://') || /^[a-zA-Z]:[\\/]/.test(cover) || cover.startsWith('/')) {
+    // 本地绝对路径（Windows 盘符 / UNC / Unix 绝对路径 / file://）→ 原样透传
+    result = cover;
   }
 
-  // http(s): URL → 原样透传（由原生模块自行下载）
-  if (/^https?:\/\//i.test(cover)) {
-    return cover;
-  }
-
-  // 本地绝对路径（Windows 盘符 / UNC / Unix 绝对路径 / file://）→ 原样透传
-  if (cover.startsWith('file://') || /^[a-zA-Z]:[\\/]/.test(cover) || cover.startsWith('/')) {
-    return cover;
-  }
-
-  // 其余（空串 / asset 相对 URL 等）→ 无封面
-  return '';
+  // 只缓存成功结果：写盘失败时下次仍会重试，与改动前一致
+  if (result) coverMemo = { src: cover, path: result };
+  return result;
 }
 
 /**

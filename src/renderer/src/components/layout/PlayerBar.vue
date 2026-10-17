@@ -38,6 +38,12 @@ import { getTransitionController } from '../../audio/transition-controller'
 import { mixHexColor } from '../../utils/color'
 import { formatTime } from '../../utils/format'
 import { parseLyricsToCore } from '../../utils/lyric/lyricParser'
+import {
+  isPluginSong,
+  resolvePluginUrl,
+  resolvePluginUrlDetailed,
+  toSourceQuality
+} from '../../utils/pluginSource'
 import type { LyricLine as CoreLyricLine } from '@applemusic-like-lyrics/core'
 
 const themeVars = useThemeVars()
@@ -193,6 +199,30 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false, i
 
   const currentProcessId = song.id
   let filePath = (song as any).filePath as string | undefined
+  let requestHeaders = (song as any).requestHeaders as Record<string, string> | undefined
+  /** 插件解析失败的真实原因（用于替代「未找到音源插件」这类笼统文案） */
+  let pluginResolveError: string | undefined
+
+  // 音源插件曲目（洛雪 / 澜音 / 内置 QQ 搜索）：重启恢复时 filePath 未持久化，
+  // 或 CDN 地址已过期，按插件重新解析一次播放地址
+  if (!filePath && isPluginSong(song)) {
+    try {
+      const resolved = await resolvePluginUrlDetailed(
+        song,
+        toSourceQuality(settingsStore?.playback?.preloadQualityLevel)
+      )
+      if (resolved?.url) {
+        filePath = resolved.url
+        requestHeaders = resolved.requestHeaders
+        ;(song as any).filePath = resolved.url
+        ;(song as any).requestHeaders = resolved.requestHeaders
+      } else {
+        pluginResolveError = resolved?.error
+      }
+    } catch (e) {
+      console.warn('[PlayerBar] 重新解析音源插件播放地址失败:', e)
+    }
+  }
 
   // 重启恢复的在线歌曲未持久化 filePath（CDN 地址会过期），按 sourceSongId 重新解析
   if (!filePath && (song as any).source === 'netease' && (song as any).sourceSongId) {
@@ -216,13 +246,13 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false, i
     if (isUrl) {
       try {
         if (shouldPlay) {
-          await AudioPlayerManager.play({ url: filePath, volume: player.volume })
+          await AudioPlayerManager.play({ url: filePath, volume: player.volume, headers: requestHeaders })
           // 播放重试（如重启后首次播放失败）：加载后跳回保存的进度继续播放
           if (player.positionMs > 0 && player.currentSong?.id === currentProcessId) {
             audioEngine.seek(player.positionMs)
           }
         } else {
-          await AudioPlayerManager.load({ url: filePath, volume: player.volume })
+          await AudioPlayerManager.load({ url: filePath, volume: player.volume, headers: requestHeaders })
           if (player.positionMs > 0) {
             audioEngine.seek(player.positionMs, false)
           }
@@ -240,6 +270,22 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false, i
         return
       } catch (e) {
         console.error('[PlayerBar] Failed to play remote audio:', e)
+        // 音源插件曲目：CDN 地址通常短时效，重新解析一次后重试
+        if (!isRetry && isPluginSong(song)) {
+          try {
+            const resolved = await resolvePluginUrl(
+              song,
+              toSourceQuality(settingsStore?.playback?.preloadQualityLevel)
+            )
+            if (resolved?.url) {
+              ;(song as any).filePath = resolved.url
+              ;(song as any).requestHeaders = resolved.requestHeaders
+              return await doLoadAndPlaySong(song, forcePlay, true)
+            }
+          } catch (err) {
+            console.warn('[PlayerBar] 重新解析音源插件播放地址失败:', err)
+          }
+        }
         // 网易云在线歌曲：CDN 地址可能已过期（下载 403）/需登录态，重新解析一次后重试。
         // 注意 refresh=true 强制服务端返回新地址：普通重查会命中服务端 URL 缓存，
         // 可能返回同一已过期地址，导致重试无效
@@ -270,7 +316,8 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false, i
       // 尝试加载本地歌词（如果缺失）
       if (!song.lyrics) {
         window.electron.ipcRenderer
-          .invoke('local-music:get-meta', filePath)
+          // 只为取歌词：跳过封面提取，避免数百 KB 的 base64 封面被克隆过 IPC 后丢弃
+          .invoke('local-music:get-meta', filePath, { includeCover: false })
           .then((meta: any) => {
             if (meta && meta.lyrics && player.currentSong?.id === song.id) {
               player.setLyrics(meta.lyrics)
@@ -329,6 +376,16 @@ const doLoadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false, i
       message.error(`本地文件不存在，无法播放 (${filePath})`)
       return
     }
+  }
+
+  // 音源插件曲目解析失败：给出可操作的提示，避免落到「本地文件不存在」的误导文案
+  if (isPluginSong(song)) {
+    console.warn('[PlayerBar] 音源插件未能解析出播放地址:', song.title, pluginResolveError)
+    player.setPlaying(false)
+    message.error(
+      pluginResolveError || '音源插件未能解析出播放地址，请在「设置 → 音源插件」中检查插件状态'
+    )
+    return
   }
 
   // 既不是远程 URL 也没有本地文件路径，无法播放

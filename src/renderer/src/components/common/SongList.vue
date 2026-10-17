@@ -105,16 +105,20 @@
 
     <!-- Song List -->
     <Transition name="fade">
-      <div v-if="!loading || loadMore" class="song-list-scroll-wrapper">
-        <n-scrollbar class="song-list-scroll-container" @scroll="(e) => emit('scroll', e)">
+      <div v-if="!loading || loadMore" ref="listWrapperRef" class="song-list-scroll-wrapper">
+        <n-scrollbar class="song-list-scroll-container" @scroll="handleScroll">
           <transition-group
             name="song-fade"
             tag="div"
-            :class="{ 'song-list-rows--large': isLargeList }"
+            :class="{
+              'song-list-rows--large': isLargeList && !virtualEnabled,
+              'song-list-rows--virtual': virtualEnabled
+            }"
+            :style="{ paddingTop: `${padTop}px`, paddingBottom: `${padBottom}px` }"
           >
             <div
-              v-for="(song, index) in songs"
-              :key="song.id || `s-${index}`"
+              v-for="(song, index) in displaySongs"
+              :key="song.id || `s-${rowIndexOf(index)}`"
               @contextmenu="(e) => showContextMenu(song, e)"
               class="song-item-wrapper"
             >
@@ -129,9 +133,9 @@
                 ]"
                 @click="handleSongClick(song)"
                 :draggable="draggableEnabled"
-                @dragstart="(e) => handleDragStart(index, e)"
-                @dragover="(e) => handleDragOver(index, e)"
-                @drop="(e) => handleDrop(index, e)"
+                @dragstart="(e) => handleDragStart(rowIndexOf(index), e)"
+                @dragover="(e) => handleDragOver(rowIndexOf(index), e)"
+                @drop="(e) => handleDrop(rowIndexOf(index), e)"
               >
                 <div style="display: flex; align-items: center; gap: 8px">
                   <div v-if="selectable" class="index-cell" style="width: 32px" @click.stop>
@@ -142,7 +146,7 @@
                     />
                   </div>
                   <div v-else class="index-cell">
-                    {{ getDisplayIndex(index) }}
+                    {{ getDisplayIndex(rowIndexOf(index)) }}
                   </div>
                   <img
                     class="song-cover"
@@ -272,7 +276,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, computed, onMounted, onBeforeUnmount, h } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, h } from 'vue'
 import {
   NDropdown,
   NTag,
@@ -340,12 +344,17 @@ function filterPlatformsCached(platforms?: any[]): any[] {
   return result
 }
 
-// 音质标签纯函数结果缓存（质量字符串重复出现频率高）
+// 音质标签纯函数结果缓存（质量字符串重复出现频率高；加界避免理论上无上限增长）
 const qualityTagCache = new Map<string, { label: string; type: TagType }>()
+const QUALITY_TAG_CACHE_MAX = 64
 function getQualityTagCached(quality: string): { label: string; type: TagType } {
   let cached = qualityTagCache.get(quality)
   if (!cached) {
     cached = getQualityTag(quality)
+    if (qualityTagCache.size >= QUALITY_TAG_CACHE_MAX) {
+      const oldest = qualityTagCache.keys().next().value
+      if (oldest !== undefined) qualityTagCache.delete(oldest)
+    }
     qualityTagCache.set(quality, cached)
   }
   return cached
@@ -445,6 +454,118 @@ const itemVariantClass = computed(() => {
 })
 const draggableEnabled = computed(() => props.draggable && !props.selectable)
 
+/* ===== 虚拟滚动（窗口化） =====
+ * 全量渲染 5000 首会产生数万 DOM 节点与 5000 个 <img>，是渲染进程最大的常驻开销。
+ * 这里只保留可视区 ± OVERSCAN 行，用上下 padding 撑出真实滚动高度，
+ * 因此 n-scrollbar 的 scrollHeight / 滚动条手感与全量渲染完全一致。
+ */
+/** 窗口外额外渲染的行数 */
+const VIRTUAL_OVERSCAN = 8
+
+const rowHeight = ref(props.itemHeight ?? 82)
+const scrollTop = ref(0)
+const viewportHeight = ref(0)
+const scrollerEl = ref<HTMLElement | null>(null)
+const listWrapperRef = ref<HTMLElement | null>(null)
+let scrollRaf = 0
+let rowHeightLocked = false
+let listResizeObserver: ResizeObserver | null = null
+
+/** 生效条件：大列表 + 非拖拽列表 + 设置未关闭（拖拽时禁用，避免被拖元素被卸载） */
+const virtualEnabled = computed(
+  () =>
+    settingsStore.performance?.virtualSongList !== false &&
+    props.songs.length > LARGE_LIST_THRESHOLD &&
+    !draggableEnabled.value
+)
+
+const windowStart = computed(() => {
+  if (!virtualEnabled.value) return 0
+  const raw = Math.floor(scrollTop.value / rowHeight.value) - VIRTUAL_OVERSCAN
+  // 过滤/排序后列表可能变短而 scrollTop 尚未被浏览器钳制，这里做一次上界保护
+  return Math.max(0, Math.min(raw, Math.max(0, props.songs.length - 1)))
+})
+
+const windowEnd = computed(() => {
+  if (!virtualEnabled.value) return props.songs.length
+  // viewportHeight 尚未测得时用 480 兜底，保证首帧也只会渲染少量行
+  const viewport = Math.max(viewportHeight.value, 480)
+  const visibleCount = Math.ceil((scrollTop.value + viewport) / rowHeight.value)
+  return Math.min(props.songs.length, visibleCount + VIRTUAL_OVERSCAN)
+})
+
+const displaySongs = computed(() =>
+  virtualEnabled.value ? props.songs.slice(windowStart.value, windowEnd.value) : props.songs
+)
+
+/** 窗口内下标 → 全量列表下标（序号、拖拽目标、key 都使用全局下标） */
+function rowIndexOf(localIndex: number): number {
+  return virtualEnabled.value ? windowStart.value + localIndex : localIndex
+}
+
+const padTop = computed(() =>
+  virtualEnabled.value ? windowStart.value * rowHeight.value : 0
+)
+const padBottom = computed(() =>
+  virtualEnabled.value ? (props.songs.length - windowEnd.value) * rowHeight.value : 0
+)
+
+/**
+ * 用前两行的 offsetTop 差值校准真实行高。
+ * 行高受全局字体行高影响，默认的 props.itemHeight(82) 可能与实测差 1-2px，
+ * 累积到数千行会造成明显偏移，故首帧渲染后实测一次。
+ */
+function measureRowHeight(): void {
+  if (rowHeightLocked || !virtualEnabled.value) return
+  const rows = listWrapperRef.value?.querySelectorAll<HTMLElement>('.song-item-wrapper')
+  if (!rows || rows.length < 2) return
+  const diff = rows[1].offsetTop - rows[0].offsetTop
+  if (diff > 10 && Math.abs(diff - rowHeight.value) > 1) rowHeight.value = diff
+  rowHeightLocked = true
+}
+
+function handleScroll(e: Event): void {
+  // 对外事件语义保持不变（调用方依赖 e.target 的 scrollHeight 做 load-more 判定）
+  emit('scroll', e)
+  const el = e.target as HTMLElement | null
+  if (!el) return
+  scrollerEl.value = el
+  if (scrollRaf) return
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0
+    scrollTop.value = scrollerEl.value?.scrollTop ?? 0
+    if (!viewportHeight.value) viewportHeight.value = scrollerEl.value?.clientHeight ?? 0
+    measureRowHeight()
+  })
+}
+
+// 列表数据变化（搜索/排序/切页）后浏览器会钳制 scrollTop，需要同步影子值
+watch(
+  () => props.songs,
+  async () => {
+    rowHeightLocked = false
+    await nextTick()
+    scrollTop.value = scrollerEl.value?.scrollTop ?? 0
+    measureRowHeight()
+  }
+)
+
+// 容器尺寸变化时更新可视高度（侧边栏折叠、窗口缩放、播放页开关都会改变可用高度）
+watch(listWrapperRef, (el) => {
+  listResizeObserver?.disconnect()
+  listResizeObserver = null
+  if (!el || typeof ResizeObserver === 'undefined') return
+  listResizeObserver = new ResizeObserver((entries) => {
+    const height = entries[0]?.contentRect.height
+    if (height && height > 0) {
+      viewportHeight.value = height
+      void nextTick(measureRowHeight)
+    }
+  })
+  listResizeObserver.observe(el)
+  void nextTick(measureRowHeight)
+})
+
 const localSelected = computed<Array<string | number>>({
   get: () => props.selectedIds || [],
   set: (val) => emit('update:selected-ids', val)
@@ -485,6 +606,9 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('theme-change', handleThemeChange as EventListener)
+  if (scrollRaf) cancelAnimationFrame(scrollRaf)
+  listResizeObserver?.disconnect()
+  listResizeObserver = null
 })
 
 const activeBorderColor = computed(() => themeVars.value.primaryColorHover)
@@ -663,7 +787,7 @@ async function handleContextMenuSelect(key: string | number): Promise<void> {
 
 /** 将组件内歌曲结构转换为播放器歌曲结构 */
 function toPlayerSong(song: Song): PlayerSong {
-  return {
+  const result: PlayerSong = {
     id: song.id ?? song.sourceSongId ?? null,
     title: song.name,
     artist: getArtistsFormatted(song),
@@ -674,6 +798,14 @@ function toPlayerSong(song: Song): PlayerSong {
     source: song.source,
     sourceSongId: song.sourceSongId ?? song.id
   }
+  // 音源插件曲目（洛雪 / 澜音 / 内置 QQ 搜索）：透传插件元数据，
+  // 保证「下载 / 下一首播放 / 加入歌单」后仍可按插件重新解析播放地址与歌词
+  if (song.pluginId) result.pluginId = song.pluginId
+  if (song.providerId) result.providerId = song.providerId
+  if (song.sourceKey) result.sourceKey = song.sourceKey
+  if (song.trackRef !== undefined) result.trackRef = song.trackRef
+  if (song.requestHeaders) result.requestHeaders = song.requestHeaders
+  return result
 }
 
 /** 解析无 filePath 的在线歌曲为可播放对象（由页面提供解析器） */
@@ -1114,6 +1246,20 @@ const isLargeList = computed(() => props.songs.length > LARGE_LIST_THRESHOLD)
 .song-list-rows--large .song-fade-leave-active,
 .song-list-rows--large .song-fade-move {
   transition: none !important;
+}
+
+/* 虚拟滚动：窗口平移时行会被复用/重建，任何过渡都会造成闪烁 */
+.song-list-rows--virtual .song-fade-enter-active,
+.song-list-rows--virtual .song-fade-leave-active,
+.song-list-rows--virtual .song-fade-move {
+  transition: none !important;
+}
+
+.song-list-rows--virtual .song-fade-enter-from,
+.song-list-rows--virtual .song-fade-leave-to {
+  opacity: 1;
+  filter: none;
+  transform: none;
 }
 
 .song-list-rows--large .song-fade-enter-from,

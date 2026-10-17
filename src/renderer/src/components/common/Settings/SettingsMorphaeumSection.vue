@@ -19,6 +19,12 @@ const transitionTypeOptions = [
   { label: '交叉淡入淡出', value: 'crossfade' }
 ]
 
+// 淡变曲线选项
+const curveOptions = [
+  { label: '等功率（推荐）', value: 'equalPower' },
+  { label: '线性', value: 'linear' }
+]
+
 // 音量平衡：最大增益范围选项
 const gainRangeOptions = [
   { label: '6 dB（温和）', value: 6 },
@@ -143,6 +149,67 @@ const props = defineProps<{
               :options="transitionTypeOptions"
               style="width: 180px"
               @update:value="playerStore.setTransitionType($event)"
+            />
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="main-label">过渡时长</div>
+              <div class="sub-label">两首歌交叉淡化的重合时长，越长衔接越舒缓</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px">
+              <n-slider
+                :value="playerStore.transitionDuration"
+                :min="1000"
+                :max="8000"
+                :step="500"
+                style="width: 180px"
+                @update:value="playerStore.setTransitionDuration($event)"
+              />
+              <span class="time-text" style="min-width: 46px; margin-right: 0">
+                {{ (playerStore.transitionDuration / 1000).toFixed(1) }}s
+              </span>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="main-label">淡变曲线</div>
+              <div class="sub-label">
+                等功率曲线保持过渡期音量恒定，消除线性曲线在中段的音量凹陷
+              </div>
+            </div>
+            <n-select
+              v-model:value="playerStore.transitionCurve"
+              :options="curveOptions"
+              style="width: 180px"
+              @update:value="playerStore.setTransitionCurve($event)"
+            />
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="main-label">节奏与乐句对齐</div>
+              <div class="sub-label">
+                把过渡点吸附到歌曲的小节 / 乐句重拍，使两首歌节拍对齐、切入点更准
+              </div>
+            </div>
+            <n-switch
+              v-model:value="playerStore.transitionBeatAlign"
+              @update:value="playerStore.setTransitionBeatAlign($event)"
+            />
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="main-label">低频避让（bass swap）</div>
+              <div class="sub-label">
+                过渡时先撤出当前曲低频、再引入下一曲低频，避免两首歌低频叠加浑浊
+              </div>
+            </div>
+            <n-switch
+              v-model:value="playerStore.transitionBassSwap"
+              @update:value="playerStore.setTransitionBassSwap($event)"
             />
           </div>
 

@@ -1,8 +1,10 @@
 import { defineStore } from 'pinia'
+import { ref } from 'vue'
 import { useSettingsStore } from './settingsStore'
 import { usePlayerStore } from './playerStore'
 import { usePlaylistStore } from './playlistStore'
 import { formatQuality } from '../utils/quality'
+import { base64ToBlobUrl, createThumbnailBlobUrl } from '../utils/cover'
 
 /** 分批并发执行：控制同时进行的异步任务数量，避免瞬间大量请求 */
 async function batchPromiseAll<T, R>(
@@ -35,6 +37,8 @@ function flushMetaUpdates(): void {
   const queue = metaUpdateQueue
   metaUpdateQueue = []
   for (const fn of queue) fn()
+  // 元数据批量应用后节流推进分组版本号（分组 getter 依赖它决定是否重算）
+  if (queue.length > 0) scheduleMetaVersionBump()
 }
 
 function queueMetaUpdate(fn: () => void): void {
@@ -45,60 +49,117 @@ function queueMetaUpdate(fn: () => void): void {
 }
 
 /**
- * 将图片 Blob URL 缩小为正方形缩略图 Blob URL（128px WebP）。
- * 列表封面显示仅几十像素，若直接用原图（可能 1000×1000+）按原尺寸解码，
- * 每张位图可达数 MB；缩略图后仅 ~128×128，滚动数百首也仅占用几十 MB。
- * 失败时返回空字符串（调用方回退到原图）。
- */
-async function createThumbnailBlobUrl(src: string, size = 128, quality = 0.82): Promise<string> {
-  try {
-    const res = await fetch(src)
-    const blob = await res.blob()
-    const bmp = await createImageBitmap(blob)
-    try {
-      const canvas = document.createElement('canvas')
-      canvas.width = size
-      canvas.height = size
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return ''
-      const side = Math.min(bmp.width, bmp.height)
-      ctx.drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size)
-      return await new Promise<string>((resolve) => {
-        canvas.toBlob((b) => resolve(b ? URL.createObjectURL(b) : ''), 'image/webp', quality)
-      })
-    } finally {
-      bmp.close()
-    }
-  } catch {
-    return ''
-  }
-}
-
-/**
- * 将 base64 封面转换为 Blob URL。
- * Blob URL 是短引用字符串（~50 字节），避免 100–300KB 的 base64 常驻 Pinia 响应式内存。
- * 失败时返回空字符串。
- */
-function base64ToBlobUrl(base64: string, mimeType: string): string {
-  try {
-    const binaryStr = atob(base64)
-    const bytes = new Uint8Array(binaryStr.length)
-    for (let i = 0; i < binaryStr.length; i++) {
-      bytes[i] = binaryStr.charCodeAt(i)
-    }
-    return URL.createObjectURL(new Blob([bytes], { type: mimeType || 'image/jpeg' }))
-  } catch {
-    return ''
-  }
-}
-
-/**
  * 按需加载的“高清封面”缓存：列表/历史等场景统一使用缩略图常驻，
  * 仅当前播放歌曲按需读取原始封面并缓存在此，最多保留 FULL_COVER_CACHE_MAX 张，
  * 超出后释放最旧一张的 Blob URL，避免高清封面在整库规模上常驻内存。
  */
 const fullCoverCache = new Map<string | number, string>()
 const FULL_COVER_CACHE_MAX = 4
+/** 本次 fillMeta 中缩略图两次都失败的数量（用于结束时一次性告警，便于定位异常封面） */
+let thumbFailCount = 0
+
+/**
+ * 歌词缓存（模块级、非响应式）。
+ *
+ * 旧实现把每首歌的歌词全文写入 `song.lyrics`（Pinia 响应式数组），
+ * 5000 首 × 2-10KB ≈ 40MB 常驻，而列表/分组根本不用这个字段。
+ * 现在只有「最近用到的歌词」保留在这一小份 LRU 里。
+ */
+const LYRICS_CACHE_MAX = 120
+const lyricsCache = new Map<string, string>()
+
+function lyricsKeyOf(song: { id?: string | number; filePath?: string }): string {
+  return song.filePath || `id:${String(song.id)}`
+}
+
+function setLyricsCache(key: string, text: string): void {
+  if (!text) return
+  lyricsCache.delete(key)
+  lyricsCache.set(key, text)
+  while (lyricsCache.size > LYRICS_CACHE_MAX) {
+    const oldest = lyricsCache.keys().next().value
+    if (oldest === undefined) break
+    lyricsCache.delete(oldest)
+  }
+}
+
+function getLyricsCache(key: string): string | undefined {
+  const value = lyricsCache.get(key)
+  if (value !== undefined) {
+    // 命中时刷新为最近使用，维持 LRU 顺序
+    lyricsCache.delete(key)
+    lyricsCache.set(key, value)
+  }
+  return value
+}
+
+/** 清空歌词缓存（曲库被整体替换时调用） */
+export function clearLocalLyricsCache(): void {
+  lyricsCache.clear()
+}
+
+/**
+ * 分组 getter 的版本号。
+ *
+ * `artistList` / `albumList` 会遍历整库并 buildTrack 出新对象，而 fillMeta 期间
+ * 每 40ms 就有一批字段更新，导致这两个 getter 在几十秒内被反复全量重建。
+ * 引入显式版本号后，getter 只依赖「数组引用 / 长度 / 版本号」这几个结构级信号，
+ * 字段级改动不再弄脏它，重算频率从 40ms 级降到 1.2s 级。
+ */
+const metaVersion = ref(0)
+let metaVersionTimer: ReturnType<typeof setTimeout> | null = null
+
+function bumpMetaVersion(): void {
+  metaVersion.value++
+}
+
+/** fillMeta 期间节流推进版本号，避免每批 meta 更新都触发全量分组重算 */
+function scheduleMetaVersionBump(): void {
+  if (metaVersionTimer) return
+  metaVersionTimer = setTimeout(() => {
+    metaVersionTimer = null
+    bumpMetaVersion()
+  }, 1200)
+}
+
+interface GroupFingerprint {
+  version: number
+  songsRef: unknown
+  songCount: number
+  historyRef: unknown
+  historyLen: number
+  historyHeadTs: number | undefined
+}
+
+interface GroupCacheEntry<T> extends GroupFingerprint {
+  value: T[]
+}
+
+let artistCache: GroupCacheEntry<any> | null = null
+let albumCache: GroupCacheEntry<any> | null = null
+
+function buildFingerprint(songs: unknown[], history: Array<{ timestamp?: number }>): GroupFingerprint {
+  return {
+    version: metaVersion.value,
+    songsRef: songs,
+    songCount: songs.length,
+    historyRef: history,
+    historyLen: history.length,
+    historyHeadTs: history[0]?.timestamp
+  }
+}
+
+function isCacheHit(cache: GroupCacheEntry<any> | null, fp: GroupFingerprint): boolean {
+  return (
+    !!cache &&
+    cache.version === fp.version &&
+    cache.songsRef === fp.songsRef &&
+    cache.songCount === fp.songCount &&
+    cache.historyRef === fp.historyRef &&
+    cache.historyLen === fp.historyLen &&
+    cache.historyHeadTs === fp.historyHeadTs
+  )
+}
 /** 列表缩略图边长（px）：兼顾列表/卡片清晰度与常驻内存，播放页大图另走高清按需加载 */
 const THUMB_SIZE = 256
 
@@ -197,6 +258,11 @@ export const useLocalMusicStore = defineStore('localMusic', {
     /** 按歌手聚合的音乐列表，利用 Pinia getter 缓存避免 SingerView 每次 computed 重建 Map */
     artistList(state) {
       const playerStore = usePlayerStore()
+      // 只读「结构级」依赖做指纹：命中时 O(1) 返回同一数组引用，
+      // 不触碰任何 song.* 字段，因此 fillMeta 的字段级更新不会触发全量重建
+      const fingerprint = buildFingerprint(state.songs, playerStore.playHistory)
+      if (isCacheHit(artistCache, fingerprint)) return artistCache!.value
+
       const groups = new Map<string, {
         name: string
         cover: string
@@ -246,12 +312,17 @@ export const useLocalMusicStore = defineStore('localMusic', {
           group.cover = group.songs.find(s => s.cover)?.cover || group.cover
         }
       }
-      return Array.from(groups.values())
+      const value = Array.from(groups.values())
+      artistCache = { ...fingerprint, value }
+      return value
     },
 
     /** 按专辑聚合的音乐列表，利用 Pinia getter 缓存避免 AlbumView 每次 computed 重建 Map */
     albumList(state) {
       const playerStore = usePlayerStore()
+      const fingerprint = buildFingerprint(state.songs, playerStore.playHistory)
+      if (isCacheHit(albumCache, fingerprint)) return albumCache!.value
+
       const groups = new Map<string, {
         name: string
         artist: string
@@ -300,7 +371,9 @@ export const useLocalMusicStore = defineStore('localMusic', {
         }, artist))
       })
 
-      return Array.from(groups.values())
+      const value = Array.from(groups.values())
+      albumCache = { ...fingerprint, value }
+      return value
     }
   },
 
@@ -313,6 +386,8 @@ export const useLocalMusicStore = defineStore('localMusic', {
       try {
         // 释放旧数据的 Blob URL，避免内存泄漏
         this.revokeCovers()
+        // 曲库将被整体替换，旧路径的歌词可能属于已删除文件
+        clearLocalLyricsCache()
 
         const rawDirs = settingsStore.local.scanDirs
         const plainDirs = Array.isArray(rawDirs) ? [...rawDirs] : []
@@ -346,6 +421,8 @@ export const useLocalMusicStore = defineStore('localMusic', {
         }))
 
         this.songs = list
+        // 新数组引用已能触发分组重建，这里再显式推进版本号做双保险
+        bumpMetaVersion()
         void this.fillMeta()
       } catch (error) {
         console.error('扫描本地音乐失败', error)
@@ -358,6 +435,7 @@ export const useLocalMusicStore = defineStore('localMusic', {
     async fillMeta() {
       if (this.fillingMeta) return
       this.fillingMeta = true
+      thumbFailCount = 0
       const playerStore = usePlayerStore()
       const playlistStore = usePlaylistStore()
 
@@ -395,15 +473,16 @@ export const useLocalMusicStore = defineStore('localMusic', {
 
                 if (result.lyrics) {
                   const lyrics = result.lyrics
-                  queueMetaUpdate(() => {
-                    song.lyrics = lyrics
-                    if (
-                      playerStore.currentSong?.id === song.id &&
-                      !playerStore.currentSong.lyrics
-                    ) {
+                  // 歌词不再写入响应式 state：只放模块级 LRU，播放时按需取用
+                  setLyricsCache(lyricsKeyOf(song), lyrics)
+                  if (
+                    playerStore.currentSong?.id === song.id &&
+                    !playerStore.currentSong.lyrics
+                  ) {
+                    queueMetaUpdate(() => {
                       playerStore.setLyrics(lyrics)
-                    }
-                  })
+                    })
+                  }
                 }
 
                 if (
@@ -425,15 +504,24 @@ export const useLocalMusicStore = defineStore('localMusic', {
                     queueMetaUpdate(() => {
                       song.picUrl = coverUrl
                     })
-                    void createThumbnailBlobUrl(coverUrl, THUMB_SIZE).then((thumbUrl) => {
-                      if (!thumbUrl) return
+                    void (async () => {
+                      // 256px 首要目标；失败时降级到 128px / 较低质量再试一次。
+                      // 两次都失败才保留原图 blob（由 revokeCovers 统一释放）。
+                      let thumbUrl = await createThumbnailBlobUrl(coverUrl, THUMB_SIZE)
+                      if (!thumbUrl) {
+                        thumbUrl = await createThumbnailBlobUrl(coverUrl, 128, 0.7)
+                      }
+                      if (!thumbUrl) {
+                        thumbFailCount++
+                        return
+                      }
                       queueMetaUpdate(() => {
                         song.thumbUrl = thumbUrl
                         song.picUrl = thumbUrl
                       })
                       // 待列表渲染切换到缩略图后再释放原图，避免封面闪烁
                       setTimeout(() => URL.revokeObjectURL(coverUrl), 500)
-                    })
+                    })()
                   }
                 }
 
@@ -498,6 +586,13 @@ export const useLocalMusicStore = defineStore('localMusic', {
         playlistStore.restoreCoversFromLocalSongs(this.songs)
       } finally {
         this.fillingMeta = false
+        // 最后一次批量应用 + 推进版本号，保证视图拿到补全后的最终分组
+        flushMetaUpdates()
+        bumpMetaVersion()
+        if (thumbFailCount > 0) {
+          console.warn(`[localMusic] ${thumbFailCount} 首歌曲的封面缩略图生成失败，已回退为原图`)
+          thumbFailCount = 0
+        }
       }
     },
 
@@ -526,7 +621,12 @@ export const useLocalMusicStore = defineStore('localMusic', {
     async loadFullCover(songId: string | number, filePath?: string): Promise<string | null> {
       if (!filePath) return null
       const cached = fullCoverCache.get(songId)
-      if (cached) return cached
+      if (cached) {
+        // 命中时刷新为最近使用，维持 LRU 顺序（原实现是 FIFO，来回切两首歌会互相淘汰）
+        fullCoverCache.delete(songId)
+        fullCoverCache.set(songId, cached)
+        return cached
+      }
       try {
         // @ts-ignore
         const result = (await window.electron.ipcRenderer.invoke(
@@ -552,6 +652,14 @@ export const useLocalMusicStore = defineStore('localMusic', {
     },
 
     /**
+     * 取某首歌缓存的歌词（模块级 LRU，非响应式）。
+     * 未命中返回空串，调用方应保持「空则走兜底异步拉取」的语义。
+     */
+    getLyrics(song: { id?: string | number; filePath?: string }): string {
+      return getLyricsCache(lyricsKeyOf(song)) ?? ''
+    },
+
+    /**
      * 返回某首歌曲已缓存的高清封面 URL（未加载则为 null）
      * @param songId 歌曲 ID
      */
@@ -566,9 +674,11 @@ export const useLocalMusicStore = defineStore('localMusic', {
       this.revokeCovers()
       fullCoverCache.forEach((url) => URL.revokeObjectURL(url))
       fullCoverCache.clear()
+      clearLocalLyricsCache()
       this.songs = []
       this.loading = false
       this.fillingMeta = false
+      bumpMetaVersion()
     }
   }
 })

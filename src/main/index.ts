@@ -18,6 +18,8 @@ import { registerWasapiHandlers } from './services/wasapiService'
 import { registerUpdateHandlers } from './ipc/update'
 import { registerPluginHandlers } from './ipc/pluginManager'
 import { loadAllSavedPlugins } from './ipc/pluginManager'
+import { registerPluginSourceHandlers } from './ipc/pluginSource'
+import { loadAllSavedSourcePlugins } from './services/pluginSource'
 import { registerLyricHandlers } from './services/lyricService'
 import { registerNeteaseHandlers } from './services/neteaseService'
 import { mainMemoryMonitor } from './utils/memoryMonitor'
@@ -224,15 +226,17 @@ app.whenReady().then(() => {
   registerUpdateHandlers()
   registerLyricHandlers()
   registerNeteaseHandlers()
+  registerPluginSourceHandlers()
 
   createWindow()
   initMediaControl()
   createTray()
   monitorEvent()
 
-  // 启动主进程内存监控（用于验证内存优化效果）
-  mainMemoryMonitor.start(10000)
+  // 内存监控仅在开发环境周期采样：生产环境由 memory:get-report 按需采样，
+  // 避免每 10s 一次 app.getAppMetrics()（跨进程枚举）的常驻开销
   if (!app.isPackaged) {
+    mainMemoryMonitor.start(10000)
     setInterval(() => {
       const report = mainMemoryMonitor.getReport()
       const s = report.current
@@ -269,6 +273,9 @@ app.whenReady().then(() => {
 
   // 自动加载已保存的插件
   loadAllSavedPlugins()
+
+  // 自动加载已保存的音源插件
+  loadAllSavedSourcePlugins()
 
   // 应用更新检查由渲染进程按用户设置（autoCheckUpdate / updateChannel）触发，
   // 见 renderer 的 UpdateNotification 组件

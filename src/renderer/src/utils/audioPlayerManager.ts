@@ -7,6 +7,8 @@ interface PlayAudioOptions {
   url?: string
   filePath?: string
   volume?: number
+  /** 下载远程地址时附加的请求头（防盗链、token 等） */
+  headers?: Record<string, string>
 }
 
 /**
@@ -42,7 +44,7 @@ export class AudioPlayerManager {
   }
 
   private static async handleAudio(options: PlayAudioOptions, autoPlay: boolean): Promise<void> {
-    const { url, filePath, volume } = options
+    const { url, filePath, volume, headers } = options
     const playerStore = usePlayerStore()
     const api = this.getApi()
 
@@ -77,7 +79,8 @@ export class AudioPlayerManager {
           // 主进程缓存优先：命中缓存时直接返回本地路径，跳过网络下载，加快二次播放
           const result = (await window.electron.ipcRenderer.invoke(
             'audio:get-online-audio',
-            url
+            url,
+            headers ? { headers } : undefined
           )) as string | { path: string; cached: boolean }
           targetPath = typeof result === 'string' ? result : result.path
           // 仅缓存未命中时产生的临时文件参与切歌清理；缓存文件由主进程淘汰策略管理

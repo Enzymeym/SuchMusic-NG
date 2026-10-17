@@ -1,0 +1,120 @@
+name: 🐞 问题反馈
+description: 报告可复现的 Bug 或异常行为
+title: '[Bug] '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！提交前请先确认：
+
+        - 已在最新版本上复现（设置页底部可查看当前版本号）
+        - 已搜索过现有 issue，没有重复报告
+        - **音源插件相关的问题**，请附上插件名称与格式（洛雪 / 澜音）——插件本身的问题需要联系插件作者
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 尽量用一两句话说清「哪个功能、出现了什么现象、影响多大」
+      placeholder: 例如：播放 QQ 音乐搜索结果里的歌曲时，进度条走但没有任何声音。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 越具体越好，可以每一步一行
+      placeholder: |
+        1. 打开搜索页，切到「QQ音乐」标签
+        2. 搜索任意歌名
+        3. 双击第一首播放
+        4. 出现无声
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      placeholder: 正常播放并显示歌词与封面。
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Such Music 版本
+      description: 设置页底部显示，例如 1.2.5
+      placeholder: 1.2.5
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: 系统版本
+      description: 例如 Windows 11 23H2 / macOS 15.1 / Ubuntu 24.04
+      placeholder: Windows 11 23H2
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 涉及模块
+      multiple: true
+      options:
+        - 播放 / 播放控制
+        - 音频引擎与音效
+        - 智能过渡（Morphaeum）
+        - 歌词
+        - 歌单
+        - 本地曲库 / 扫描
+        - 搜索
+        - 音源插件（洛雪 / 澜音）
+        - 应用插件
+        - 界面与布局
+        - 更新与安装
+        - 其他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: audio-mode
+    attributes:
+      label: 音频输出模式
+      description: 设置 → 播放设置 中可查看
+      options:
+        - WASAPI
+        - Web Audio
+        - 不确定 / 未修改
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或截图
+      description: 可将截图直接粘贴到此处；控制台报错请贴文字。含隐私路径可自行打码。
+      render: shell
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已在最新版本上复现该问题
+          required: true
+        - label: 我已搜索过现有 issue，确认不是重复报告
+          required: true

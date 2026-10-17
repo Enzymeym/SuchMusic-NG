@@ -13,6 +13,17 @@ export interface PlayerSong {
   translatedLyrics?: string // 翻译歌词原始文本
   source?: string // 音源平台标识（如 netease、本地等）
   sourceSongId?: string | number // 在对应平台上的原始歌曲 ID
+  // ===== 音源插件（洛雪 / 澜音）相关字段 =====
+  /** 解析该曲目的音源插件 id */
+  pluginId?: string
+  /** 澜音 provider id */
+  providerId?: string
+  /** 平台标识（洛雪 kw/kg/tx/wy/mg/local；澜音为 providerId） */
+  sourceKey?: string
+  /** 插件曲目不透明引用（解析播放地址/歌词时回传） */
+  trackRef?: unknown
+  /** 下载/请求播放地址所需的请求头（防盗链、token 等） */
+  requestHeaders?: Record<string, string>
 }
 
 export interface PlayRecord {
@@ -40,12 +51,14 @@ const LYRICS_CACHE_MAX_SIZE = 80
 
 const lyricsCache = new Map<string | number, { lyrics?: string; translatedLyrics?: string }>()
 
-/** 安全写入歌词缓存，超过上限时淘汰最旧条目 */
+/** 安全写入歌词缓存，超过上限时淘汰最久未使用的条目 */
 function safeSetLyricsCache(
   id: string | number,
   data: { lyrics?: string; translatedLyrics?: string }
 ): void {
-  if (lyricsCache.size >= LYRICS_CACHE_MAX_SIZE && !lyricsCache.has(id)) {
+  // 先删再插：保证 Map 的键顺序始终是「最近使用在后」，淘汰才是真 LRU
+  lyricsCache.delete(id)
+  if (lyricsCache.size >= LYRICS_CACHE_MAX_SIZE) {
     const firstKey = lyricsCache.keys().next().value as string | number
     lyricsCache.delete(firstKey)
   }
@@ -71,6 +84,9 @@ function restoreLyricsFromCache(song: PlayerSong): PlayerSong {
   if (song.id == null) return song
   const cached = lyricsCache.get(song.id)
   if (cached) {
+    // 命中时刷新为最近使用，避免热门歌词被大量切歌挤出缓存
+    lyricsCache.delete(song.id)
+    lyricsCache.set(song.id, cached)
     if (!song.lyrics && cached.lyrics) song.lyrics = cached.lyrics
     if (!song.translatedLyrics && cached.translatedLyrics)
       song.translatedLyrics = cached.translatedLyrics
@@ -120,6 +136,9 @@ export const usePlayerStore = defineStore('player', {
     transitionEnabled: true, // 是否启用智能过渡
     transitionDuration: 3000, // 过渡时长（毫秒）
     transitionType: 'smart' as 'crossfade' | 'fade' | 'smart', // 过渡效果类型
+    transitionCurve: 'equalPower' as 'equalPower' | 'linear', // 交叉淡化曲线（等功率 / 线性）
+    transitionBassSwap: true, // 过渡期低频避让（bass swap）
+    transitionBeatAlign: true, // 节奏/乐句对齐（拍网格吸附触发点与落点）
     isTransitioning: false, // 是否正在过渡
     transitionConsumed: false // 过渡已完成，currentSong 变更由 controller 接管（跳过重复加载）
   }),
@@ -436,9 +455,29 @@ export const usePlayerStore = defineStore('player', {
     },
     // 保存播放器状态（当前歌曲、歌单、进度等）
     savePlayerState() {
+      // 裁剪过大的 ref（如澜音 ContentEntity.data），避免撑爆 localStorage。
+      // 结果按 trackRef 对象身份缓存：5s 一次的定时保存会反复处理同一批对象，
+      // 每次都对 data 做 JSON.stringify 是纯浪费。
+      const sanitizedRefCache = new WeakMap<object, unknown>()
+      const sanitizeRef = (ref: unknown): unknown => {
+        if (ref == null || typeof ref !== 'object') return ref
+        const key = ref as object
+        if (sanitizedRefCache.has(key)) return sanitizedRefCache.get(key)
+        let out: unknown
+        try {
+          const obj = { ...(ref as Record<string, any>) }
+          if (obj.data && JSON.stringify(obj.data).length > 4096) delete obj.data
+          out = obj
+        } catch {
+          out = undefined
+        }
+        sanitizedRefCache.set(key, out)
+        return out
+      }
       // 剥离大字段以避免 localStorage 配额溢出（base64 封面、歌词等可能达数 MB）
       const stripSong = (song: PlayerSong | null) => {
         if (!song) return null
+        const isExpiringOnline = song.source === 'netease' || !!song.pluginId
         return {
           id: song.id,
           title: song.title,
@@ -447,9 +486,13 @@ export const usePlayerStore = defineStore('player', {
           durationMs: song.durationMs,
           // 在线歌曲的 CDN 地址会过期（登录后返回的地址也依赖登录态），
           // 不持久化，重启后由 PlayerBar 按 sourceSongId 重新解析，避免「启动即下载失败弹窗」
-          filePath: song.source === 'netease' ? '' : song.filePath,
+          filePath: isExpiringOnline ? '' : song.filePath,
           source: song.source,
           sourceSongId: song.sourceSongId,
+          pluginId: song.pluginId,
+          providerId: song.providerId,
+          sourceKey: song.sourceKey,
+          trackRef: sanitizeRef(song.trackRef),
           cover:
             song.cover && (song.cover.startsWith('data:') || song.cover.startsWith('blob:'))
               ? ''
@@ -465,12 +508,35 @@ export const usePlayerStore = defineStore('player', {
         positionMs: this.positionMs,
         transitionEnabled: this.transitionEnabled,
         transitionDuration: this.transitionDuration,
-        transitionType: this.transitionType
+        transitionType: this.transitionType,
+        transitionCurve: this.transitionCurve,
+        transitionBassSwap: this.transitionBassSwap,
+        transitionBeatAlign: this.transitionBeatAlign
       }
       try {
         localStorage.setItem('player_state', JSON.stringify(state))
       } catch (e) {
         console.error('Failed to save player state', e)
+      }
+    },
+    /**
+     * 只持久化播放进度（每 5s 调用一次）。
+     *
+     * 旧实现每 5s 调 `savePlayerState()`：为整条队列（≤500 首）重建对象、
+     * 逐首 sanitize、整体 JSON.stringify 再同步写 localStorage。进度独立成小 key 后，
+     * 周期性保存不再产生数百个临时对象。
+     */
+    savePosition() {
+      try {
+        localStorage.setItem(
+          'player_position',
+          JSON.stringify({
+            id: this.currentSong?.id ?? null,
+            positionMs: this.positionMs
+          })
+        )
+      } catch {
+        // 配额不足等异常忽略：进度不是关键数据
       }
     },
     // 加载播放器状态
@@ -491,6 +557,26 @@ export const usePlayerStore = defineStore('player', {
           if (typeof state.currentIndex === 'number') this.currentIndex = state.currentIndex
           if (typeof state.volume === 'number') this.volume = state.volume
           if (typeof state.positionMs === 'number') this.positionMs = state.positionMs
+          // 独立保存的进度优先：仅当歌曲 id 一致时才采用，避免把进度套到别的歌上
+          try {
+            const posStr = localStorage.getItem('player_position')
+            if (posStr) {
+              const pos = JSON.parse(posStr) as {
+                id?: string | number | null
+                positionMs?: number
+              }
+              if (
+                pos &&
+                pos.id != null &&
+                this.currentSong?.id === pos.id &&
+                typeof pos.positionMs === 'number'
+              ) {
+                this.positionMs = pos.positionMs
+              }
+            }
+          } catch {
+            // 忽略损坏的进度数据，沿用 player_state 里的值
+          }
           if (typeof state.transitionEnabled === 'boolean')
             this.transitionEnabled = state.transitionEnabled
           if (typeof state.transitionDuration === 'number') {
@@ -499,6 +585,13 @@ export const usePlayerStore = defineStore('player', {
             this.transitionDuration = Math.min(8000, Math.max(1000, state.transitionDuration))
           }
           if (state.transitionType) this.transitionType = state.transitionType
+          if (state.transitionCurve === 'equalPower' || state.transitionCurve === 'linear') {
+            this.transitionCurve = state.transitionCurve
+          }
+          if (typeof state.transitionBassSwap === 'boolean')
+            this.transitionBassSwap = state.transitionBassSwap
+          if (typeof state.transitionBeatAlign === 'boolean')
+            this.transitionBeatAlign = state.transitionBeatAlign
         } catch (e) {
           console.error('Failed to parse player state', e)
         }
@@ -766,6 +859,26 @@ export const usePlayerStore = defineStore('player', {
     // 设置过渡效果类型
     setTransitionType(type: 'crossfade' | 'fade' | 'smart'): void {
       this.transitionType = type
+    },
+
+    // 设置过渡时长（毫秒，钳制在 1000~8000）
+    setTransitionDuration(durationMs: number): void {
+      this.transitionDuration = Math.min(8000, Math.max(1000, Math.round(durationMs)))
+    },
+
+    // 设置交叉淡化曲线（等功率 / 线性）
+    setTransitionCurve(curve: 'equalPower' | 'linear'): void {
+      this.transitionCurve = curve
+    },
+
+    // 设置过渡期低频避让（bass swap）
+    setTransitionBassSwap(enabled: boolean): void {
+      this.transitionBassSwap = enabled
+    },
+
+    // 设置节奏/乐句对齐（拍网格吸附）
+    setTransitionBeatAlign(enabled: boolean): void {
+      this.transitionBeatAlign = enabled
     },
 
     // 设置过渡状态

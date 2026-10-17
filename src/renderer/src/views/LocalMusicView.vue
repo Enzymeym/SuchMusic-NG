@@ -287,7 +287,8 @@ const playSong = async (song: Song): Promise<void> => {
     durationMs: song.dt || 0,
     album: song.al?.name,
     filePath: song.filePath,
-    lyrics: song.lyrics,
+    // 歌词已不再常驻在响应式 songs 里，按需从模块级 LRU 取；未命中由 PlayerBar 异步兜底
+    lyrics: localMusicStore.getLyrics(song) || undefined,
     // 标记为本地来源，避免误用为在线平台资源
     source: 'local',
     sourceSongId: song.id

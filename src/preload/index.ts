@@ -353,6 +353,29 @@ class AudioEngineManager {
 
 const audioEngineManager = new AudioEngineManager()
 
+/**
+ * 深拷贝成「可结构化克隆」的纯数据。
+ *
+ * 渲染层传进来的对象可能是 Vue 的响应式 Proxy（例如搜索结果是 `ref([])` 的元素，
+ * 读 `song.trackRef` 拿到的是嵌套 Proxy）。这类对象经 contextBridge / ipcRenderer
+ * 传给主进程时会直接抛 `An object could not be cloned.`，调用方只能看到一条
+ * 莫名其妙的报错。主进程也无法使用函数、Symbol 等不可克隆成员，统一在这里剥掉。
+ */
+function toCloneable<T>(value: T, seen = new WeakSet<object>()): T {
+  if (value === null || typeof value !== 'object') return value
+  if (value instanceof Date) return new Date(value.getTime()) as unknown as T
+  if (Array.isArray(value)) return value.map((item) => toCloneable(item, seen)) as unknown as T
+  if (seen.has(value as object)) return undefined as unknown as T
+  seen.add(value as object)
+  const out: Record<string, unknown> = {}
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    const v = (value as Record<string, unknown>)[key]
+    if (typeof v === 'function' || typeof v === 'symbol') continue
+    out[key] = toCloneable(v, seen)
+  }
+  return out as T
+}
+
 const api = {
   rustAudio: audioEngineManager,
 
@@ -675,6 +698,55 @@ const api = {
     /** 响应歌单操作 */
     respondPlaylistOp: (response: any) =>
       ipcRenderer.invoke('plugin:playlist-op-response', response)
+  },
+
+  // ========== 音源插件（洛雪 LX v2 / 澜音 Ceru v2） ==========
+  sources: {
+    /** 列出已加载的音源插件 */
+    list: () => ipcRenderer.invoke('source:list'),
+    /** 选择插件文件 */
+    selectFile: () => ipcRenderer.invoke('source:select-file'),
+    /** 仅解析元信息（校验） */
+    inspect: (filePath: string) => ipcRenderer.invoke('source:inspect', filePath),
+    /** 加载插件 */
+    load: (filePath: string) => ipcRenderer.invoke('source:load', filePath),
+    /** 移除插件 */
+    remove: (pluginId: string) => ipcRenderer.invoke('source:remove', pluginId),
+    /** 启用 / 停用 */
+    setEnabled: (pluginId: string, enabled: boolean) =>
+      ipcRenderer.invoke('source:set-enabled', pluginId, enabled),
+    /** 单插件偏好：启用的音乐源 / 首选音质 */
+    setPreferences: (pluginId: string, patch: { sources?: string[] | null; quality?: string | null }) =>
+      ipcRenderer.invoke('source:set-preferences', pluginId, toCloneable(patch)),
+    /** 搜索（插件源） */
+    search: (req: any) => ipcRenderer.invoke('source:search', toCloneable(req)),
+    /** 解析播放地址 */
+    resolveUrl: (req: any) => ipcRenderer.invoke('source:resolve-url', toCloneable(req)),
+    /** 获取歌词 */
+    lyric: (req: any) => ipcRenderer.invoke('source:lyric', toCloneable(req)),
+    /** 获取封面 */
+    pic: (req: any) => ipcRenderer.invoke('source:pic', toCloneable(req)),
+    /** 歌单：类目（仅澜音） */
+    playlistCategories: (pluginId: string) =>
+      ipcRenderer.invoke('source:playlist-categories', pluginId),
+    /** 歌单：搜索（仅澜音） */
+    playlistSearch: (req: any) => ipcRenderer.invoke('source:playlist-search', toCloneable(req)),
+    /** 歌单：列表（仅澜音） */
+    playlistList: (req: any) => ipcRenderer.invoke('source:playlist-list', toCloneable(req)),
+    /** 歌单：曲目明细（仅澜音） */
+    playlistGet: (req: any) => ipcRenderer.invoke('source:playlist-get', toCloneable(req)),
+    /** QQ 音乐搜索（vkeys API） */
+    qqSearch: (query: string, limit = 30, offset = 0) =>
+      ipcRenderer.invoke('source:qq-search', { query, limit, offset }),
+
+    /** 监听音源插件通知 */
+    onNotice: (callback: (data: any) => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('source:notice', handler)
+      return () => {
+        ipcRenderer.removeListener('source:notice', handler)
+      }
+    }
   }
 }
 

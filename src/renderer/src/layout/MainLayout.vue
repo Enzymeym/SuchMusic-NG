@@ -85,7 +85,7 @@ onMounted(() => {
   if (wasSmall) {
     collapsed.value = true
   }
-  window.addEventListener('resize', throttle(handleResize, 200))
+  window.addEventListener('resize', onWindowResize)
   if (contentContainerRef.value) {
     contentContainerRef.value.style.paddingTop = '60px'
   }

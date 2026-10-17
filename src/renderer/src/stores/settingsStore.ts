@@ -105,6 +105,12 @@ export interface LocalSettings {
   downloadDir?: string
 }
 
+/** 性能相关设置（内存/渲染开销的开关，默认全部保持优化后的行为） */
+export interface PerformanceSettings {
+  /** 长列表虚拟滚动：关闭后回退为全量渲染（旧行为，仅用于排障） */
+  virtualSongList: boolean
+}
+
 export const useSettingsStore = defineStore('settings', () => {
   // --- State ---
   const general = ref<GeneralSettings>({
@@ -204,6 +210,10 @@ export const useSettingsStore = defineStore('settings', () => {
     scanDirs: [],
     cacheDir: '',
     downloadDir: ''
+  })
+
+  const performance = ref<PerformanceSettings>({
+    virtualSongList: true
   })
 
   // 获取系统主题
@@ -345,6 +355,8 @@ export const useSettingsStore = defineStore('settings', () => {
         if (data.appearance) appearance.value = { ...appearance.value, ...data.appearance }
         if (data.playback) playback.value = { ...playback.value, ...data.playback }
         if (data.local) local.value = { ...local.value, ...data.local }
+        // 旧版本没有 performance 分组：缺失时保留默认值，天然向后兼容
+        if (data.performance) performance.value = { ...performance.value, ...data.performance }
       } catch (e) {
         console.error('Failed to load settings', e)
       }
@@ -358,7 +370,8 @@ export const useSettingsStore = defineStore('settings', () => {
         general: general.value,
         appearance: appearance.value,
         playback: playback.value,
-        local: local.value
+        local: local.value,
+        performance: performance.value
       })
     )
   }
@@ -380,7 +393,7 @@ export const useSettingsStore = defineStore('settings', () => {
 
   // 监听每个设置分组的属性变化，使用深度监听确保嵌套属性变更也能触发保存
   watch(
-    [general, appearance, playback, local],
+    [general, appearance, playback, local, performance],
     () => {
       debouncedSave()
     },
@@ -407,6 +420,7 @@ export const useSettingsStore = defineStore('settings', () => {
     appearance,
     playback,
     local,
+    performance,
     updateAppearance,
     saveSettings
   }

@@ -10,6 +10,17 @@ export interface PlaylistTrack {
   durationMs?: number
   source?: string
   sourceSongId?: string | number
+  // ===== 音源插件（洛雪 / 澜音）相关字段，保证导入后可重新解析播放地址与歌词 =====
+  /** 解析该曲目的音源插件 id */
+  pluginId?: string
+  /** 澜音 provider id */
+  providerId?: string
+  /** 平台标识（洛雪 kw/kg/tx/wy/mg/local；澜音为 providerId） */
+  sourceKey?: string
+  /** 插件曲目不透明引用（解析时回传） */
+  trackRef?: unknown
+  /** 请求播放地址所需的请求头（防盗链、token 等） */
+  requestHeaders?: Record<string, string>
 }
 
 export interface UserPlaylist {
@@ -26,10 +37,16 @@ export interface UserPlaylist {
   titleFontFamily?: 'default' | 'serif'
   /** 封面是否跟随第一首歌曲封面，为 true 时忽略 cover 字段自动使用第一首歌曲封面 */
   coverFollowsFirstTrack?: boolean
-  /** 导入来源平台标识（如 netease），本地自建歌单为空 */
-  source?: 'netease'
+  /** 导入来源：netease=网易云歌单，plugin=音源插件（洛雪 / 澜音）歌单，本地自建为空 */
+  source?: 'netease' | 'plugin'
   /** 导入来源的网易云歌单 ID（用于「重新同步」） */
   sourcePlaylistId?: number
+  /** 导入来源的音源插件 id（source=plugin 时使用） */
+  sourcePluginId?: string
+  /** 导入来源的澜音 provider id */
+  sourceProviderId?: string
+  /** 导入来源歌单的插件侧引用（用于「重新同步」） */
+  sourcePlaylistRef?: unknown
   /** 最近一次同步时间戳 */
   lastSyncedAt?: number
 }
@@ -41,6 +58,24 @@ interface PlaylistState {
 const STORAGE_KEY = 'user_playlists'
 /** localStorage 安全存储上限（保守估计，实际限制因浏览器/环境而异） */
 const STORAGE_SAFE_LIMIT_BYTES = 3 * 1024 * 1024 // 3MB
+
+/** trackRef 中 data 字段的持久化上限（与 playerStore 保持一致） */
+const TRACK_REF_DATA_LIMIT = 4096
+
+/** 剥离过大/不可序列化的 trackRef 内容，避免撑爆 localStorage */
+function sanitizeTrackRef(ref: unknown): unknown {
+  if (!ref || typeof ref !== 'object') return ref
+  const source = ref as Record<string, any>
+  if (!('data' in source)) return source
+  const { data, ...rest } = source
+  if (data === undefined) return rest
+  try {
+    if (JSON.stringify(data).length > TRACK_REF_DATA_LIMIT) return rest
+  } catch {
+    return rest
+  }
+  return { ...rest, data }
+}
 
 /** 防抖写入：批量操作（批量收藏/删除/拖拽排序）时合并为一次序列化，避免高频全量 JSON.stringify */
 let saveTimer: ReturnType<typeof setTimeout> | null = null
@@ -138,7 +173,10 @@ export const usePlaylistStore = defineStore('playlist', {
             cover: pl.cover?.startsWith('blob:') ? undefined : pl.cover,
             tracks: pl.tracks.map((t) => ({
               ...t,
-              cover: t.cover?.startsWith('blob:') ? undefined : t.cover
+              cover: t.cover?.startsWith('blob:') ? undefined : t.cover,
+              // 插件 trackRef.data 最大可达 64KiB，整库持久化会撑爆 localStorage：
+              // 仅保留小体积 data，其余剥离（重新解析播放地址时会重新拉取）
+              trackRef: sanitizeTrackRef(t.trackRef)
             }))
           }))
           const json = JSON.stringify(persisted)
@@ -259,6 +297,64 @@ export const usePlaylistStore = defineStore('playlist', {
         ...current,
         name: payload.name,
         cover: payload.cover,
+        description: payload.description ?? current.description,
+        tracks: payload.tracks,
+        updatedAt: Date.now(),
+        lastSyncedAt: Date.now()
+      })
+      this.saveToStorage()
+      return true
+    },
+    /**
+     * 从音源插件（洛雪 / 澜音）歌单导入为本地歌单（一次性快照）
+     * @param payload 歌单名称、封面、描述、来源插件信息与曲目
+     * @returns 新建的歌单对象
+     */
+    importPlaylistFromSource(payload: {
+      name: string
+      cover?: string
+      description?: string
+      sourcePluginId: string
+      sourceProviderId?: string
+      sourcePlaylistRef?: unknown
+      tracks: PlaylistTrack[]
+    }): UserPlaylist {
+      const playlist = this.createPlaylistFromTracks(payload.name, payload.tracks, payload.cover)
+      playlist.source = 'plugin'
+      playlist.sourcePluginId = payload.sourcePluginId
+      playlist.sourceProviderId = payload.sourceProviderId
+      playlist.sourcePlaylistRef = payload.sourcePlaylistRef
+      playlist.lastSyncedAt = Date.now()
+      const description = payload.description?.trim()
+      if (description) {
+        playlist.description = description
+      }
+      this.saveToStorage()
+      return playlist
+    },
+    /**
+     * 以音源插件最新曲目覆盖本地歌单（仅限导入来源为音源插件的歌单）
+     * @param id 本地歌单 ID
+     * @param payload 最新名称、封面、描述与曲目
+     * @returns 是否同步成功（歌单不存在或非插件来源时返回 false）
+     */
+    syncPlaylistFromSource(
+      id: string,
+      payload: {
+        name?: string
+        cover?: string
+        description?: string
+        tracks: PlaylistTrack[]
+      }
+    ): boolean {
+      const index = this.playlists.findIndex((p) => p.id === id)
+      if (index === -1 || this.playlists[index].source !== 'plugin') return false
+
+      const current = this.playlists[index]
+      this.playlists.splice(index, 1, {
+        ...current,
+        name: payload.name || current.name,
+        cover: payload.cover || current.cover,
         description: payload.description ?? current.description,
         tracks: payload.tracks,
         updatedAt: Date.now(),

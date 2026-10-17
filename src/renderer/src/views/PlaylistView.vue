@@ -17,20 +17,25 @@
             </template>
             新建歌单
           </n-button>
-          <n-button
-            secondary
-            style="padding: 0 16px; font-size: 15px;"
-            size="large"
-            round
-            @click="showImportModal = true"
+          <n-dropdown
+            trigger="click"
+            :options="importOptions"
+            @select="handleImportSelect"
           >
-            <template #icon>
-              <n-icon size="16">
-                <i class="mgc_download_3_line"></i>
-              </n-icon>
-            </template>
-            导入歌单
-          </n-button>
+            <n-button
+              secondary
+              style="padding: 0 16px; font-size: 15px;"
+              size="large"
+              round
+            >
+              <template #icon>
+                <n-icon size="16">
+                  <i class="mgc_download_3_line"></i>
+                </n-icon>
+              </template>
+              导入歌单
+            </n-button>
+          </n-dropdown>
           <n-button secondary strong circle size="large" @click="refreshPlaylist">
             <template #icon>
               <n-icon size="20">
@@ -79,16 +84,22 @@
     </n-modal>
 
     <NeteasePlaylistImportModal v-model:show="showImportModal" @imported="handleImported" />
+    <SourcePlaylistImportModal
+      v-model:show="showSourceImportModal"
+      @imported="handleImported"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { NButton, NIcon, NInput, NScrollbar, NModal, useMessage } from 'naive-ui'
+import { NButton, NIcon, NInput, NScrollbar, NModal, NDropdown, useMessage } from 'naive-ui'
 import { usePlayerStore } from '../stores/playerStore'
 import { usePlaylistStore, type UserPlaylist } from '../stores/playlistStore'
 import NeteasePlaylistImportModal from '../components/common/NeteasePlaylistImportModal.vue'
+import SourcePlaylistImportModal from '../components/common/SourcePlaylistImportModal.vue'
+import { playlistTrackToPlayerSong, playerSongToPlaylistTrack } from '../utils/playlistTrack'
 import defaultCover from '@renderer/assets/default-cover.png'
 
 const router = useRouter()
@@ -101,8 +112,20 @@ const loading = ref(false)
 const selectedId = ref<string | null>(null)
 const showCreateModal = ref(false)
 const showImportModal = ref(false)
+const showSourceImportModal = ref(false)
 const createMode = ref<'empty' | 'queue'>('empty')
 const newPlaylistName = ref('')
+
+/** 「导入歌单」下拉：网易云 / 音源插件 */
+const importOptions = [
+  { label: '从网易云导入歌单', key: 'netease' },
+  { label: '从音源插件导入歌单', key: 'source' }
+]
+
+const handleImportSelect = (key: string | number): void => {
+  if (String(key) === 'netease') showImportModal.value = true
+  else showSourceImportModal.value = true
+}
 
 /**
  * 获取歌单封面：根据 coverFollowsFirstTrack 决定封面来源
@@ -143,18 +166,7 @@ const handlePlayPlaylist = (id: string) => {
     message.info('该歌单中没有歌曲')
     return
   }
-  const list = pl.tracks.map((t) => ({
-    id: t.id,
-    title: t.title,
-    artist: t.artist,
-    album: t.album,
-    cover: t.cover || '',
-    filePath: t.filePath,
-    durationMs: t.durationMs || 0,
-    source: t.source,
-    sourceSongId: t.sourceSongId,
-    lyrics: ''
-  }))
+  const list = pl.tracks.map((t) => playlistTrackToPlayerSong(t))
   player.setPlaylist(list)
   if (list.length > 0) {
     player.setCurrentSong(list[0])
@@ -194,17 +206,7 @@ const handleConfirmCreate = (): void => {
       message.info('当前播放队列为空')
       return
     }
-    const tracks = player.playlist.map((s) => ({
-      id: s.id,
-      title: s.title,
-      artist: s.artist,
-      album: s.album,
-      cover: s.cover || '',
-      filePath: s.filePath,
-      durationMs: s.durationMs,
-      source: s.source,
-      sourceSongId: s.sourceSongId
-    }))
+    const tracks = player.playlist.map((s) => playerSongToPlaylistTrack(s))
     const cover = tracks[0]?.cover
     const playlist = playlistStore.createPlaylistFromTracks(name, tracks, cover)
     selectedId.value = playlist.id

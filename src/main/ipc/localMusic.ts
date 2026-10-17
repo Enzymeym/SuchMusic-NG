@@ -29,13 +29,41 @@ async function getMusicMetadataParser(): Promise<(filePath: string, options?: Re
   return _mmParseFile
 }
 
+/**
+ * 简单并发限制器。
+ *
+ * 只用于包裹**叶子 I/O**（readdir / stat），不要包裹递归任务本身：
+ * 递归任务持有配额再等待子任务会在大目录树上死锁。
+ */
+function createLimiter(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
+  let active = 0
+  const queue: Array<() => void> = []
+  return async function limit<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= max) {
+      await new Promise<void>((resolve) => queue.push(resolve))
+    }
+    active++
+    try {
+      return await fn()
+    } finally {
+      active--
+      queue.shift()?.()
+    }
+  }
+}
+
 export function registerLocalMusicHandlers(): void {
 
   // 按需读取单个音频文件的元数据（时长 + 封面）
-  ipcMain.handle('local-music:get-meta', async (_event, filePath: string) => {
+  // options.includeCover=false 时跳过封面提取：调用方只为取歌词时，
+  // 不必把数百 KB~数 MB 的 base64 封面克隆过 IPC 再丢弃
+  ipcMain.handle(
+    'local-music:get-meta',
+    async (_event, filePath: string, options?: { includeCover?: boolean }) => {
+    const includeCover = options?.includeCover !== false
     try {
       // 首选 native 标签读取（music_tag_reader）。native 可用且读取到结果时走 native 分支。
-      const native = await readNativeTags(filePath, { includeCover: true })
+      const native = await readNativeTags(filePath, { includeCover })
       if (native !== 'UNAVAILABLE' && native !== null) {
         // 尝试读取同名 .lrc 歌词文件，若有内容则以 .lrc 内容优先覆盖 native 标签歌词
         let lyrics: string | undefined = native.lyrics
@@ -68,7 +96,7 @@ export function registerLocalMusicHandlers(): void {
           durationMs: native.durationMs,
           bitrate: native.bitrate,
           sampleRate: native.sampleRate,
-          cover: native.cover,
+          cover: includeCover ? native.cover : undefined,
           title: native.title,
           artists: native.artists ?? [],
           album: native.album,
@@ -176,7 +204,7 @@ export function registerLocalMusicHandlers(): void {
         // Ignore if lrc file doesn't exist or read error
       }
 
-      let cover = (picture && picture.data)
+      let cover = includeCover && picture && picture.data
         ? {
             mimeType: picture.format || 'image/jpeg',
             base64: Buffer.from(picture.data).toString('base64')
@@ -185,8 +213,9 @@ export function registerLocalMusicHandlers(): void {
       let year = m.common.year
 
       // 兜底：music-metadata 未取到封面（或整体解析失败）时，按文件内容
-      // 嗅探真实格式并手动提取封面/标签/时长（应对误标扩展名、损坏 ID3 头等文件）
-      if (!cover) {
+      // 嗅探真实格式并手动提取封面/标签/时长（应对误标扩展名、损坏 ID3 头等文件）。
+      // includeCover=false 时整段跳过：这条路径会读取文件头部，而调用方只要歌词。
+      if (includeCover && !cover) {
         try {
           const manual = await readMetaManually(filePath)
           if (manual) {
@@ -220,7 +249,8 @@ export function registerLocalMusicHandlers(): void {
       console.error('get-meta failed:', filePath, error)
       return {}
     }
-  })
+    }
+  )
 
   // 保存音乐标签元数据 (目前支持 MP3/FLAC/WAV)
   ipcMain.handle('local-music:write-meta', async (_event, filePath: string, tags: any) => {
@@ -356,11 +386,13 @@ export function registerLocalMusicHandlers(): void {
     ])
     const tracks: LocalMusicTrack[] = []
     const seenFiles = new Set<string>()
+    // 深/宽目录树的下钻会瞬间产生数千个并发 readdir，每个未完成的 Dirent[] 都要驻留内存
+    const readdirLimited = createLimiter(8)
 
     const walk = async (dir: string): Promise<void> => {
       let entries
       try {
-        entries = await fs.readdir(dir, { withFileTypes: true })
+        entries = await readdirLimited(() => fs.readdir(dir, { withFileTypes: true }))
       } catch (error) {
         console.error('读取目录失败:', dir, error)
         return
@@ -423,15 +455,19 @@ export function registerLocalMusicHandlers(): void {
     const paths = Array.from(
       new Set(filePaths.filter((p): p is string => typeof p === 'string' && !!p))
     )
+    // 万级路径一次性 stat 会让线程池排起长队并同时持有大量 Promise/Stats
+    const statLimited = createLimiter(16)
     await Promise.all(
-      paths.map(async (filePath) => {
-        try {
-          const stat = await fs.stat(filePath)
-          if (stat.isFile()) sizes[filePath] = stat.size
-        } catch {
-          // 文件已删除 / 无权限时忽略，统计页按缺失处理
-        }
-      })
+      paths.map((filePath) =>
+        statLimited(async () => {
+          try {
+            const stat = await fs.stat(filePath)
+            if (stat.isFile()) sizes[filePath] = stat.size
+          } catch {
+            // 文件已删除 / 无权限时忽略，统计页按缺失处理
+          }
+        })
+      )
     )
     return sizes
   })

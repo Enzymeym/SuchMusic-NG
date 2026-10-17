@@ -2,6 +2,12 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { runSnowdropGetMusicUrl } from '../apis/snowdrop-transform'
 import { useMessage } from 'naive-ui'
 import type { PlayerSong } from '../stores/playerStore'
+import {
+  isPluginSong,
+  resolvePluginUrl,
+  normalizeSourceKey,
+  toSourceQuality
+} from '../utils/pluginSource'
 
 /** 音质标识 -> 展示名称 */
 const QUALITY_LABEL: Record<string, string> = {
@@ -24,16 +30,8 @@ export function useDownloadMusic() {
     }
     isDownloading = true
     try {
-      // 1. 获取源信息
-      let source = song.source || 'wy'
-      // 兼容 source 映射
-      switch (source) {
-        case 'netease': source = 'wy'; break;
-        case 'qq': source = 'tx'; break;
-        case 'kugou': source = 'kg'; break;
-        case 'kuwo': source = 'kw'; break;
-        case 'migu': source = 'mg'; break;
-      }
+      // 1. 获取源信息（netease→wy / qq→tx … 归一化）
+      const source = normalizeSourceKey(song.sourceKey || song.source || 'wy')
 
       const songId = song.sourceSongId ?? song.id
       if (!songId) {
@@ -56,16 +54,29 @@ export function useDownloadMusic() {
 
       const loadingMsg = message.loading('正在获取下载链接...', { duration: 0 })
 
-      // 2. 获取音乐 URL
+      // 2. 获取音乐 URL（附带的请求头需一并透传给下载器，插件音源 CDN 常有防盗链）
       let url = ''
+      let requestHeaders: Record<string, string> | undefined
       try {
-        if (source === 'wy') {
-          // 网易云：直接通过网易云接口获取播放/下载地址，每次强制刷新（服务端 URL 缓存可能返回过期地址）
-          const urlMap = await window.api.netease.songUrl([Number(songId)], qualityLevel, true)
-          url = urlMap[Number(songId)] || ''
-        } else {
-          const res = await runSnowdropGetMusicUrl(source, musicInfo, qualityLevel)
-          url = res.url
+        // 音源插件曲目（洛雪 / 澜音 / 内置 QQ 搜索）优先走插件解析
+        if (isPluginSong(song)) {
+          const resolved = await resolvePluginUrl(song, toSourceQuality(qualityLevel), true)
+          if (resolved?.url) {
+            url = resolved.url
+            requestHeaders = resolved.requestHeaders
+          }
+        }
+
+        // 插件未命中或非插件曲目：回退到内置音源
+        if (!url) {
+          if (source === 'wy') {
+            // 网易云：直接通过网易云接口获取播放/下载地址，每次强制刷新（服务端 URL 缓存可能返回过期地址）
+            const urlMap = await window.api.netease.songUrl([Number(songId)], qualityLevel, true)
+            url = urlMap[Number(songId)] || ''
+          } else {
+            const res = await runSnowdropGetMusicUrl(source, musicInfo, qualityLevel)
+            url = res.url
+          }
         }
         if (!url) throw new Error('未获取到下载链接')
       } catch (err: any) {
@@ -104,7 +115,8 @@ export function useDownloadMusic() {
       const targetPath = await window.electron.ipcRenderer.invoke('system:download-music', {
         url,
         filename,
-        dir
+        dir,
+        headers: requestHeaders
       })
 
       // 5. 下载成功后自动写入音乐标签（歌名、歌手、专辑、歌词、封面）

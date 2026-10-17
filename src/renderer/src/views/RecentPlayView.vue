@@ -61,10 +61,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { NButton, NIcon, useMessage, NInput } from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import { usePlayerStore } from '../stores/playerStore'
+import { base64ToBlobUrl, createThumbnailBlobUrl } from '../utils/cover'
 
 interface RecentSong {
   id: string | number
@@ -85,7 +86,25 @@ const songs = ref<RecentSong[]>([])
 const searchKeyword = ref('')
 const message = useMessage()
 
+/**
+ * 本页生成的封面 Blob URL。
+ * 以前这里把 base64 直接写成 data URL 存进响应式数组（最多 200 条 × 数百 KB），
+ * 现在改为「blob → 256px 缩略图」，并在重建/卸载时统一释放。
+ */
+const blobCoverUrls: string[] = []
+
+function revokeBlobCovers(): void {
+  // 正在播放的封面可能仍被播放器引用，释放会导致封面加载失败，需保留
+  const keep = player.currentSong?.cover
+  for (const url of blobCoverUrls) {
+    if (url !== keep) URL.revokeObjectURL(url)
+  }
+  blobCoverUrls.length = 0
+}
+
 const buildSongsFromHistory = () => {
+  // 重建列表前释放上一轮封面（旧数组即将被整体替换，引用不再有效）
+  revokeBlobCovers()
   // 使用 Map 按 songId 去重，保留最新一次播放记录
   const seen = new Set<string | number>()
   const uniqueSongs: RecentSong[] = []
@@ -142,8 +161,19 @@ const fillMissingCoversFromMeta = async () => {
         }
 
         if (result.cover?.mimeType && result.cover.base64) {
-          // 通过本地 meta 生成封面 data URL
-          song.picUrl = `data:${result.cover.mimeType};base64,${result.cover.base64}`
+          // 不再把 base64 直接塞进响应式数组：先转 blob，再降到 256px 缩略图，
+          // 随后释放原图 blob（列表只显示 48px）
+          const fullUrl = base64ToBlobUrl(result.cover.base64, result.cover.mimeType)
+          if (!fullUrl) return
+          const thumbUrl = await createThumbnailBlobUrl(fullUrl, 256)
+          if (thumbUrl) {
+            URL.revokeObjectURL(fullUrl)
+            song.picUrl = thumbUrl
+            blobCoverUrls.push(thumbUrl)
+          } else {
+            song.picUrl = fullUrl
+            blobCoverUrls.push(fullUrl)
+          }
         }
       } catch (error) {
         console.error('加载最近播放封面失败:', error)
@@ -170,6 +200,10 @@ onMounted(() => {
   player.loadHistory()
   buildSongsFromHistory()
   void fillMissingCoversFromMeta()
+})
+
+onBeforeUnmount(() => {
+  revokeBlobCovers()
 })
 
 const handleSongClick = async (song: RecentSong) => {

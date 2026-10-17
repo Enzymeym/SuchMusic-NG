@@ -29,6 +29,8 @@ export function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
       webSecurity: false,
+      // 本应用没有需要拼写检查的文本输入场景，关闭后不再加载 hunspell 词典（数 MB）
+      spellcheck: false,
       // 隐藏到托盘 / 最小化后仍保持定时器与动画帧正常运行，
       // 否则 Chromium 会节流后台 renderer，导致播放进度同步（set-progress IPC）停摆
       backgroundThrottling: false

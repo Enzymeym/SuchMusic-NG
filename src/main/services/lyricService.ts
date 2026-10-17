@@ -80,7 +80,7 @@ interface QQSearchResponse {
   data?: QQSearchSong[]
 }
 
-interface QQSearchSong {
+export interface QQSearchSong {
   id: number
   mid: string
   song: string
@@ -312,8 +312,13 @@ async function fetchWyLyrics(songId: string): Promise<LyricsResult | null> {
  * @param keywords 搜索关键词
  * @returns 搜索结果列表
  */
-async function searchQQSong(keywords: string): Promise<QQSearchSong[]> {
-  const url = `${QQ_API_BASE}/search/song?word=${encodeURIComponent(keywords)}`
+export async function searchQQSong(
+  keywords: string,
+  page = 1,
+  num = 30
+): Promise<QQSearchSong[]> {
+  // vkeys QQ 音乐搜索：支持 word / page / num 分页参数
+  const url = `${QQ_API_BASE}/search/song?word=${encodeURIComponent(keywords)}&page=${page}&num=${num}`
   try {
     const resp = await fetch(url)
     if (!resp.ok) {

@@ -47,8 +47,17 @@ const windowActive = useWindowActive()
  * 缓存受 LRU 容量限制，避免高清封面在整库规模上常驻内存。
  */
 watch(
-  () => [player.currentSong?.id, player.currentSong?.filePath, player.currentSong?.cover] as const,
-  async ([id, filePath, cover]) => {
+  () =>
+    [
+      // 播放页由 PlayerBar 常驻挂载（模板根是 v-if），组件本身始终存活，
+      // 因此必须显式判断「页面是否展开」，否则每次切歌都会去读原图并解码数 MB 位图
+      player.isPlayerPageShown,
+      player.currentSong?.id,
+      player.currentSong?.filePath,
+      player.currentSong?.cover
+    ] as const,
+  async ([shown, id, filePath, cover]) => {
+    if (!shown) return
     if (id == null || !filePath) return
     // 已经是缓存中的高清封面则跳过，避免 loop
     if (cover && cover === localMusicStore.getFullCoverUrl(id)) return

@@ -53,6 +53,31 @@ const MAX_SAMPLE_SIZE = 96 // 降采样边长，控制计算量
 const COLOR_QUANT_SHIFT = 3 // 每通道量化位移（8->5bit）
 
 /**
+ * 按最长边把图片尺寸钳制到 MAX_SAMPLE_SIZE（等比）。
+ * 所有取色/取文字色的路径都必须经过它：直接用原图尺寸建 canvas + getImageData
+ * 会在 1000×1000 封面上产生数 MB 的 ImageData 与同尺寸画布后备存储。
+ */
+function clampSampleSize(
+  naturalWidth: number,
+  naturalHeight: number
+): { width: number; height: number } {
+  if (!naturalWidth || !naturalHeight) return { width: 1, height: 1 }
+  if (Math.max(naturalWidth, naturalHeight) <= MAX_SAMPLE_SIZE) {
+    return { width: naturalWidth, height: naturalHeight }
+  }
+  if (naturalWidth >= naturalHeight) {
+    return {
+      width: MAX_SAMPLE_SIZE,
+      height: Math.max(1, Math.round((naturalHeight / naturalWidth) * MAX_SAMPLE_SIZE))
+    }
+  }
+  return {
+    width: Math.max(1, Math.round((naturalWidth / naturalHeight) * MAX_SAMPLE_SIZE)),
+    height: MAX_SAMPLE_SIZE
+  }
+}
+
+/**
  * 将 RGB 转为 HSL（0-1）
  * @param r - 红色通道值（0-255）
  * @param g - 绿色通道值（0-255）
@@ -311,6 +336,13 @@ export interface AdaptiveTextColorOptions {
 }
 
 /**
+ * `getAdaptiveTextColor` 的有界缓存：播放页/歌词区/歌单头部会反复对同一张封面求文字色，
+ * 每次都新建 canvas + getImageData 属于纯浪费。仅缓存字符串 URL（元素身份不稳定）。
+ */
+const textColorCache = new Map<string, 'black' | 'white'>()
+const TEXT_COLOR_CACHE_MAX = 32
+
+/**
  * 计算图片指定区域的平均亮度，返回推荐的前景色
  * @param src - 图片源，可以是 URL 字符串或 HTMLImageElement
  * @param options - 自适应文字颜色选项
@@ -322,6 +354,31 @@ export const getAdaptiveTextColor = async (
 ): Promise<'black' | 'white'> => {
   const threshold = options?.threshold ?? 0.5
   const region = options?.region ?? { x: 0, y: 0, w: 1, h: 1 }
+
+  const cacheKey =
+    typeof src === 'string'
+      ? `${src}|${region.x},${region.y},${region.w},${region.h}|${threshold}`
+      : null
+  if (cacheKey) {
+    const hit = textColorCache.get(cacheKey)
+    if (hit) {
+      // 命中时刷新为最近使用，维持 LRU 顺序
+      textColorCache.delete(cacheKey)
+      textColorCache.set(cacheKey, hit)
+      return hit
+    }
+  }
+  const remember = (value: 'black' | 'white'): 'black' | 'white' => {
+    if (!cacheKey) return value
+    textColorCache.delete(cacheKey)
+    textColorCache.set(cacheKey, value)
+    while (textColorCache.size > TEXT_COLOR_CACHE_MAX) {
+      const oldest = textColorCache.keys().next().value
+      if (oldest === undefined) break
+      textColorCache.delete(oldest)
+    }
+    return value
+  }
 
   let img: HTMLImageElement
   if (typeof src === 'string') {
@@ -398,9 +455,9 @@ export const getAdaptiveTextColor = async (
     }
   }
 
-  if (count === 0) return 'white'
+  if (count === 0) return remember('white')
   const avgLuminance = totalLuminance / count
-  return avgLuminance < threshold ? 'white' : 'black'
+  return remember(avgLuminance < threshold ? 'white' : 'black')
 }
 
 /**
@@ -459,12 +516,17 @@ export const extractImageColors = async (
     if (typeof src === 'string') {
       const dataUrl = await fetchImageAsDataURL(src)
       const img2 = await loadImageSafe(dataUrl)
-      canvas.width = img2.naturalWidth || img2.width
-      canvas.height = img2.naturalHeight || img2.height
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
-      ctx.drawImage(img2, 0, 0, canvas.width, canvas.height)
+      const nw = img2.naturalWidth || img2.width
+      const nh = img2.naturalHeight || img2.height
+      // 重试分支同样降采样：用原图尺寸 getImageData 会在 1000×1000 封面上
+      // 产生 ~4MB ImageData + 同尺寸 canvas 后备存储
+      const { width: tw, height: th } = clampSampleSize(nw, nh)
+      canvas.width = tw
+      canvas.height = th
+      ctx.clearRect(0, 0, tw, th)
+      ctx.drawImage(img2, 0, 0, tw, th)
       try {
-        imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+        imageData = ctx.getImageData(0, 0, tw, th)
       } catch (e2) {
         throw new Error('failed to read image data (maybe strict CORS), consider using a proxy')
       }

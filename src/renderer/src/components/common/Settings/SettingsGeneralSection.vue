@@ -143,6 +143,27 @@ defineProps<{
       </div>
     </n-card>
 
+    <div class="section-group-title">性能</div>
+
+    <n-card
+      class="setting-item"
+      :class="{ 'setting-item--highlight': highlightKey === 'performance.virtualSongList' }"
+      data-setting-key="performance.virtualSongList"
+      :bordered="true"
+      size="small"
+      :style="{ backgroundColor: settingItemBgColor, borderColor: settingItemBorderColor }"
+    >
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="main-label">长列表虚拟滚动</div>
+          <div class="sub-label">
+            歌曲数超过 120 时只渲染可视区，大幅降低内存占用；如遇显示异常可关闭
+          </div>
+        </div>
+        <n-switch v-model:value="settingsStore.performance.virtualSongList" />
+      </div>
+    </n-card>
+
     <div class="section-group-title">引导</div>
 
     <n-card

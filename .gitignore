@@ -34,3 +34,5 @@ docs
 .pnpm-store
 tmp-tags
 .native-junk-backup
+# 工具本地数据（工作记忆、预览页、性能基准脚本）
+/.workbuddy

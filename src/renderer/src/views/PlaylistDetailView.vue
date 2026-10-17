@@ -46,6 +46,10 @@
               <span class="tag">网易云导入</span>
               <span class="tag">在线歌单</span>
             </template>
+            <template v-else-if="playlist.source === 'plugin'">
+              <span class="tag">音源插件导入</span>
+              <span class="tag">插件歌单</span>
+            </template>
             <template v-else>
               <span class="tag">本地歌单</span>
               <span class="tag">自建</span>
@@ -59,7 +63,9 @@
                 playlist.description?.trim() ||
                 (playlist.source === 'netease'
                   ? `从网易云同步的歌单，包含 ${playlist.tracks.length} 首歌曲。`
-                  : `这是一个本地创建的歌单，包含了 ${playlist.tracks.length} 首歌曲。`)
+                  : playlist.source === 'plugin'
+                    ? `从音源插件导入的歌单，包含 ${playlist.tracks.length} 首歌曲。`
+                    : `这是一个本地创建的歌单，包含了 ${playlist.tracks.length} 首歌曲。`)
               }}
             </div>
           </div>
@@ -88,7 +94,7 @@
                 {{ isBatchMode ? '退出管理' : '批量管理' }}
               </n-button>
               <n-button
-                v-if="playlist.source === 'netease' && playlist.sourcePlaylistId"
+                v-if="canSyncPlaylist"
                 size="large"
                 secondary
                 round
@@ -176,13 +182,18 @@
 import { computed, ref, onMounted, watch, type CSSProperties } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NButton, NIcon, NEmpty, useMessage, useDialog, NCheckbox } from 'naive-ui'
-import { usePlaylistStore, type UserPlaylist } from '../stores/playlistStore'
+import { usePlaylistStore, type UserPlaylist, type PlaylistTrack } from '../stores/playlistStore'
 import { usePlayerStore } from '../stores/playerStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { usePlaylistTheme } from '../composables/usePlaylistTheme'
 import { fetchNeteasePlaylist } from '../composables/useNeteasePlaylist'
 import SongList from '../components/common/SongList.vue'
 import PlaylistSettingsModal from '../components/common/PlaylistSettingsModal.vue'
+import {
+  playlistTrackToPlayerSong,
+  isPlayablePlaylistTrack
+} from '../utils/playlistTrack'
+import { sourceTrackToPlaylistTrack, toCloneable } from '../utils/pluginSource'
 import defaultCover from '@renderer/assets/default-cover.png'
 
 
@@ -211,22 +222,84 @@ const layoutStyle = computed<'classic' | 'modern'>(() => {
 const showSettings = ref(false)
 const syncing = ref(false)
 
-// 重新同步：以网易云最新曲目覆盖本地歌单
+/** 是否支持「重新同步」：网易云导入或音源插件导入的歌单 */
+const canSyncPlaylist = computed(() => {
+  if (!playlist.value) return false
+  if (playlist.value.source === 'netease') return !!playlist.value.sourcePlaylistId
+  if (playlist.value.source === 'plugin') return !!playlist.value.sourcePluginId
+  return false
+})
+
+/** 拉取插件歌单最新曲目（分页终点或 20 页上限） */
+const fetchSourcePlaylistTracks = async (
+  pluginId: string,
+  ref: unknown
+): Promise<{ tracks: PlaylistTrack[]; meta?: any }> => {
+  const tracks: PlaylistTrack[] = []
+  let cursor: string | undefined
+  let meta: any
+  for (let page = 0; page < 20; page++) {
+    const res = await window.api.sources.playlistGet({
+      pluginId,
+      ref: toCloneable(ref),
+      cursor
+    })
+    if (!res?.success) throw new Error(res?.error || '获取歌单曲目失败')
+    if (res.meta && !meta) meta = res.meta
+    for (const t of res.items || []) tracks.push(sourceTrackToPlaylistTrack(t, pluginId))
+    if (!res.nextCursor) break
+    cursor = res.nextCursor
+  }
+  return { tracks, meta }
+}
+
+// 重新同步：以最新曲目覆盖本地歌单（网易云 / 音源插件两种来源）
 const handleSync = async (): Promise<void> => {
   if (!playlist.value || syncing.value) return
-  const sourcePlaylistId = playlist.value.sourcePlaylistId
-  if (!sourcePlaylistId) return
+  const target = playlist.value
 
   syncing.value = true
   const loadingMsg = message.loading('正在同步歌单…', { duration: 0 })
   try {
+    if (target.source === 'plugin') {
+      const pluginId = target.sourcePluginId
+      if (!pluginId) {
+        loadingMsg.destroy()
+        return
+      }
+      const { tracks, meta } = await fetchSourcePlaylistTracks(pluginId, target.sourcePlaylistRef)
+      if (!tracks.length) {
+        loadingMsg.destroy()
+        message.error('同步失败，原歌单可能已被删除')
+        return
+      }
+      const ok = playlistStore.syncPlaylistFromSource(target.id, {
+        name: meta?.name || target.name,
+        cover: meta?.coverUrl || target.cover,
+        description: meta?.description,
+        tracks
+      })
+      loadingMsg.destroy()
+      if (ok) {
+        message.success(`已同步为最新 ${tracks.length} 首`)
+      } else {
+        message.error('同步失败，请稍后重试')
+      }
+      return
+    }
+
+    const sourcePlaylistId = target.sourcePlaylistId
+    if (!sourcePlaylistId) {
+      loadingMsg.destroy()
+      return
+    }
     const payload = await fetchNeteasePlaylist(sourcePlaylistId)
     if (!payload) {
       loadingMsg.destroy()
       message.error('同步失败，原歌单可能已被删除')
       return
     }
-    const ok = playlistStore.syncPlaylistFromNetease(playlist.value.id, payload)
+    const ok = playlistStore.syncPlaylistFromNetease(target.id, payload)
     loadingMsg.destroy()
     if (ok) {
       message.success(`已同步为最新 ${payload.tracks.length} 首`)
@@ -378,20 +451,7 @@ function handleBatchDelete(): void {
       const removed = playlistStore.removeTracksFromPlaylist(playlistId, selectedIds.value)
       if (removed > 0) {
         if (shouldSyncPlayer && playlist.value) {
-          player.setPlaylist(
-            playlist.value.tracks.map((t) => ({
-              id: t.id,
-              title: t.title,
-              artist: t.artist,
-              album: t.album,
-              cover: t.cover || '',
-              durationMs: t.durationMs || 0,
-              filePath: t.filePath,
-              source: t.source,
-              sourceSongId: t.sourceSongId,
-              lyrics: ''
-            }))
-          )
+          player.setPlaylist(playlist.value.tracks.map((t) => playlistTrackToPlayerSong(t)))
         }
         message.success(`已移除 ${removed} 首歌曲`)
       }
@@ -412,25 +472,19 @@ const songsForList = computed(() => {
     picUrl: t.cover || defaultCover,
     filePath: t.filePath,
     source: t.source,
-    sourceSongId: t.sourceSongId
+    sourceSongId: t.sourceSongId,
+    pluginId: t.pluginId,
+    providerId: t.providerId,
+    sourceKey: t.sourceKey,
+    trackRef: t.trackRef,
+    requestHeaders: t.requestHeaders
   }))
 })
 
 const playAll = () => {
   if (!playlist.value || !playlist.value.tracks.length) return
   // 复用之前的播放逻辑
-  const list = playlist.value.tracks.map((t) => ({
-    id: t.id,
-    title: t.title,
-    artist: t.artist,
-    album: t.album,
-    cover: t.cover || '',
-    filePath: t.filePath,
-    durationMs: t.durationMs || 0,
-    source: t.source,
-    sourceSongId: t.sourceSongId,
-    lyrics: ''
-  }))
+  const list = playlist.value.tracks.map((t) => playlistTrackToPlayerSong(t))
   player.setPlaylist(list)
   if (list.length > 0) {
     player.setCurrentSong(list[0])
@@ -440,25 +494,15 @@ const playAll = () => {
 const handleSongClick = (song: any) => {
   if (!playlist.value) return
 
-  const list = playlist.value.tracks.map((t) => ({
-    id: t.id,
-    title: t.title,
-    artist: t.artist,
-    album: t.album,
-    cover: t.cover || '',
-    filePath: t.filePath,
-    durationMs: t.durationMs || 0,
-    source: t.source,
-    sourceSongId: t.sourceSongId,
-    lyrics: ''
-  }))
+  const list = playlist.value.tracks.map((t) => playlistTrackToPlayerSong(t))
 
   const target = list.find((s) => s.id === song.id)
   if (!target) return
 
-  // 在线音源（网易云）无本地文件路径，由 PlayerBar 依据 sourceSongId 解析在线地址
-  if (!target.filePath && target.source !== 'netease') {
-    message.error('找不到本地文件')
+  // 在线音源（网易云 / 音源插件）无本地文件路径，由 PlayerBar 重新解析在线地址
+  const track = playlist.value.tracks.find((t) => t.id === song.id)
+  if (!track || !isPlayablePlaylistTrack(track)) {
+    message.error('找不到可播放的音频地址')
     return
   }
 
@@ -470,6 +514,8 @@ const handleSongClick = (song: any) => {
     message.success('正在播放在线音频')
   } else if (/^https?:\/\//.test(target.filePath || '')) {
     message.success('正在播放在线音频')
+  } else if (!target.filePath) {
+    message.success('正在通过音源插件获取播放地址')
   } else {
     message.success('从本地缓存播放')
   }

@@ -1,5 +1,8 @@
 import { ipcMain, app, type IpcMainEvent } from 'electron'
-import { promises as fs } from 'fs'
+import { promises as fs, createWriteStream } from 'fs'
+import { Readable } from 'stream'
+import { pipeline } from 'stream/promises'
+import { tmpdir } from 'os'
 import { join } from 'path'
 import { createHash } from 'crypto'
 import { loadNativeDecoder } from '../services/nativeDecoder'
@@ -71,6 +74,12 @@ async function initAudioCache(): Promise<void> {
       try {
         const stat = await fs.stat(filePath)
         if (!stat.isFile()) continue
+        // 上次下载中断留下的 .part 半成品：直接清理。
+        // 若被索引进 cacheIndex（file.split('.')[0] 恰好等于 hash），会命中破损音频
+        if (file.endsWith('.part')) {
+          await fs.unlink(filePath).catch(() => {})
+          continue
+        }
         // 过期缓存直接删除
         if (now - stat.mtimeMs > maxAgeMs) {
           await fs.unlink(filePath)
@@ -133,44 +142,92 @@ async function evictCacheIfNeeded(): Promise<void> {
 }
 
 /** 下载远程音频并写入缓存目录，返回本地文件路径 */
-async function downloadOnlineAudio(url: string, hash: string): Promise<string> {
+async function downloadOnlineAudio(
+  url: string,
+  hash: string,
+  extraHeaders?: Record<string, string>
+): Promise<string> {
   await fs.mkdir(getAudioCacheDir(), { recursive: true })
-  // 附加登录态：网易云登录后返回的 VIP/高音质 CDN 地址需携带同一 Cookie 才能下载，
-  // 否则裸请求会 403 导致「在线音频加载失败」
-  const cookie = getActiveNeteaseCookie()
-  const headers: Record<string, string> = {}
-  if (cookie) headers['Cookie'] = cookie
-  headers['User-Agent'] =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-  headers['Referer'] = 'https://music.163.com'
+  const headers: Record<string, string> = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+  }
+  if (extraHeaders && Object.keys(extraHeaders).length > 0) {
+    // 插件/平台返回的请求头（防盗链、token 等）优先，UA 保留为兜底
+    Object.assign(headers, extraHeaders)
+  } else {
+    // 附加登录态：网易云登录后返回的 VIP/高音质 CDN 地址需携带同一 Cookie 才能下载，
+    // 否则裸请求会 403 导致「在线音频加载失败」
+    const cookie = getActiveNeteaseCookie()
+    if (cookie) headers['Cookie'] = cookie
+    headers['Referer'] = 'https://music.163.com'
+  }
   const resp = await fetch(url, { headers })
   if (!resp.ok) {
     throw new Error(`下载音频失败: HTTP ${resp.status}`)
   }
   const contentType = resp.headers.get('content-type')
   const ext = inferAudioExt(contentType, url)
-  let filePath = join(getAudioCacheDir(), `${hash}.${ext}`)
-  const buf = Buffer.from(await resp.arrayBuffer())
-  if (buf.length === 0) {
-    throw new Error('下载音频失败: 内容为空')
-  }
-  // 写入缓存文件。Windows EPERM 通常由防病毒扫描/只读属性引起，
-  // 先删后写重试一次；仍失败则回退到系统临时目录，避免播放中断
-  try {
-    await fs.writeFile(filePath, buf)
-  } catch (writeErr: any) {
-    if (writeErr.code === 'EPERM') {
+  const fileName = `${hash}.${ext}`
+  let filePath = join(getAudioCacheDir(), fileName)
+
+  // 流式落盘：整段音频不进内存。
+  // 旧实现 `Buffer.from(await resp.arrayBuffer())` 会同时持有 ArrayBuffer 与 Buffer，
+  // 无损单曲（80–150MB）峰值可达 2× 文件大小。
+  // 先写 .part 再 rename，保证不会留下「半截音频」被后续当作有效缓存命中。
+  if (resp.body) {
+    const partPath = `${filePath}.part`
+    try {
+      await pipeline(Readable.fromWeb(resp.body as any), createWriteStream(partPath))
+    } catch (streamErr) {
+      await fs.unlink(partPath).catch(() => {})
+      throw streamErr
+    }
+    const partStat = await fs.stat(partPath).catch(() => null)
+    if (!partStat || partStat.size === 0) {
+      await fs.unlink(partPath).catch(() => {})
+      throw new Error('下载音频失败: 内容为空')
+    }
+    try {
+      // Windows 上目标已存在时 rename 会失败（EPERM/EEXIST），先删旧缓存
       await fs.unlink(filePath).catch(() => {})
+      await fs.rename(partPath, filePath)
+    } catch (renameErr: any) {
+      // 目标文件被防病毒/播放器占用：退到系统临时目录，避免播放中断
+      const tempDir = join(tmpdir(), 'such-music-audio-cache')
+      await fs.mkdir(tempDir, { recursive: true })
+      const tempPath = join(tempDir, fileName)
+      await fs.unlink(tempPath).catch(() => {})
       try {
-        await fs.writeFile(filePath, buf)
-      } catch {
-        const tempDir = join(require('os').tmpdir(), 'such-music-audio-cache')
-        await fs.mkdir(tempDir, { recursive: true })
-        filePath = join(tempDir, `${hash}.${ext}`)
-        await fs.writeFile(filePath, buf)
+        await fs.rename(partPath, tempPath)
+      } catch (moveErr) {
+        await fs.unlink(partPath).catch(() => {})
+        throw moveErr ?? renameErr
       }
-    } else {
-      throw writeErr
+      filePath = tempPath
+    }
+  } else {
+    // 极端兜底（响应体不可用）：退回整段读取
+    const buf = Buffer.from(await resp.arrayBuffer())
+    if (buf.length === 0) {
+      throw new Error('下载音频失败: 内容为空')
+    }
+    try {
+      await fs.writeFile(filePath, buf)
+    } catch (writeErr: any) {
+      if (writeErr.code === 'EPERM') {
+        await fs.unlink(filePath).catch(() => {})
+        try {
+          await fs.writeFile(filePath, buf)
+        } catch {
+          const tempDir = join(tmpdir(), 'such-music-audio-cache')
+          await fs.mkdir(tempDir, { recursive: true })
+          filePath = join(tempDir, fileName)
+          await fs.writeFile(filePath, buf)
+        }
+      } else {
+        throw writeErr
+      }
     }
   }
   cacheIndex.set(hash, filePath)
@@ -205,8 +262,11 @@ function inferAudioExt(contentType: string | null, url: string): string {
 }
 
 export function registerAudioHandlers(): void {
-  // 初始化本地音频解码 IPC，调用 native/symphonia_napi_decoder.node
-  const { decode_audio_to_pcm, decode_audio_stream } = loadNativeDecoder()
+  // native 解码器改为惰性加载：注册 IPC 时不再 dlopen symphonia 解码器
+  //（约 2MB 常驻映射），只有真正走到解码通道时才加载
+  let decoder: ReturnType<typeof loadNativeDecoder> | null = null
+  const getDecoder = (): ReturnType<typeof loadNativeDecoder> =>
+    (decoder ??= loadNativeDecoder())
 
   // 先加载自定义缓存目录配置，再构建缓存索引（异步，不阻塞启动）
   loadCustomCacheDir()
@@ -322,14 +382,9 @@ export function registerAudioHandlers(): void {
     return { success: true, removedCount, removedSize }
   })
 
-  ipcMain.handle('audio:decode', async (_event, filePath: string) => {
-    // 调用本地解码器，将路径交给 Rust NAPI 插件处理
-    const result = await decode_audio_to_pcm(filePath)
-    return result
-  })
-
   // 流式解码：一边解码一边通过 IPC 推送音频数据块
   ipcMain.on('audio:decode-stream:start', (event, filePath: string) => {
+    const { decode_audio_stream } = getDecoder()
     if (!decode_audio_stream) {
       event.sender.send('audio:decode-stream:error', '当前 native 模块不支持流式解码')
       return
@@ -396,18 +451,15 @@ export function registerAudioHandlers(): void {
     }
   })
 
-  // 读取本地音频文件为二进制数据，提供给渲染进程创建 Blob URL
-  ipcMain.handle('audio:load-file', async (_event, filePath: string) => {
-    const data = await fs.readFile(filePath)
-    // 仅返回底层 ArrayBuffer，便于在渲染进程直接创建 Blob
-    return data.buffer
-  })
-
   // 解析在线音频：优先返回本地缓存（命中则跳过网络下载，加快播放速度）；
   // 未命中时下载并写入缓存目录持久化复用。返回 { path, cached } 便于调用方区分
   ipcMain.handle(
     'audio:get-online-audio',
-    async (_event, url: string): Promise<{ path: string; cached: boolean }> => {
+    async (
+      _event,
+      url: string,
+      options?: { headers?: Record<string, string> }
+    ): Promise<{ path: string; cached: boolean }> => {
       if (!url || !/^https?:\/\//i.test(url)) {
         throw new Error(`无效的音频地址: ${url}`)
       }
@@ -439,7 +491,7 @@ export function registerAudioHandlers(): void {
         return { path, cached: true }
       }
 
-      const downloadPromise = downloadOnlineAudio(url, hash).finally(() => {
+      const downloadPromise = downloadOnlineAudio(url, hash, options?.headers).finally(() => {
         pendingDownloads.delete(url)
       })
       pendingDownloads.set(url, downloadPromise)
