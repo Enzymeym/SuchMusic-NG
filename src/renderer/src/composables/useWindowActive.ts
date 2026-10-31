@@ -1,4 +1,4 @@
-import { readonly, ref } from 'vue'
+import { computed, readonly, ref } from 'vue'
 
 /**
  * 窗口是否处于可见（非最小化/未被隐藏）状态。
@@ -33,4 +33,16 @@ function bindWindowActiveListener(): void {
 export function useWindowActive(): Readonly<typeof isWindowActive> {
   bindWindowActiveListener()
   return readonly(isWindowActive)
+}
+
+/**
+ * 应用级「可渲染」总开关。
+ *
+ * 与 `useWindowActive()` 同源，但以 `computed` 暴露，便于在模板里直接消费
+ * 或在 `watch` 中作为统一降档信号。窗口不可见时应停止一切逐帧动画
+ * （背景渲染、歌词弹簧动画、频谱绘制），只保留音频输出与进度同步。
+ */
+export function useAppRenderable() {
+  const active = useWindowActive()
+  return computed(() => active.value)
 }

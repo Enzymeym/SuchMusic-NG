@@ -719,15 +719,35 @@ export function useAudioEngine() {
       return false;
     }
 
+    // 已有引擎则复用：SoundEffectsModal 常驻挂载，启动时会再走一次 initialize。
+    // 若每次都 create，主进程会留下孤儿引擎（多一份环形缓冲 + FFT 分析器）。
+    if (api.getEngineId?.()) {
+      try {
+        state.isInitialized = true;
+        await refreshAllParams();
+        const savedState = loadEngineState();
+        if (savedState) {
+          await applySavedState(savedState);
+        }
+        startGainReductionPolling();
+        console.log('[useAudioEngine] 复用已有引擎');
+        return true;
+      } catch (error) {
+        console.error('[useAudioEngine] 复用已有引擎失败:', error);
+      }
+    }
+
     try {
       const result = await api.create({
         sampleRate: 44100,
         bufferSize: 512,
         channels: 2,
-        enableEq: true,
-        enableCompressor: true,
+        // 与主进程 DSP_DEFAULTS 保持一致：EQ / 压缩器默认关闭（纯音质修饰、CPU 开销大），
+        // 限制器保留防削波。用户显式保存过开关时由 applySavedState 覆盖。
+        enableEq: false,
+        enableCompressor: false,
         enableLimiter: true,
-        enableLoudness: true
+        enableLoudness: false
       });
 
       // 检查结果是否为对象且有 success 属性
@@ -840,6 +860,9 @@ export function useAudioEngine() {
 
   /**
    * 刷新增益减少量
+   *
+   * WASAPI 模式下每次刷新是两次 IPC 往返，200ms 轮询就是 10 次/秒。压缩器与
+   * 限制器都关闭时增益衰减恒为 0，没必要占用 IPC，直接置 0 跳过。
    */
   async function refreshGainReductions() {
     if (isWebAudioMode()) {
@@ -848,12 +871,17 @@ export function useAudioEngine() {
       return
     }
     if (!api || !state.isInitialized) return;
+    if (!compressorEnabled.value && !limiterEnabled.value) {
+      compressorGR.value = 0;
+      limiterGR.value = 0;
+      return;
+    }
 
     try {
       compressorGR.value = await api.getCompressorGainReduction();
       limiterGR.value = await api.getLimiterGainReduction();
     } catch (error) {
-      // 忽略错误
+      // 忽略错误：引擎被回收等时序问题不应影响 UI
     }
   }
 

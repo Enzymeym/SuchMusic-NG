@@ -201,6 +201,7 @@ watch([hidePassedLines, appleLyrics], ([enabled]) => {
         :font-size="fontSize"
         :line-gap="lineGap"
         :active-color="activeLineColor"
+        :playing="playerStore.isPlaying && windowActive"
       />
       <AMLLLyricPlayer
         v-else

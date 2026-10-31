@@ -1,17 +1,24 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { NCard, NSwitch, NSelect, NSlider, NAlert, NButton, NProgress, NScrollbar, useMessage } from 'naive-ui'
+import { NCard, NSwitch, NSelect, NSlider, NAlert } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { usePlayerStore } from '../../../stores/playerStore'
 import { useVolumeBalanceStore } from '../../../stores/volumeBalanceStore'
 import { useLocalMusicStore } from '../../../stores/localMusicStore'
+import { isWebAudioMode } from '../../../utils/audioOutputModeManager'
 
 // 使用设置仓库，驱动播放设置选项
 const settingsStore = useSettingsStore()
 const playerStore = usePlayerStore()
 const volumeBalance = useVolumeBalanceStore()
 const localMusicStore = useLocalMusicStore()
-const message = useMessage()
+
+/**
+ * 智能过渡是否可用：仅 Web Audio 输出支持。
+ * WASAPI 输出没有双音源交叉淡化能力，切歌一律硬切，因此这里禁用开关并给出说明，
+ * 避免用户开了开关却完全听不到过渡（也避免误以为功能失效）。
+ */
+const transitionAvailable = computed(() => isWebAudioMode())
 
 // 过渡效果类型选项（两首歌之间统一为同时淡入淡出的交叉淡化）
 const transitionTypeOptions = [
@@ -23,13 +30,6 @@ const transitionTypeOptions = [
 const curveOptions = [
   { label: '等功率（推荐）', value: 'equalPower' },
   { label: '线性', value: 'linear' }
-]
-
-// 音量平衡：最大增益范围选项
-const gainRangeOptions = [
-  { label: '6 dB（温和）', value: 6 },
-  { label: '12 dB（标准）', value: 12 },
-  { label: '18 dB（激进）', value: 18 }
 ]
 
 // 本地歌曲（含有效本地文件路径，排除在线 URL）
@@ -44,39 +44,19 @@ const allAnalyzed = computed(
   () => totalLocalCount.value > 0 && analyzedCount.value >= totalLocalCount.value
 )
 
-// 分析进度百分比
-const analyzePercent = computed(() => {
-  const total = volumeBalance.progress.total
-  if (!total) return 0
-  return Math.round((volumeBalance.progress.done / total) * 100)
-})
-
-// 需衰减最多的前 8 首（增益为负，升序）
-const topAttenuated = computed(() => {
-  const entries: { name: string; artist: string; gainDb: number }[] = []
-  for (const song of localSongsWithPath.value) {
-    const r = song.filePath ? volumeBalance.results[song.filePath] : undefined
-    if (r && r.gainDb < 0) {
-      entries.push({
-        name: song.name || '',
-        artist: song.ar?.[0]?.name || '',
-        gainDb: r.gainDb
-      })
-    }
+/**
+ * 后台分析状态文案：音量平衡已改为全自动（新增歌曲与历史未分析歌曲都由后台补齐），
+ * 因此这里只作为进度提示，不再提供任何手动操作入口。
+ */
+const analyzeStatus = computed(() => {
+  if (volumeBalance.analyzing) {
+    const { done, total } = volumeBalance.progress
+    return `后台分析中 ${done} / ${total} 首，不影响正常播放`
   }
-  entries.sort((a, b) => a.gainDb - b.gainDb)
-  return entries.slice(0, 8)
+  if (totalLocalCount.value === 0) return '音乐库暂无本地歌曲'
+  if (allAnalyzed.value) return `已分析全部 ${totalLocalCount.value} 首`
+  return `已分析 ${analyzedCount.value} / ${totalLocalCount.value} 首，剩余歌曲会在后台自动分析`
 })
-
-const startAnalyze = async () => {
-  const result = await volumeBalance.analyzeLocalSongs(localSongsWithPath.value)
-  if (!result) return
-  if (result.canceled) {
-    message.info(`已取消分析，完成 ${result.done} 首`)
-  } else if (result.done > 0) {
-    message.success(`分析完成：${result.done} 首成功${result.failed ? `，${result.failed} 首失败` : ''}`)
-  }
-}
 
 // 当前输出模式是否支持完整智能过渡（仅 Web Audio 支持交叉淡化/智能过渡）
 const isFullTransitionSupported = computed(
@@ -134,11 +114,18 @@ const props = defineProps<{
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px">
           <n-switch
             v-model:value="playerStore.transitionEnabled"
+            :disabled="!transitionAvailable"
             @update:value="playerStore.setTransitionEnabled($event)"
           />
-          <span class="time-text">{{ playerStore.transitionEnabled ? '已启用' : '已关闭' }}</span>
+          <span class="time-text">
+            {{ !transitionAvailable ? '不支持' : playerStore.transitionEnabled ? '已启用' : '已关闭' }}
+          </span>
         </div>
-        <div v-if="playerStore.transitionEnabled" style="width: 100%">
+        <n-alert v-if="!transitionAvailable" type="info" :bordered="false" style="width: 100%">
+          当前为 WASAPI 输出模式，音频引擎不支持双音源交叉淡化，切歌会直接硬切。
+          如需智能过渡，请在「播放设置 → 音频输出模式」中切换为 Web Audio。
+        </n-alert>
+        <div v-if="transitionAvailable && playerStore.transitionEnabled" style="width: 100%">
           <div class="setting-row">
             <div class="setting-label">
               <div class="main-label">过渡效果</div>
@@ -236,105 +223,21 @@ const props = defineProps<{
         borderColor: props.settingItemBorderColor
       }"
     >
-      <div class="setting-row" style="flex-direction: column; align-items: flex-start; gap: 12px">
+      <div class="setting-row">
         <div class="setting-label">
-          <div class="main-label">音量平衡（本地分析）</div>
+          <div class="main-label">音量平衡</div>
           <div class="sub-label">
-            基于 EBU R128 标准分析本地音乐响度（LUFS），播放时自动对响度过大的歌曲应用衰减增益，
-            将每首歌平衡到目标响度，提升连续播放的听感一致性
+            基于 EBU R128 在后台自动分析本地音乐响度，播放时对响度过大的歌曲自动衰减，
+            让连续播放的音量更一致。打开后无需手动操作，新增歌曲会自动加入分析队列。
           </div>
         </div>
-        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px">
-          <n-switch
-            v-model:value="volumeBalance.enabled"
-            @update:value="volumeBalance.setEnabled($event)"
-          />
-          <span class="time-text">{{ volumeBalance.enabled ? '已启用' : '已关闭' }}</span>
-        </div>
-        <template v-if="volumeBalance.enabled">
-          <div class="setting-row">
-            <div class="setting-label">
-              <div class="main-label">目标响度</div>
-              <div class="sub-label">分析后的歌曲将被归一化到该响度（LUFS）</div>
-            </div>
-            <div style="display: flex; align-items: center; gap: 10px">
-              <n-slider
-                v-model:value="volumeBalance.targetLufs"
-                :min="-23"
-                :max="-11"
-                :step="1"
-                style="width: 180px"
-                @update:value="volumeBalance.setTargetLufs($event)"
-              />
-              <span class="time-text" style="min-width: 62px; margin-right: 0">
-                {{ volumeBalance.targetLufs }} LUFS
-              </span>
-            </div>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-label">
-              <div class="main-label">最大增益范围</div>
-              <div class="sub-label">限制补偿幅度，避免对极安静歌曲过度放大</div>
-            </div>
-            <n-select
-              v-model:value="volumeBalance.maxGainDb"
-              :options="gainRangeOptions"
-              style="width: 180px"
-              @update:value="volumeBalance.setMaxGainDb($event)"
-            />
-          </div>
-
-          <!-- 分析区域 -->
-          <div class="volume-balance-analyze">
-            <div class="time-text">已分析 {{ analyzedCount }} 首 / 共 {{ totalLocalCount }} 首</div>
-            <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px">
-              <n-button
-                size="small"
-                type="primary"
-                :disabled="volumeBalance.analyzing || allAnalyzed || totalLocalCount === 0"
-                @click="startAnalyze"
-              >
-                {{ volumeBalance.analyzing ? '分析中...' : allAnalyzed ? '已全部分析' : '开始分析' }}
-              </n-button>
-              <n-button v-if="volumeBalance.analyzing" size="small" @click="volumeBalance.cancel()">
-                取消
-              </n-button>
-              <n-button
-                size="small"
-                :disabled="volumeBalance.analyzing || analyzedCount === 0"
-                @click="volumeBalance.clearResults()"
-              >
-                清除结果
-              </n-button>
-            </div>
-            <div v-if="volumeBalance.analyzing" style="margin-top: 10px">
-              <n-progress
-                type="line"
-                :percentage="analyzePercent"
-                :show-indicator="true"
-                :height="6"
-              />
-              <div class="time-text" style="margin-top: 6px">
-                {{ volumeBalance.progress.done }} / {{ volumeBalance.progress.total }} ·
-                {{ volumeBalance.progress.currentName }}
-              </div>
-            </div>
-          </div>
-
-          <!-- 结果预览：需衰减最多的歌曲 -->
-          <div v-if="topAttenuated.length" class="volume-balance-results">
-            <div class="time-text" style="margin-bottom: 6px">需衰减最多的歌曲</div>
-            <n-scrollbar class="volume-balance-result-list">
-              <div class="volume-balance-result-item" v-for="(item, idx) in topAttenuated" :key="item.name + item.artist + idx">
-                <span class="volume-balance-result-name">
-                  {{ item.name }}<template v-if="item.artist"> - {{ item.artist }}</template>
-                </span>
-                <span class="volume-balance-result-gain">{{ item.gainDb.toFixed(1) }} dB</span>
-              </div>
-            </n-scrollbar>
-          </div>
-        </template>
+        <n-switch
+          v-model:value="volumeBalance.enabled"
+          @update:value="volumeBalance.setEnabled($event)"
+        />
+      </div>
+      <div v-if="volumeBalance.enabled" class="volume-balance-status time-text">
+        {{ analyzeStatus }}
       </div>
     </n-card>
   </div>
@@ -389,41 +292,10 @@ const props = defineProps<{
   opacity: 0.75;
 }
 
-/* 音量平衡：结果预览列表 */
-.volume-balance-results {
-  width: 100%;
-  margin-top: 4px;
-}
-
-.volume-balance-result-list {
-  max-height: 180px;
-  overflow-y: auto;
-  border: 1px solid var(--settings-border-color, rgba(128, 128, 128, 0.2));
-  border-radius: 8px;
-  padding: 4px 8px;
-}
-
-.volume-balance-result-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 4px 0;
-  font-size: 12px;
-}
-
-.volume-balance-result-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--settings-subtext-color);
-}
-
-.volume-balance-result-gain {
-  flex-shrink: 0;
+/* 音量平衡：后台分析进度提示（只读文案，不提供操作） */
+.volume-balance-status {
+  margin-top: 8px;
   font-variant-numeric: tabular-nums;
-  color: #d03050;
+  opacity: 0.75;
 }
 </style>

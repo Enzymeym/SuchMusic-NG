@@ -199,8 +199,14 @@ export function useSystemMediaControl(): void {
         }
         break
       case 'setVolume':
-        // value 为 0..1 音量
-        if (typeof value === 'number') player.setVolume(value)
+        // value 为 0..1 音量。
+        // 必须同时下发给音频引擎：只改 store 的话，系统媒体控制台（音量键 / 媒体浮层）
+        // 调音量只会动 UI，实际响度不变，表现为「音量调节失效」。
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          const v = Math.min(1, Math.max(0, value))
+          player.setVolume(v)
+          void audioEngine.setVolume(v)
+        }
         break
     }
   }

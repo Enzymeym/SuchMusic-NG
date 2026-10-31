@@ -23,6 +23,7 @@ import {
 } from '../../audio/web-audio-dsp'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { usePlayerStore } from '../../stores/playerStore'
+import { audioEngine as audioOutputEngine } from '../../audio/audio-engine'
 
 const themeVars = useThemeVars()
 const message = useMessage()
@@ -742,6 +743,9 @@ function restoreVolumeMemory() {
     const v = Number(raw)
     if (Number.isFinite(v) && v >= 0 && v <= 1) {
       playerStore.setVolume(v)
+      // 必须同步下发到音频引擎：只写 store 会让音量条显示恢复值、
+      // 实际响度仍是上一次的值（听起来就像「音量调节没生效」）
+      void audioOutputEngine.setVolume(v)
     }
   } catch {
     /* ignore */
@@ -828,7 +832,9 @@ onMounted(async () => {
 onUnmounted(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('resize', handleResize)
-  audioEngine.destroy()
+  // 不要在这里销毁音频引擎：引擎是全局共享的播放后端，音效面板只是它的一个视图。
+  // 之前关闭/重建面板会 destroy 引擎，导致后续播放报「音频引擎未初始化」并中断当前播放。
+  // 引擎由主进程在应用退出时统一回收（audioEngineService.emergencyStopAll）。
 })
 </script>
 

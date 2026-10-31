@@ -22,6 +22,7 @@ import SplashScreen from './components/common/SplashScreen.vue'
 import { useSetupWizardStore } from './stores/setupWizardStore'
 import { audioEngine } from './audio/audio-engine'
 import { getTransitionController } from './audio/transition-controller'
+import { useVolumeBalanceAutoAnalyze } from './composables/useVolumeBalanceAutoAnalyze'
 import { debounce } from './utils/performance'
 
 const UpdateNotification = defineAsyncComponent(
@@ -79,6 +80,9 @@ playlistStore.loadFromStorage()
 
 // 启动时自动扫描本地音乐，确保专辑/歌手页面数据完整
 localMusicStore.scanMusic().catch(() => { /* 静默失败，用户可手动扫描 */ })
+
+// 音量平衡：曲库新增 / 历史未分析歌曲在后台自动完成响度分析（仅主窗口）
+if (!isAuxWindow.value) useVolumeBalanceAutoAnalyze()
 
 // 开屏动画状态控制
 const appReady = ref(false)

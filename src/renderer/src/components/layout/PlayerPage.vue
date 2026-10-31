@@ -71,6 +71,75 @@ watch(
   { immediate: true }
 )
 
+/**
+ * 播放页背景预模糊缩略图。
+ *
+ * 原先 `.bg-image` 直接对全屏大图做 CSS `filter: blur(100px)`：每帧都要由 GPU
+ * 对 ~200 万像素做一次大半径高斯卷积，是播放页最贵的属性之一。
+ * 这里改为先在 ~256px 的小画布上把模糊「烘焙」进图片，再让 CSS 把它放大铺满。
+ * 模糊半径按画布宽度的 5% 计算（≈ 原 1920 宽下 100px 的视觉等效），
+ * 卷积成本降到约 1/30，且之后是完全静态的位图，不再占用 GPU 合成开销。
+ *
+ * 跨域封面（在线 CDN 未返回 CORS 头）会使 canvas 被污染导致 toDataURL 抛异常，
+ * 此时返回空串，模板回退到原图 + CSS 模糊，保证观感不丢。
+ */
+const blurredBgUrl = ref('')
+
+async function bakeBlurredBackground(src: string): Promise<string> {
+  if (!src) return ''
+
+  const img = new Image()
+  img.crossOrigin = 'anonymous'
+  img.src = src
+  try {
+    if (typeof img.decode === 'function') {
+      await img.decode()
+    } else {
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve()
+        img.onerror = () => reject(new Error('image load failed'))
+      })
+    }
+  } catch {
+    return ''
+  }
+  if (!img.naturalWidth || !img.naturalHeight) return ''
+
+  // 缩到最长边 256px，保留原始宽高比
+  const MAX_EDGE = 256
+  const scale = Math.min(1, MAX_EDGE / Math.max(img.naturalWidth, img.naturalHeight))
+  const w = Math.max(1, Math.round(img.naturalWidth * scale))
+  const h = Math.max(1, Math.round(img.naturalHeight * scale))
+
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return ''
+
+  // 外扩 20% 绘制，避免模糊后边缘出现透明羽化
+  const over = Math.round(w * 0.2)
+  const blurPx = Math.max(2, w * 0.05)
+  ctx.filter = `blur(${blurPx.toFixed(1)}px) brightness(0.6)`
+  ctx.drawImage(img, -over / 2, -over / 2, w + over, h + over)
+
+  try {
+    return canvas.toDataURL('image/jpeg', 0.7)
+  } catch {
+    // canvas 被跨域图片污染
+    return ''
+  }
+}
+
+watch(
+  () => [player.isPlayerPageShown, player.currentSong?.cover] as const,
+  async ([shown, cover]) => {
+    if (!shown) return
+    blurredBgUrl.value = await bakeBlurredBackground(cover || defaultCover)
+  },
+  { immediate: true }
+)
+
 const {
   isControlsVisible,
   isFullscreen,
@@ -418,7 +487,8 @@ watch(
         @touchend="handleTouchEnd"
       >
         <!-- Background Layer：根据设置切换旧背景与 AMLL 动态背景 -->
-        <div class="player-bg">
+        <!-- 窗口隐藏时整层 display:none：静态模糊背景同样占用一个合成层 -->
+        <div v-show="windowActive" class="player-bg">
           <template v-if="settingsStore.playback.playerBackgroundStyle === 'amll'">
             <BackgroundRender
               :album="player.currentSong?.cover || defaultCover"
@@ -430,7 +500,11 @@ watch(
             <div class="bg-mask"></div>
           </template>
           <template v-else>
-            <img :src="player.currentSong?.cover || defaultCover" class="bg-image" />
+            <img
+              :src="blurredBgUrl || player.currentSong?.cover || defaultCover"
+              class="bg-image"
+              :class="{ 'bg-image--fallback': !blurredBgUrl }"
+            />
             <div class="bg-mask"></div>
           </template>
         </div>

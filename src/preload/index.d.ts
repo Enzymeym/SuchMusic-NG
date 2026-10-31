@@ -106,6 +106,7 @@ declare global {
         ) => Promise<{
           success: boolean
           engineId?: string
+          deviceId?: string | null
           deviceName?: string
           mode?: string
           error?: string

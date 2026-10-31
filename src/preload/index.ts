@@ -85,7 +85,44 @@ interface VersionInfo {
 class AudioEngineManager {
   private currentEngineId: string | null = null
 
+  /** 正在进行的创建请求（并发调用共享同一个 Promise，避免创建出多个引擎） */
+  private creating: Promise<{ success: boolean; engineId?: string; error?: string }> | null = null
+
+  /**
+   * 自动创建引擎时使用的默认配置
+   * 与 useAudioEngine.initialize() 保持一致：EQ / 压缩器关闭（CPU 开销大），
+   * 限制器保留防削波。
+   */
+  private static readonly DEFAULT_CONFIG: AudioEngineConfig = {
+    sampleRate: 44100,
+    bufferSize: 512,
+    channels: 2,
+    enableEq: false,
+    enableCompressor: false,
+    enableLimiter: true,
+    enableLoudness: false
+  }
+
   async create(
+    config?: AudioEngineConfig
+  ): Promise<{ success: boolean; engineId?: string; error?: string }> {
+    // 已创建则复用，避免重复创建导致主进程留下孤儿引擎
+    if (this.currentEngineId) {
+      return { success: true, engineId: this.currentEngineId }
+    }
+    // 并发创建（如两个音效面板同时初始化）共享同一个请求
+    if (this.creating) return this.creating
+
+    const pending = this.doCreate(config)
+    this.creating = pending
+    try {
+      return await pending
+    } finally {
+      this.creating = null
+    }
+  }
+
+  private async doCreate(
     config?: AudioEngineConfig
   ): Promise<{ success: boolean; engineId?: string; error?: string }> {
     const result = await ipcRenderer.invoke('audio-engine:create', config)
@@ -109,11 +146,21 @@ class AudioEngineManager {
     return result.success
   }
 
-  private ensureEngineId(): string {
-    if (!this.currentEngineId) {
-      throw new Error('音频引擎未初始化，请先调用 create()')
-    }
-    return this.currentEngineId
+  /**
+   * 获取可用的引擎 ID，未初始化时自动创建。
+   *
+   * 历史实现直接抛错「音频引擎未初始化，请先调用 create()」：应用启动时
+   * PlayerBar 恢复上次歌曲的 load 往往早于音效面板的 initialize（或引擎被
+   * destroy 过），于是首次播放必然弹出该错误。播放类接口本身都是异步的，
+   * 这里改为按需创建即可自愈，创建失败时再抛出真实原因。
+   */
+  private async ensureEngineId(): Promise<string> {
+    if (this.currentEngineId) return this.currentEngineId
+
+    const result = await this.create(AudioEngineManager.DEFAULT_CONFIG)
+    if (result.success && result.engineId) return result.engineId
+
+    throw new Error(`音频引擎初始化失败: ${result.error || '未知错误'}`)
   }
 
   // === 播放控制 ===
@@ -121,49 +168,49 @@ class AudioEngineManager {
   async load(
     filePath: string
   ): Promise<{ success: boolean; trackInfo?: TrackInfo; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:load', this.ensureEngineId(), filePath)
+    return ipcRenderer.invoke('audio-engine:load', await this.ensureEngineId(), filePath)
   }
 
   async play(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:play', this.ensureEngineId())
+    return ipcRenderer.invoke('audio-engine:play', await this.ensureEngineId())
   }
 
   async pause(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:pause', this.ensureEngineId())
+    return ipcRenderer.invoke('audio-engine:pause', await this.ensureEngineId())
   }
 
   async stop(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:stop', this.ensureEngineId())
+    return ipcRenderer.invoke('audio-engine:stop', await this.ensureEngineId())
   }
 
   async seek(positionMs: number): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:seek', this.ensureEngineId(), positionMs)
+    return ipcRenderer.invoke('audio-engine:seek', await this.ensureEngineId(), positionMs)
   }
 
   async seekAndPlay(positionMs: number): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:seek-and-play', this.ensureEngineId(), positionMs)
+    return ipcRenderer.invoke('audio-engine:seek-and-play', await this.ensureEngineId(), positionMs)
   }
 
   async setVolume(volume: number): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-volume', this.ensureEngineId(), volume)
+    return ipcRenderer.invoke('audio-engine:set-volume', await this.ensureEngineId(), volume)
   }
 
   async getVolume(): Promise<number> {
-    const result = await ipcRenderer.invoke('audio-engine:get-volume', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-volume', await this.ensureEngineId())
     return result.volume ?? 1.0
   }
 
   async setLoopMode(mode: LoopMode): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-loop-mode', this.ensureEngineId(), mode)
+    return ipcRenderer.invoke('audio-engine:set-loop-mode', await this.ensureEngineId(), mode)
   }
 
   async getLoopMode(): Promise<LoopMode> {
-    const result = await ipcRenderer.invoke('audio-engine:get-loop-mode', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-loop-mode', await this.ensureEngineId())
     return result.mode ?? 'none'
   }
 
   async getPosition(): Promise<number> {
-    const result = await ipcRenderer.invoke('audio-engine:get-position', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-position', await this.ensureEngineId())
     return result.position ?? 0
   }
 
@@ -176,23 +223,23 @@ class AudioEngineManager {
   }
 
   async isPlaying(): Promise<boolean> {
-    const result = await ipcRenderer.invoke('audio-engine:is-playing', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:is-playing', await this.ensureEngineId())
     return result.isPlaying ?? false
   }
 
   async getState(): Promise<EngineState> {
-    const result = await ipcRenderer.invoke('audio-engine:get-state', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-state', await this.ensureEngineId())
     return result.state ?? 'idle'
   }
 
   // === EQ 控制 ===
 
   async setEqEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-eq-enabled', this.ensureEngineId(), enabled)
+    return ipcRenderer.invoke('audio-engine:set-eq-enabled', await this.ensureEngineId(), enabled)
   }
 
   async isEqEnabled(): Promise<boolean> {
-    const result = await ipcRenderer.invoke('audio-engine:is-eq-enabled', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:is-eq-enabled', await this.ensureEngineId())
     return result.enabled ?? true
   }
 
@@ -202,7 +249,7 @@ class AudioEngineManager {
   ): Promise<{ success: boolean; error?: string }> {
     return ipcRenderer.invoke(
       'audio-engine:set-eq-band',
-      this.ensureEngineId(),
+      await this.ensureEngineId(),
       bandIndex,
       settings
     )
@@ -211,48 +258,48 @@ class AudioEngineManager {
   async getEqBand(bandIndex: number): Promise<EqBandSettings | null> {
     const result = await ipcRenderer.invoke(
       'audio-engine:get-eq-band',
-      this.ensureEngineId(),
+      await this.ensureEngineId(),
       bandIndex
     )
     return result.band ?? null
   }
 
   async getEqBands(): Promise<EqBandSettings[]> {
-    const result = await ipcRenderer.invoke('audio-engine:get-eq-bands', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-eq-bands', await this.ensureEngineId())
     return result.bands ?? []
   }
 
   async setEqGains(gains: number[]): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-eq-gains', this.ensureEngineId(), gains)
+    return ipcRenderer.invoke('audio-engine:set-eq-gains', await this.ensureEngineId(), gains)
   }
 
   // === 压缩器控制 ===
 
   async setCompressorEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-compressor-enabled', this.ensureEngineId(), enabled)
+    return ipcRenderer.invoke('audio-engine:set-compressor-enabled', await this.ensureEngineId(), enabled)
   }
 
   async isCompressorEnabled(): Promise<boolean> {
     const result = await ipcRenderer.invoke(
       'audio-engine:is-compressor-enabled',
-      this.ensureEngineId()
+      await this.ensureEngineId()
     )
     return result.enabled ?? true
   }
 
   async setCompressor(params: CompressorParams): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-compressor', this.ensureEngineId(), params)
+    return ipcRenderer.invoke('audio-engine:set-compressor', await this.ensureEngineId(), params)
   }
 
   async getCompressor(): Promise<CompressorParams> {
-    const result = await ipcRenderer.invoke('audio-engine:get-compressor', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-compressor', await this.ensureEngineId())
     return result.params ?? { thresholdDb: -24, ratio: 4, attackMs: 10, releaseMs: 100, kneeDb: 6 }
   }
 
   async getCompressorGainReduction(): Promise<number> {
     const result = await ipcRenderer.invoke(
       'audio-engine:get-compressor-gain-reduction',
-      this.ensureEngineId()
+      await this.ensureEngineId()
     )
     return result.gainReduction ?? 0
   }
@@ -260,30 +307,30 @@ class AudioEngineManager {
   // === 限制器控制 ===
 
   async setLimiterEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-limiter-enabled', this.ensureEngineId(), enabled)
+    return ipcRenderer.invoke('audio-engine:set-limiter-enabled', await this.ensureEngineId(), enabled)
   }
 
   async isLimiterEnabled(): Promise<boolean> {
     const result = await ipcRenderer.invoke(
       'audio-engine:is-limiter-enabled',
-      this.ensureEngineId()
+      await this.ensureEngineId()
     )
     return result.enabled ?? true
   }
 
   async setLimiter(params: LimiterParams): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-limiter', this.ensureEngineId(), params)
+    return ipcRenderer.invoke('audio-engine:set-limiter', await this.ensureEngineId(), params)
   }
 
   async getLimiter(): Promise<LimiterParams> {
-    const result = await ipcRenderer.invoke('audio-engine:get-limiter', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-limiter', await this.ensureEngineId())
     return result.params ?? { ceilingDb: -0.3, releaseMs: 50 }
   }
 
   async getLimiterGainReduction(): Promise<number> {
     const result = await ipcRenderer.invoke(
       'audio-engine:get-limiter-gain-reduction',
-      this.ensureEngineId()
+      await this.ensureEngineId()
     )
     return result.gainReduction ?? 0
   }
@@ -291,11 +338,11 @@ class AudioEngineManager {
   // === 等响度控制 ===
 
   async setLoudness(params: LoudnessParams): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-loudness', this.ensureEngineId(), params)
+    return ipcRenderer.invoke('audio-engine:set-loudness', await this.ensureEngineId(), params)
   }
 
   async getLoudness(): Promise<LoudnessParams> {
-    const result = await ipcRenderer.invoke('audio-engine:get-loudness', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-loudness', await this.ensureEngineId())
     return (
       result.params ?? {
         enabled: false,
@@ -307,13 +354,13 @@ class AudioEngineManager {
   }
 
   async setLoudnessEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-loudness-enabled', this.ensureEngineId(), enabled)
+    return ipcRenderer.invoke('audio-engine:set-loudness-enabled', await this.ensureEngineId(), enabled)
   }
 
   async isLoudnessEnabled(): Promise<boolean> {
     const result = await ipcRenderer.invoke(
       'audio-engine:is-loudness-enabled',
-      this.ensureEngineId()
+      await this.ensureEngineId()
     )
     return result.enabled ?? false
   }
@@ -334,7 +381,7 @@ class AudioEngineManager {
   }
 
   async reset(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:reset', this.ensureEngineId())
+    return ipcRenderer.invoke('audio-engine:reset', await this.ensureEngineId())
   }
 
   static async getVersion(): Promise<VersionInfo> {
@@ -366,6 +413,59 @@ function toCloneable<T>(value: T, seen = new WeakSet<object>()): T {
     out[key] = toCloneable(v, seen)
   }
   return out as T
+}
+
+/** 在回调函数上挂 channel → 包装函数 的映射，供 on/off 精确移除监听器 */
+const IPC_WRAPPER_REGISTRY = '__audioEngineIpcWrappers'
+
+function getIpcRegistry(
+  callback: (...args: any[]) => void
+): Map<string, (...args: any[]) => void> {
+  const holder = callback as unknown as Record<string, Map<string, (...args: any[]) => void>>
+  if (!holder[IPC_WRAPPER_REGISTRY]) {
+    holder[IPC_WRAPPER_REGISTRY] = new Map()
+  }
+  return holder[IPC_WRAPPER_REGISTRY]
+}
+
+/** audioEngine 允许订阅的通道白名单 */
+const AUDIO_ENGINE_CHANNELS = [
+  'audio-engine:ended',
+  'audio-engine:error',
+  'audio-engine:progress',
+  'audio-engine:stateChange'
+]
+
+function audioEngineOn(channel: string, callback: (...args: any[]) => void): void {
+  if (!AUDIO_ENGINE_CHANNELS.includes(channel)) return
+  // 包装函数按 channel 缓存在 callback 上，否则 off() 用原 callback 永远删不掉监听器
+  // （ipcRenderer.removeListener 按函数引用匹配），会导致每次重挂载累积一个监听。
+  const registry = getIpcRegistry(callback)
+  const prev = registry.get(channel)
+  if (prev) ipcRenderer.removeListener(channel, prev)
+  const wrapper = (_event: any, ...args: any[]) => callback(...args)
+  registry.set(channel, wrapper)
+  ipcRenderer.on(channel, wrapper)
+}
+
+function audioEngineOff(channel: string, callback: (...args: any[]) => void): void {
+  const registry = getIpcRegistry(callback)
+  const wrapper = registry.get(channel)
+  if (wrapper) {
+    ipcRenderer.removeListener(channel, wrapper)
+    registry.delete(channel)
+    return
+  }
+  // 兼容直接传入真实监听器（非 audioEngineOn 注册）的调用
+  ipcRenderer.removeListener(channel, callback)
+}
+
+/** 订阅播放进度推送，返回取消订阅函数 */
+function subscribeProgress(
+  callback: (payload: { engineId: string; position: number }) => void
+): () => void {
+  audioEngineOn('audio-engine:progress', callback as (...args: any[]) => void)
+  return () => audioEngineOff('audio-engine:progress', callback as (...args: any[]) => void)
 }
 
 const api = {
@@ -423,20 +523,10 @@ const api = {
 
     readAudioFile: (filePath: string) => audioEngineManager.readAudioFile(filePath),
 
-    on: (channel: string, callback: (...args: any[]) => void) => {
-      const validChannels = [
-        'audio-engine:ended',
-        'audio-engine:error',
-        'audio-engine:progress',
-        'audio-engine:stateChange'
-      ]
-      if (validChannels.includes(channel)) {
-        ipcRenderer.on(channel, (_event, ...args) => callback(...args))
-      }
-    },
-    off: (channel: string, callback: (...args: any[]) => void) => {
-      ipcRenderer.removeListener(channel, callback)
-    },
+    on: audioEngineOn,
+    off: audioEngineOff,
+    /** 订阅播放进度推送（主进程 250ms 一次），返回取消订阅函数 */
+    onProgress: subscribeProgress,
 
     getGainReductions: () =>
       Promise.resolve({

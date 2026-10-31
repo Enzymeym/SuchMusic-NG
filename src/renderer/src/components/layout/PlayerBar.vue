@@ -23,6 +23,8 @@ import { usePlaylistStore } from '../../stores/playlistStore'
 import { useVolumeBalanceStore } from '../../stores/volumeBalanceStore'
 import defaultCover from '@renderer/assets/default-cover.png'
 import { audioEngine } from '../../audio/audio-engine'
+import { isWebAudioMode } from '../../utils/audioOutputModeManager'
+import { createTrailingThrottle } from '../../utils/trailingThrottle'
 // 播放页为重量级模块（含 AMLL 背景/歌词渲染），改为按需加载以降低首屏内存
 const PlayerPage = defineAsyncComponent(() => import('./PlayerPage.vue'))
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -135,23 +137,50 @@ onBeforeUnmount(() => {
 // 播放锁，防止并发播放
 let isLoadingSong = false
 
-// ===== 进度轮询 =====
+// ===== 进度同步 =====
 let progressPollTimer: ReturnType<typeof setInterval> | null = null
+let unsubscribeProgressPush: (() => void) | null = null
+
+/**
+ * 切歌进度闸门：切歌瞬间 store 已把 positionMs 归零，但旧曲音频仍在输出
+ * （WASAPI 顺序淡出、Web Audio 缓冲尚未替换），轮询/推送会继续上报旧曲位置，
+ * 把进度条顶回旧进度。新曲音频就绪前关闭闸门，丢弃这些过期位置。
+ */
+let progressGateClosed = false
+
+/** 统一入口：把一次位置更新写入 store 并喂给 Automix 过渡调度 */
+const applyProgress = (pos: number): void => {
+  if (progressGateClosed) return
+  if (!player.isPlaying) return
+  if (isDraggingProgress.value) return // 拖拽时不更新
+  if (!(pos > 0)) return
+  player.setPosition(pos)
+  // Automix：将进度喂给过渡调度，到达触发点执行过渡
+  transitionController.onProgress(pos)
+}
 
 const startProgressPolling = () => {
   stopProgressPolling()
-  progressPollTimer = setInterval(async () => {
-    if (!player.isPlaying) {
+
+  // WASAPI 模式：位置由主进程按墙钟计算后主动推送，
+  // 免去渲染进程每 250ms 一次 IPC invoke 往返（一首 5 分钟的歌约 1200 次）。
+  if (!isWebAudioMode()) {
+    const onProgress = (window as any).api?.audioEngine?.onProgress
+    if (typeof onProgress === 'function') {
+      unsubscribeProgressPush = onProgress(
+        (payload: { engineId: string; position: number }) => applyProgress(payload?.position ?? 0)
+      )
       return
     }
+  }
+
+  // Web Audio 模式（或推送不可用）：本地读取 AudioContext 时钟，无 IPC 开销
+  progressPollTimer = setInterval(async () => {
+    if (!player.isPlaying) return
     if (isDraggingProgress.value) return // 拖拽时不更新
     try {
       const pos = await audioEngine.getCurrentPosition()
-      if (pos > 0) {
-        player.setPosition(pos)
-        // Automix：将进度喂给过渡调度，到达触发点执行过渡
-        transitionController.onProgress(pos)
-      }
+      applyProgress(pos)
     } catch {
       // 忽略轮询错误
     }
@@ -162,6 +191,10 @@ const stopProgressPolling = () => {
   if (progressPollTimer) {
     clearInterval(progressPollTimer)
     progressPollTimer = null
+  }
+  if (unsubscribeProgressPush) {
+    unsubscribeProgressPush()
+    unsubscribeProgressPush = null
   }
 }
 
@@ -178,6 +211,8 @@ const loadAndPlaySong = async (song: PlayerSong, forcePlay: boolean = false) => 
     await doLoadAndPlaySong(song, forcePlay)
   } finally {
     isLoadingSong = false
+    // 新曲音频已就绪（或加载失败已停止旧音频），放行进度上报
+    progressGateClosed = false
   }
 }
 
@@ -413,13 +448,28 @@ watch(
       return
     }
 
+    // 切歌：关闭进度闸门，挡住旧曲音频在新曲就绪前继续上报的位置，
+    // 避免进度条被顶回旧进度（store 的切歌方法已把 positionMs 归零，这里再防御一次）。
+    // 同一首歌重新加载（如重复点击列表中的当前曲）保留原进度，不做归零
+    progressGateClosed = true
+    const isSameSongId = oldSong?.id != null && newSong.id === oldSong.id
+    if (!isSameSongId) {
+      player.setPosition(0)
+    }
+
     await loadAndPlaySong(newSong)
   }
 )
 
-// 音量平衡开关 / 目标响度 / 增益范围变化时，对当前歌曲即时重新应用补偿增益
+// 音量平衡开关 / 目标响度 / 增益范围变化，或当前歌曲刚被后台分析出结果时，
+// 即时对当前歌曲重新应用补偿增益（后台分析是自动进行的，可能发生在播放途中）
 watch(
-  () => [volumeBalanceStore.enabled, volumeBalanceStore.targetLufs, volumeBalanceStore.maxGainDb],
+  () => [
+    volumeBalanceStore.enabled,
+    volumeBalanceStore.targetLufs,
+    volumeBalanceStore.maxGainDb,
+    volumeBalanceStore.getGainDb((player.currentSong as any)?.filePath)
+  ],
   () => {
     applyTrackGain(player.currentSong)
   }
@@ -923,26 +973,23 @@ const endDrag = () => {
   doSeek(dragValue.value)
 }
 
-// 节流函数
-const throttle = (func: Function, delay: number) => {
-  let lastCall = 0
-  return (...args: any[]) => {
-    const now = Date.now()
-    if (now - lastCall >= delay) {
-      lastCall = now
-      return func(...args)
-    }
-  }
-}
-
-// 节流处理的音量更新函数
-const updateVolume = throttle((volume: number) => {
-  const v = volume / 100
-  // 先更新本地状态，避免UI卡顿
-  player.setVolume(v)
-  // 直接调用audioEngine.setVolume，避免双重requestAnimationFrame
+// 音量下发到音频引擎：30ms 节流，但带尾调用，保证松手时的最终值一定落地
+const applyVolumeToEngine = createTrailingThrottle((v: number) => {
   audioEngine.setVolume(v)
-}, 30) // 减少节流间隔到30ms，提高响应速度
+}, 30)
+
+/**
+ * 音量更新入口
+ *
+ * store 必须**同步**更新：音量滑块是受控组件，value 来自 store；
+ * 若 store 也一起被节流，被丢弃的那次输入会让滑块按旧值回弹（表现为「调不动」）。
+ * 只有下发到引擎这一步需要节流。
+ */
+const updateVolume = (volume: number): void => {
+  const v = Math.min(1, Math.max(0, volume / 100))
+  player.setVolume(v)
+  applyVolumeToEngine(v)
+}
 
 // 音量使用 0-100 的滑块值
 const volumePercent = computed({

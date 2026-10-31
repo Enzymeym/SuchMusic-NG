@@ -6,6 +6,7 @@
 import { BrowserWindow, ipcMain } from 'electron';
 import { readFile } from 'fs/promises';
 import { loadNativeModule as loadNative } from './nativeModuleLoader';
+import { resolveWasapiDeviceId } from './wasapiService';
 
 
 
@@ -65,7 +66,14 @@ const engines = new Map<string, any>();
 // 轨道信息存储 (用于音频输出桥接)
 const engineTracks = new Map<string, { sampleRate: number; channels: number; bitsPerSample?: number }>();
 // 音频输出桥接存储 (WASAPI)
-const engineOutputs = new Map<string, { outputEngine: any; interval: ReturnType<typeof setInterval> | null; stopped: boolean; paused: boolean }>();
+const engineOutputs = new Map<string, {
+  outputEngine: any;
+  interval: ReturnType<typeof setInterval> | null;
+  /** 播放进度推送定时器（替代渲染进程的 IPC 轮询） */
+  progressTimer: ReturnType<typeof setInterval> | null;
+  stopped: boolean;
+  paused: boolean;
+}>();
 
 // 引擎状态追踪
 const engineVolumes = new Map<string, number>();
@@ -76,6 +84,16 @@ const engineLimiterEnabled = new Map<string, boolean>();
 
 /** 跟踪哪些 WebContents 设置了 FFT 回调，用于自动清理 */
 const engineToWebContents = new Map<string, Electron.WebContents>();
+
+/**
+ * 引擎创建者（WebContents）。
+ *
+ * 用于两件事：
+ * 1. 紧急停止按窗口隔离——桌面歌词 / 任务栏控制等副窗口卸载时，不能连带把
+ *    主窗口正在播放的引擎停掉；
+ * 2. 窗口销毁时回收其引擎，避免渲染进程重载后主进程残留孤儿引擎。
+ */
+const engineOwners = new Map<string, Electron.WebContents>();
 
 let engineIdCounter = 0;
 
@@ -114,8 +132,22 @@ function loadNativeModule(): any {
 }
 
 /**
+ * DSP 默认开关。
+ *
+ * EQ 与压缩器是纯音质修饰：EQ 每块要跑 10 段双联滤波器，压缩器分声道处理，
+ * 对「原样播放」毫无必要，且都会带来可观的 CPU 开销，故默认关闭。
+ * 限制器成本极低（一次逐帧包络）但能防止 0 dBFS 母带削波，保留开启。
+ */
+const DSP_DEFAULTS = {
+  enableEq: false,
+  enableCompressor: false,
+  enableLimiter: true,
+  enableLoudness: false
+} as const
+
+/**
  * 创建音频引擎实例
- * @param config 引擎配置
+ * @param config 引擎配置（缺省字段走 DSP_DEFAULTS，而非原生模块内部的兜底值）
  * @returns 引擎实例 ID
  */
 export function createAudioEngine(config?: AudioEngineConfig): string {
@@ -123,7 +155,7 @@ export function createAudioEngine(config?: AudioEngineConfig): string {
     const native = loadNativeModule();
     const engineId = generateEngineId();
 
-    const engine = new native.AudioEngine(config || {});
+    const engine = new native.AudioEngine({ ...DSP_DEFAULTS, ...(config ?? {}) });
     engines.set(engineId, engine);
     console.log('[AudioEngine] 创建引擎实例:', engineId);
     return engineId;
@@ -157,6 +189,7 @@ export function destroyAudioEngine(engineId: string): void {
   engineEqEnabled.delete(engineId);
   engineCompressorEnabled.delete(engineId);
   engineLimiterEnabled.delete(engineId);
+  engineOwners.delete(engineId);
   const engine = engines.get(engineId);
   if (engine) {
     try {
@@ -198,26 +231,74 @@ export function destroyAllEngines(): void {
   engineCompressorEnabled.clear();
   engineLimiterEnabled.clear();
   engineToWebContents.clear();
+  engineOwners.clear();
 
   console.log('[AudioEngine] 已销毁所有引擎实例');
 }
 
 /**
- * 紧急停止所有音频输出（供前端重启时调用）
- * 使用 ipcMain.on 确保 fire-and-forget，不依赖渲染进程等待响应
+ * 紧急停止音频输出的可选项
  */
-export function emergencyStopAll(): void {
-  destroyAllEngines();
+export interface EmergencyStopOptions {
+  /**
+   * 是否同时销毁引擎实例。
+   * - 页面卸载（刷新 / 关闭窗口）：true，渲染进程马上重建，不销毁会残留孤儿引擎；
+   * - HMR 热更新（`vite:beforeUpdate`）：false，preload 上下文不会重建，
+   *   其缓存的 engineId 必须继续有效，否则之后每次调用都会报「引擎 xxx 不存在」。
+   */
+  destroy?: boolean;
+}
 
-  // 同时清理 wasapiService 的独立 WASAPI 引擎
-  try {
-    const { destroyAllWasapiEngines } = require('./wasapiService');
-    destroyAllWasapiEngines();
-  } catch (e) {
-    // wasapiService 可能未加载
+/**
+ * 紧急停止音频输出（供渲染进程 HMR / beforeunload 调用）
+ * 使用 ipcMain.on 确保 fire-and-forget，不依赖渲染进程等待响应
+ *
+ * 按窗口隔离：桌面歌词 / 任务栏控制等副窗口卸载时，只处理该窗口自己创建的引擎，
+ * 不能连带停掉主窗口正在播放的音频。
+ *
+ * @param owner 调用方 WebContents；省略表示所有引擎（应用退出等全局场景）
+ * @param options 是否销毁引擎实例，见 EmergencyStopOptions
+ */
+export function emergencyStopAll(
+  owner?: Electron.WebContents | null,
+  options: EmergencyStopOptions = {}
+): void {
+  const shouldDestroy = options.destroy === true;
+  const targets = owner
+    ? [...engines.keys()].filter((engineId) => engineOwners.get(engineId) === owner)
+    : [...engines.keys()];
+
+  for (const engineId of targets) {
+    if (shouldDestroy) {
+      destroyAudioEngine(engineId);
+      continue;
+    }
+    // 只停止：保留引擎实例（渲染进程缓存的 engineId 继续有效）与轨道信息
+    // （startOutput 依赖 engineTracks 建桥接，清掉会导致后续 play 静默返回）
+    stopOutput(engineId);
+    const engine = engines.get(engineId);
+    if (!engine) continue;
+    try {
+      engine.stop();
+      engine.reset();
+    } catch (e) {
+      console.warn('[AudioEngine] 紧急停止引擎失败:', e);
+    }
   }
 
-  console.log('[AudioEngine] 紧急停止所有音频输出完成');
+  if (!owner || shouldDestroy) {
+    // 全局停止 / 页面卸载：同时清理 wasapiService 的独立 WASAPI 探测引擎
+    try {
+      const { destroyAllWasapiEngines } = require('./wasapiService');
+      destroyAllWasapiEngines();
+    } catch (e) {
+      // wasapiService 可能未加载
+    }
+  }
+
+  console.log(
+    `[AudioEngine] 紧急停止音频输出完成（${owner ? '当前窗口' : '全部'}，引擎 ${targets.length} 个，${shouldDestroy ? '已销毁' : '仅停止'}）`
+  );
 }
 
 /**
@@ -256,8 +337,6 @@ function convertEqSettings(settings: Partial<EqBandSettingsJs>) {
  * 避免对低质量音频做无意义升采样。
  */
 function createOutputEngine(native: any, sampleRate: number, channels: number): any | null {
-  const deviceId = currentOutputDeviceId || null;
-
   // Web Audio 模式：不需要 WASAPI 输出引擎，由渲染进程直接播放
   if (currentOutputMode === 'webaudio') {
     console.log(`[AudioEngine] Web Audio 模式，跳过原生输出引擎`);
@@ -265,8 +344,15 @@ function createOutputEngine(native: any, sampleRate: number, channels: number): 
   }
 
   // WASAPI 模式
+  const wasapiMode = currentOutputMode === 'wasapi-exclusive' ? 'Exclusive' : 'Shared';
+  // 自动选择输出设备：记录为空或设备已失效（外置声卡拔出等）时回退默认设备，
+  // 否则原生层会因为「用户明确指定设备」而不做回退，直接创建失败导致无声。
+  let deviceId = resolveWasapiDeviceId(currentOutputDeviceId);
+  if (deviceId !== (currentOutputDeviceId || null)) {
+    currentOutputDeviceId = deviceId ?? '';
+  }
+
   try {
-    const wasapiMode = currentOutputMode === 'wasapi-exclusive' ? 'Exclusive' : 'Shared';
     const eng = new native.WasapiOutputEngine();
     eng.create(sampleRate, channels, wasapiMode, deviceId);
     eng.start();
@@ -278,6 +364,20 @@ function createOutputEngine(native: any, sampleRate: number, channels: number): 
     }
     return eng;
   } catch (e: any) {
+    // 指定设备仍失败（被独占占用 / 格式不支持）时，最后再试一次系统默认设备
+    if (deviceId) {
+      console.warn(`[AudioEngine] 指定设备初始化失败，尝试默认设备: ${e?.message}`);
+      try {
+        const fallbackEng = new native.WasapiOutputEngine();
+        fallbackEng.create(sampleRate, channels, wasapiMode, null);
+        fallbackEng.start();
+        currentOutputDeviceId = '';
+        console.log(`[AudioEngine] WASAPI ${wasapiMode} 已回退到默认设备输出`);
+        return fallbackEng;
+      } catch (fallbackError: any) {
+        console.error('[AudioEngine] 默认设备同样不可用:', fallbackError?.message);
+      }
+    }
     console.error('[AudioEngine] WASAPI 不可用:', e.message);
     return null;
   }
@@ -303,6 +403,7 @@ function startOutput(engineId: string, engine: any, startWallClock: boolean = fa
     channels = track.channels;
     try { outputEngine.start(); } catch {}
     if (existing.interval) clearInterval(existing.interval);
+    if (existing.progressTimer) clearInterval(existing.progressTimer);
   } else {
     // 首次播放：创建新引擎
     stopOutput(engineId);
@@ -315,6 +416,25 @@ function startOutput(engineId: string, engine: any, startWallClock: boolean = fa
   }
 
   if (!outputEngine) return;
+
+  // 进度推送：由主进程按墙钟计算位置后主动 send 给渲染进程，
+  // 免去渲染进程每 250ms 一次 IPC invoke 往返（一首 5 分钟的歌约 1200 次）。
+  // getPosition() 只做 Instant::elapsed 运算，不触碰 WASAPI，成本可忽略。
+  const PROGRESS_INTERVAL_MS = 250;
+  const progressTimer = setInterval(() => {
+    const current = engineOutputs.get(engineId);
+    if (!current || current.stopped || current.paused) return;
+    try {
+      const position = typeof engine.getPosition === 'function' ? engine.getPosition() : 0;
+      if (!(position > 0)) return;
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('audio-engine:progress', { engineId, position });
+      }
+    } catch {
+      // 引擎已销毁等情况，静默忽略
+    }
+  }, PROGRESS_INTERVAL_MS);
 
   // 每 20ms 推送一次，读取尽可能多的数据以建立缓冲防止欠载
   const BRIDGE_INTERVAL_MS = 20;
@@ -334,6 +454,7 @@ function startOutput(engineId: string, engine: any, startWallClock: boolean = fa
           if (output && !output.stopped) {
             output.stopped = true;
             clearInterval(interval);
+            clearInterval(progressTimer);
             try {
               const win = BrowserWindow.getAllWindows()[0];
               if (win) win.webContents.send('audio-engine:ended');
@@ -351,8 +472,9 @@ function startOutput(engineId: string, engine: any, startWallClock: boolean = fa
         if (!streamingStopped) return;
       }
 
-      // 尽可能多读，维持输出端缓冲
-      const readSize = Math.min(availableSamples, sampleRate * channels * 2); // 最多 2 秒
+      // 单次最多读 0.5 秒：前瞻缓冲由 Rust 侧 AudioDataStore（已回收已播放前缀）
+      // 与 WASAPI 自身缓冲共同保证，无需一次搬 2 秒（约 700KB）造成 GC 压力
+      const readSize = Math.min(availableSamples, Math.floor(sampleRate * channels * 0.5));
       const floatData = engine.readAudioBuffer(readSize);
       if (!floatData || floatData.length === 0) return;
 
@@ -379,7 +501,7 @@ function startOutput(engineId: string, engine: any, startWallClock: boolean = fa
     }
   }, BRIDGE_INTERVAL_MS);
 
-  engineOutputs.set(engineId, { outputEngine, interval, stopped: false, paused: false });
+  engineOutputs.set(engineId, { outputEngine, interval, progressTimer, stopped: false, paused: false });
 }
 
 /**
@@ -392,6 +514,7 @@ function stopOutput(engineId: string, preserve: boolean = false): void {
   if (output) {
     output.stopped = true;
     if (output.interval) clearInterval(output.interval);
+    if (output.progressTimer) clearInterval(output.progressTimer);
     if (preserve) {
       // 暂停：仅停止播放，保留引擎实例以便恢复
       try { output.outputEngine.stop(); } catch {}
@@ -402,6 +525,22 @@ function stopOutput(engineId: string, preserve: boolean = false): void {
       engineOutputs.delete(engineId);
     }
     console.log('[AudioEngine] 音频输出桥接已停止' + (preserve ? '（引擎保留）' : ''));
+  }
+}
+
+/**
+ * 清空 Rust 侧 FFT 回调。
+ *
+ * 传入 `null` 才能真正让 Rust 停止计算（原生接口签名是 `Option<FftCallback>`）；
+ * 传空函数只是「不推送」，FFT 仍会在解码线程里逐帧执行。
+ * 旧版二进制可能不接受 null，此时回退到空函数。
+ */
+function clearFftCallback(engine: any): void {
+  if (!engine || typeof engine.setFftCallback !== 'function') return;
+  try {
+    engine.setFftCallback(null);
+  } catch {
+    engine.setFftCallback(() => {});
   }
 }
 
@@ -454,9 +593,7 @@ export function registerAudioEngineHandlers(): void {
     wc.once('destroyed', () => {
       if (engineToWebContents.get(engineId) === wc) {
         engineToWebContents.delete(engineId);
-        if (engine && typeof engine.setFftCallback === 'function') {
-          engine.setFftCallback(() => {});
-        }
+        clearFftCallback(engine);
       }
     });
 
@@ -472,9 +609,8 @@ export function registerAudioEngineHandlers(): void {
   // 移除 FFT 频谱回调（停止音频可视化数据推送）
   ipcMain.on('audio-engine:remove-fft-callback', (_event, engineId: string) => {
     const engine = engines.get(engineId);
-    if (!engine || typeof engine.setFftCallback !== 'function') return;
-    // 传入空函数清空回调，停止从 Rust 端推送 FFT 数据
-    engine.setFftCallback(() => {});
+    if (!engine) return;
+    clearFftCallback(engine);
     // 清理 WebContents 追踪
     const wc = engineToWebContents.get(engineId);
     if (wc && !wc.isDestroyed()) {
@@ -484,9 +620,16 @@ export function registerAudioEngineHandlers(): void {
   });
 
   // 创建引擎
-  ipcMain.handle('audio-engine:create', async (_event, config?: AudioEngineConfig) => {
+  ipcMain.handle('audio-engine:create', async (event, config?: AudioEngineConfig) => {
     try {
       const engineId = createAudioEngine(config);
+      // 记录创建者：窗口销毁时回收其引擎（渲染进程重载后 preload 会重建管理器，
+      // 旧引擎若无人回收就会变成孤儿，长期占用环形缓冲与 FFT 分析器）
+      engineOwners.set(engineId, event.sender);
+      event.sender.once('destroyed', () => {
+        if (engineOwners.get(engineId) !== event.sender) return;
+        destroyAudioEngine(engineId);
+      });
       return { success: true, engineId };
     } catch (error) {
       console.error('[AudioEngine] 创建引擎失败:', error);
@@ -843,8 +986,11 @@ export function registerAudioEngineHandlers(): void {
   });
 
   ipcMain.handle('audio-engine:get-compressor-gain-reduction', async (_event, engineId: string) => {
+    // 该接口由音效面板高频轮询（约 5 次/秒）。引擎已不存在属于正常时序
+    // （窗口卸载 / 引擎被回收），不能按错误刷屏，直接返回 0 由前端自行降级。
+    const engine = engines.get(engineId);
+    if (!engine) return { success: false, error: `引擎 ${engineId} 不存在`, gainReduction: 0 };
     try {
-      const engine = getEngine(engineId);
       const gainReduction = typeof engine.getCompressorGainReduction === 'function' ? engine.getCompressorGainReduction() : 0;
       return { success: true, gainReduction };
     } catch (error) {
@@ -913,8 +1059,10 @@ export function registerAudioEngineHandlers(): void {
   });
 
   ipcMain.handle('audio-engine:get-limiter-gain-reduction', async (_event, engineId: string) => {
+    // 同压缩器：高频轮询接口，引擎不存在属于正常时序，不按错误刷屏
+    const engine = engines.get(engineId);
+    if (!engine) return { success: false, error: `引擎 ${engineId} 不存在`, gainReduction: 0 };
     try {
-      const engine = getEngine(engineId);
       const gainReduction = typeof engine.getLimiterGainReduction === 'function' ? engine.getLimiterGainReduction() : 0;
       return { success: true, gainReduction };
     } catch (error) {
@@ -992,11 +1140,17 @@ export function registerAudioEngineHandlers(): void {
 
   // === 生命周期 ===
 
-  // 紧急停止全部音频输出（fire-and-forget，不依赖渲染进程响应）
-  // 前端重启 / HMR / beforeunload 时调用
-  ipcMain.on('audio-engine:emergency-stop-all', () => {
-    emergencyStopAll();
-  });
+  // 紧急停止音频输出（fire-and-forget，不依赖渲染进程响应）
+  // 前端重启 / HMR / beforeunload 时调用；只处理调用方窗口自己的引擎
+  ipcMain.on(
+    'audio-engine:emergency-stop-all',
+    (event, options?: EmergencyStopOptions | boolean) => {
+      // 兼容旧版调用（无参数 / 布尔）：无参数视为页面卸载，销毁引擎
+      const opts: EmergencyStopOptions =
+        typeof options === 'boolean' ? { destroy: options } : (options ?? { destroy: true });
+      emergencyStopAll(event.sender, opts);
+    }
+  );
 
   ipcMain.handle('audio-engine:reset', async (_event, engineId: string) => {
     try {

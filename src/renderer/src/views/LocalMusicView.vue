@@ -3,12 +3,18 @@
     <div class="header">
       <div class="title">
         歌曲
-        <span class="subtitle">
-          <i class="mgc_music_2_fill"></i> {{ songs.length }} 首</span>
+        <span class="subtitle"> <i class="mgc_music_2_fill"></i> {{ songs.length }} 首</span>
       </div>
       <div class="actions">
         <div style="display: flex; gap: 10px">
-          <n-button type="primary" style="padding: 0 16px; font-size: 15px;" size="large" secondary round @click="playAll">
+          <n-button
+            type="primary"
+            style="padding: 0 16px; font-size: 15px"
+            size="large"
+            secondary
+            round
+            @click="playAll"
+          >
             <template #icon>
               <n-icon size="14">
                 <i class="mgc_play_fill"></i>
@@ -30,7 +36,7 @@
               </n-icon>
             </template>
           </n-button>
-          <n-button secondary circle size="large"  @click="openBatchModal">
+          <n-button secondary circle size="large" @click="openBatchModal">
             <template #icon>
               <n-icon size="20">
                 <i class="mgc_list_check_2_line"></i>
@@ -55,10 +61,10 @@
         </n-input>
       </div>
     </div>
-    
+
     <div class="content">
-      <SongList 
-        :songs="filteredSongs" 
+      <SongList
+        :songs="filteredSongs"
         :loading="loading"
         :current-playing-song-id="player.currentSong?.id ?? null"
         :extra-menu-options="contextMenuOptions"
@@ -74,21 +80,21 @@
         v-model:show="showBatchModal"
         preset="dialog"
         title="批量管理"
-        style="width: 800px; max-width: 90vw;"
+        style="width: 800px; max-width: 90vw"
       >
-        <div style="height: 500px; display: flex; flex-direction: column;">
+        <div style="height: 500px; display: flex; flex-direction: column">
           <n-data-table
             :columns="batchColumns"
             :data="songs"
             :pagination="{ pageSize: 10 }"
             :row-key="(row) => row.id"
             @update:checked-row-keys="handleCheck"
-            style="flex: 1; overflow: hidden;"
+            style="flex: 1; overflow: hidden"
             flex-height
           />
-          <n-space justify="end" style="margin-top: 16px;">
+          <n-space justify="end" style="margin-top: 16px">
             <n-button @click="showBatchModal = false">取消</n-button>
-            <n-button 
+            <n-button
               type="primary"
               ghost
               :disabled="checkedRowKeys.length === 0"
@@ -96,8 +102,8 @@
             >
               保存为歌单 ({{ checkedRowKeys.length }})
             </n-button>
-            <n-button 
-              type="error" 
+            <n-button
+              type="error"
               :disabled="checkedRowKeys.length === 0"
               @click="handleBatchDelete"
             >
@@ -112,7 +118,17 @@
 
 <script setup lang="ts">
 import { ref, onMounted, h, computed } from 'vue'
-import { NButton, NIcon, useMessage, NInput, NModal, NDataTable, NSpace, useDialog, type DataTableColumns } from 'naive-ui'
+import {
+  NButton,
+  NIcon,
+  useMessage,
+  NInput,
+  NModal,
+  NDataTable,
+  NSpace,
+  useDialog,
+  type DataTableColumns
+} from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import TagEditDialog from '../components/common/TagEditDialog.vue'
 import { usePlayerStore } from '../stores/playerStore'
@@ -166,14 +182,14 @@ const handleBatchDelete = () => {
     onPositiveClick: async () => {
       try {
         const filePaths = localMusicStore.songs
-          .filter(s => checkedRowKeys.value.includes(s.id))
-          .map(s => s.filePath)
-          .filter(fp => fp) as string[]
+          .filter((s) => checkedRowKeys.value.includes(s.id))
+          .map((s) => s.filePath)
+          .filter((fp) => fp) as string[]
 
         if (filePaths.length === 0) return
 
         const result = await window.electron.ipcRenderer.invoke('local-music:delete', filePaths)
-        
+
         if (result.success) {
           message.success(`成功删除 ${result.deletedCount} 首歌曲`)
           if (result.failedCount > 0) {
@@ -184,7 +200,7 @@ const handleBatchDelete = () => {
           // But simpler to just rescan or let store handle it.
           // Since we deleted files, rescanning is safer.
           void scanMusic()
-          
+
           checkedRowKeys.value = []
           if (localMusicStore.songs.length === 0) {
             showBatchModal.value = false
@@ -299,7 +315,7 @@ const playSong = async (song: Song): Promise<void> => {
   // 避免在播放失败（如文件不存在）时出现 UI 状态不一致
   player.setCurrentSong(songInfo)
   player.recordPlay(songInfo)
-  
+
   message.info(`正在播放: ${song.name}`)
 }
 
@@ -385,13 +401,13 @@ const scanMusic = async (): Promise<void> => {
 
 .header {
   display: flex;
-  background-color: #F6F6F6;
+  background-color: #f6f6f6;
   justify-content: space-between;
   align-items: start;
   gap: 4px;
   flex-direction: column;
   margin-bottom: 14px;
-  padding: 8px 1px 4px ;
+  padding: 8px 1px 4px;
   z-index: 10;
   border-radius: 8px;
 }
@@ -412,7 +428,7 @@ html[data-theme='dark'] .search-input {
 }
 
 .subtitle {
-  font-size: 14px; 
+  font-size: 14px;
   color: #999;
   margin-left: 8px;
 }

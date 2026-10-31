@@ -223,6 +223,9 @@ class AudioEngine {
 
   // 设置全局音量（0.0 - 1.0）
   public async setVolume(volume: number): Promise<void> {
+    // 防御 NaN/Infinity：滑块的瞬时值、系统媒体命令等来源可能给出非法数，
+    // 一旦写进 currentVolume 会污染后续所有计算（GainNode 被设成 NaN 后永久静音）
+    if (!Number.isFinite(volume)) return
     this.currentVolume = Math.max(0, Math.min(1, volume))
     await this.applyEffectiveVolume()
   }
@@ -242,8 +245,16 @@ class AudioEngine {
   // 应用 effective gain = volume * boost * trackGain 到底层引擎
   private async applyEffectiveVolume(): Promise<void> {
     const trackGain = Math.pow(10, this.trackGainDb / 20)
-    // 有效增益钳制在 [0.125, 4]，防止极端补偿导致爆音或无声
-    const effectiveGain = Math.min(4, Math.max(0.125, this.currentVolume * this.volumeBoost * trackGain))
+    /**
+     * 有效增益 = 用户音量 × 音量增强 × 按曲补偿，上限 4（+12 dB）防爆音。
+     *
+     * 这里**不能**给下限（旧实现是 Math.max(0.125, ...)）：
+     *  - 音量拉到 0 会被抬到 0.125（-18 dB），静音按钮与「拉到最左」全都失效，
+     *    听感就是「音量条调到底还有声音」；
+     *  - 0 ~ 12% 这一整段滑块的增益都被夹到同一个值，滑块的这一段完全不起作用。
+     * 下限只保留 0，真正的静音必须能被表达。
+     */
+    const effectiveGain = Math.min(4, Math.max(0, this.currentVolume * this.volumeBoost * trackGain))
     if (isWebAudioMode()) {
       webAudioOutputEngine.setVolume(effectiveGain)
       // 音量变化时同步给 DSP，使低音量高低频补偿实时跟随
@@ -252,9 +263,12 @@ class AudioEngine {
     }
     const api = this.getApi()
     if (!api) return
-    // WASAPI 引擎尚未创建（如应用启动早期 / 模式切换前）时静默跳过：
-    // 音量值已记录在 currentVolume，引擎创建后、播放前会再次应用
-    if (!api.getEngineId?.()) return
+    // WASAPI 引擎尚未创建（应用启动早期 / 模式切换前）时按需创建：
+    // 只记录不创建会让首曲沿用默认音量（1.0），出现「一开播音量不对」。
+    if (!api.getEngineId?.()) {
+      const created = await api.create?.()
+      if (!created || created.success === false) return
+    }
     await api.setVolume(effectiveGain).catch((err) => {
       console.error('[AudioEngine] setVolume failed:', err)
     })
