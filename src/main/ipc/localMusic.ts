@@ -2,8 +2,7 @@ import { ipcMain, app, dialog } from 'electron'
 import { promises as fs } from 'fs'
 import { join, extname, basename, dirname } from 'path'
 import { writeAudioMeta } from '../utils/musicMetaWriter'
-import { readMetaManually } from '../utils/musicMetaReader'
-import { readNativeTags } from '../services/tagReaderService'
+import { resolveAudioMeta } from '../services/audioMetaResolver'
 
 // 本地音乐扫描结果的数据结构
 interface LocalMusicTrack {
@@ -15,18 +14,6 @@ interface LocalMusicTrack {
   dt?: number
   quality?: string
   coverId?: string
-}
-
-// 懒加载 music-metadata 模块缓存，避免每次 get-meta 重复 import
-let _mmParseFile: ((filePath: string, options?: Record<string, unknown>) => Promise<unknown>) | null = null
-
-async function getMusicMetadataParser(): Promise<(filePath: string, options?: Record<string, unknown>) => Promise<unknown>> {
-  if (_mmParseFile) return _mmParseFile
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mm = await import('music-metadata')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  _mmParseFile = (mm as any).parseFile as (filePath: string, options?: any) => Promise<any>
-  return _mmParseFile
 }
 
 /**
@@ -57,198 +44,18 @@ export function registerLocalMusicHandlers(): void {
   // 按需读取单个音频文件的元数据（时长 + 封面）
   // options.includeCover=false 时跳过封面提取：调用方只为取歌词时，
   // 不必把数百 KB~数 MB 的 base64 封面克隆过 IPC 再丢弃
+  //
+  // 解析编排（native → music-metadata → 手动嗅探的多源合并）全部收敛在
+  // resolveAudioMeta 里，这里只负责 IPC 边界与异常兜底。
   ipcMain.handle(
     'local-music:get-meta',
     async (_event, filePath: string, options?: { includeCover?: boolean }) => {
-    const includeCover = options?.includeCover !== false
-    try {
-      // 首选 native 标签读取（music_tag_reader）。native 可用且读取到结果时走 native 分支。
-      const native = await readNativeTags(filePath, { includeCover })
-      if (native !== 'UNAVAILABLE' && native !== null) {
-        // 尝试读取同名 .lrc 歌词文件，若有内容则以 .lrc 内容优先覆盖 native 标签歌词
-        let lyrics: string | undefined = native.lyrics
-        try {
-          const lrcPath = filePath.substring(0, filePath.lastIndexOf('.')) + '.lrc'
-          // Check if file exists
-          await fs.access(lrcPath)
-          // Read file
-          const lrcContent = await fs.readFile(lrcPath, 'utf-8')
-          if (lrcContent) {
-            lyrics = lrcContent
-          }
-        } catch (e) {
-          // Ignore if lrc file doesn't exist or read error
-        }
-
-        const result: {
-          durationMs?: number
-          bitrate?: number
-          sampleRate?: number
-          cover?: { mimeType: string; base64: string }
-          title?: string
-          artists: string[]
-          album?: string
-          lyrics?: string
-          year?: number
-          source: 'native'
-        } = {
-          source: 'native',
-          durationMs: native.durationMs,
-          bitrate: native.bitrate,
-          sampleRate: native.sampleRate,
-          cover: includeCover ? native.cover : undefined,
-          title: native.title,
-          artists: native.artists ?? [],
-          album: native.album,
-          lyrics,
-          year: native.year
-        }
-        return result
-      }
-
-      const parseFile = await getMusicMetadataParser()
-
-      // 优先尝试带时长分析的解析
-      let metadata: unknown
       try {
-        metadata = await parseFile(filePath, {
-          duration: true
-        })
+        return await resolveAudioMeta(filePath, { includeCover: options?.includeCover })
       } catch (error) {
-        console.warn('parseFile duration=true 失败，尝试降级解析:', filePath, error)
-        // 解析失败时降级为默认解析，尽量拿到封面等信息
-        try {
-          metadata = await parseFile(filePath)
-        } catch (error2) {
-          console.warn('music-metadata 解析失败，尝试手动解析:', filePath, error2)
-        }
+        console.error('get-meta failed:', filePath, error)
+        return {}
       }
-
-      // music-metadata 两次解析均失败时 metadata 为 undefined，后续按空对象处理，
-      // 由下方的手动解析兜底提取封面/标签/时长
-      const m = (metadata ?? {}) as {
-        format?: {
-          duration?: number
-          numberOfSamples?: number
-          sampleRate?: number
-          bitrate?: number
-        }
-        common: {
-          picture?: Array<{
-            format?: string
-            data?: Buffer
-          }>
-          lyrics?: string[]
-          year?: number
-        }
-      }
-
-      const seconds = m.format?.duration
-      let bitrate = m.format?.bitrate
-      let sampleRate = m.format?.sampleRate
-      let durationMs: number | undefined
-      if (seconds && Number.isFinite(seconds)) {
-        durationMs = Math.round(seconds * 1000)
-      } else if (
-        typeof m.format?.numberOfSamples === 'number' &&
-        typeof m.format?.sampleRate === 'number' &&
-        m.format.numberOfSamples > 0 &&
-        m.format.sampleRate > 0
-      ) {
-        // 部分文件没有直接给出 duration，这里使用采样数与采样率估算
-        const secondsFromSamples =
-          m.format.numberOfSamples / m.format.sampleRate
-        durationMs = Math.round(secondsFromSamples * 1000)
-      } else {
-        // metadata 无法获取时长时，不兜底使用原生解码器（decode_audio_to_pcm 会将
-        // 整个文件解码为 PCM number[]，对 3 分钟立体声歌曲占用 ~127MB，严重浪费内存）。
-        // durationMs 返回 undefined，实际播放时音频引擎会通过解码结果自动更新。
-        durationMs = undefined
-      }
-
-      const picture = m.common.picture?.[0]
-      let title =
-        typeof (m.common as { title?: unknown }).title === 'string'
-          ? ((m.common as { title?: string }).title || '').trim() || undefined
-          : undefined
-      const artistField = (m.common as { artist?: unknown }).artist
-      const artistsField = (m.common as { artists?: unknown }).artists
-      const artists: string[] = []
-      if (Array.isArray(artistsField)) {
-        for (const a of artistsField) {
-          const s = String(a || '').trim()
-          if (s) artists.push(s)
-        }
-      }
-      if (!artists.length && typeof artistField === 'string') {
-        const s = artistField.trim()
-        if (s) artists.push(s)
-      }
-      let album =
-        typeof (m.common as { album?: unknown }).album === 'string'
-          ? ((m.common as { album?: string }).album || '').trim() || undefined
-          : undefined
-
-      // 尝试读取同名 .lrc 歌词文件
-      let lyrics = m.common.lyrics?.[0]
-      try {
-        const lrcPath = filePath.substring(0, filePath.lastIndexOf('.')) + '.lrc'
-        // Check if file exists
-        await fs.access(lrcPath)
-        // Read file
-        const lrcContent = await fs.readFile(lrcPath, 'utf-8')
-        if (lrcContent) {
-           lyrics = lrcContent
-        }
-      } catch (e) {
-        // Ignore if lrc file doesn't exist or read error
-      }
-
-      let cover = includeCover && picture && picture.data
-        ? {
-            mimeType: picture.format || 'image/jpeg',
-            base64: Buffer.from(picture.data).toString('base64')
-          }
-        : undefined
-      let year = m.common.year
-
-      // 兜底：music-metadata 未取到封面（或整体解析失败）时，按文件内容
-      // 嗅探真实格式并手动提取封面/标签/时长（应对误标扩展名、损坏 ID3 头等文件）。
-      // includeCover=false 时整段跳过：这条路径会读取文件头部，而调用方只要歌词。
-      if (includeCover && !cover) {
-        try {
-          const manual = await readMetaManually(filePath)
-          if (manual) {
-            cover = cover || manual.cover
-            durationMs = durationMs ?? manual.durationMs
-            bitrate = bitrate ?? manual.bitrate
-            sampleRate = sampleRate ?? manual.sampleRate
-            title = title ?? manual.title
-            if (!artists.length && manual.artists) artists.push(...manual.artists)
-            album = album ?? manual.album
-            year = year ?? manual.year
-          }
-        } catch (error) {
-          console.warn('手动解析元数据失败:', filePath, error)
-        }
-      }
-
-      return {
-        durationMs,
-        bitrate,
-        sampleRate,
-        cover,
-        title,
-        artists,
-        album,
-        lyrics,
-        year,
-        source: 'js'
-      }
-    } catch (error) {
-      console.error('get-meta failed:', filePath, error)
-      return {}
-    }
     }
   )
 
@@ -510,4 +317,3 @@ export function registerLocalMusicHandlers(): void {
     }
   })
 }
-

@@ -60,7 +60,7 @@ export interface MediaControlStatus {
   title?: string
   artist?: string
   album?: string
-  /** data: | http(s): | 本地文件路径 | blob:(渲染层先转 data:) */
+  /** data: | http(s): | file: | 本地绝对文件路径 | blob:(渲染层先转 data:) */
   cover?: string
   durationMs?: number
   playing: boolean

@@ -1,16 +1,21 @@
 /**
  * 音乐元数据手动解析器（兜底方案）
  *
- * 当 music-metadata 因扩展名路由（如 MPEG 音频被误标为 .flac）或损坏的
- * ID3 头部等原因解析失败时，直接按文件内容嗅探真实格式并提取封面/标签/时长。
+ * 当 native 标签读取器与 music-metadata 都没能拿到封面时，直接按文件内容
+ * 嗅探真实格式并提取封面/标签/时长。分头尾两趟：
  *
- * 覆盖格式：
+ * 头部窗口（默认 64KB，按 4 倍扩容至 16MB）：
  * - FLAC：搜索 fLaC 魔数（允许文件头存在 ID3v2 前置数据），解析 STREAMINFO /
  *   VORBIS_COMMENT / PICTURE 元数据块
  * - MP3 / 误标扩展名的 MPEG 音频：解析 ID3v2 标签（APIC 封面 + 文本标签），
  *   并基于 Xing 头或逐帧统计估算时长
+ *
+ * 尾部窗口（固定 256KB）：
+ * - APEv2：`.ape` / `.wv` 的唯一标签容器，封面存在 `Cover Art (Front)` 二进制项里
+ * - 尾部 ID3v2：WAV / AIFF 的 "ID3 " chunk 常被写在 RIFF/FORM 声明范围之外
  */
 import { promises as fs } from 'fs'
+import { sniffImageMime } from './imageSniff'
 
 // 元数据块几乎总是位于文件头部，只需读取前 16MB 即可覆盖绝大多数情况（硬上限）
 const MAX_PROBE_BYTES = 16 * 1024 * 1024
@@ -18,16 +23,30 @@ const MAX_PROBE_BYTES = 16 * 1024 * 1024
 // 元数据块时才按 4 倍步进扩容（fillMeta 并发 3，旧实现固定 Buffer.alloc(16MB)
 // 会在瞬时占用 48MB 零填充内存）
 const HEAD_PROBE_BYTES = 64 * 1024
+// 尾部窗口：APEv2 footer 与 WAV/AIFF 的 "ID3 " chunk 都在文件末尾，
+// 256KB 足以覆盖绝大多数情况（个别超大标签会在下面按 APEv2 的 tagSize 精确回读）
+const TAIL_PROBE_BYTES = 256 * 1024
+// APEv2 单个标签块的容忍上限，防御损坏文件把 tagSize 写成天文数字
+const APE_MAX_TAG_BYTES = 8 * 1024 * 1024
+
+/** 从文件指定偏移读取 len 字节（不超过文件末尾） */
+async function readAt(
+  fd: Awaited<ReturnType<typeof fs.open>>,
+  start: number,
+  len: number
+): Promise<Buffer> {
+  let buf = Buffer.alloc(len)
+  const { bytesRead } = await fd.read(buf, 0, len, start)
+  buf = bytesRead < len ? buf.subarray(0, bytesRead) : buf
+  return buf
+}
 
 /** 从文件头读取 len 字节（不超过文件大小） */
 async function readRange(
   fd: Awaited<ReturnType<typeof fs.open>>,
   len: number
 ): Promise<Buffer> {
-  let buf = Buffer.alloc(len)
-  const { bytesRead } = await fd.read(buf, 0, len, 0)
-  buf = bytesRead < len ? buf.subarray(0, bytesRead) : buf
-  return buf
+  return readAt(fd, 0, len)
 }
 
 /** 读取 ID3v2 标签长度（syncsafe 整数）；数据不足或非法返回 null */
@@ -90,22 +109,77 @@ function needsMoreBytes(buf: Buffer, fileSize: number): boolean {
   return false
 }
 
+/**
+ * 封面原始字节。MIME 可能缺失或是脏值（APEv2 甚至只存文件名），
+ * 一律交给 imageSniff.finalizeCover 在 IPC 出口统一裁决，这里不做猜测。
+ */
+export interface ManualCover {
+  mimeType?: string
+  data: Uint8Array
+}
+
 export interface ManualMeta {
   durationMs?: number
   bitrate?: number
   sampleRate?: number
-  cover?: { mimeType: string; base64: string }
+  cover?: ManualCover
   title?: string
   artists?: string[]
   album?: string
   year?: number
 }
 
+/** 封面择优过程中的内部状态：已选中的是否前封面，用于后续遇到前封面时替换 */
+interface CoverPickState {
+  isFront: boolean
+}
+
+/** 只在 target 缺失时用 src 补齐，绝不覆盖已有值 */
+function mergeManualMeta(target: ManualMeta, src: ManualMeta | null | undefined): ManualMeta {
+  if (!src) return target
+  if (target.cover === undefined) target.cover = src.cover
+  if (target.durationMs === undefined) target.durationMs = src.durationMs
+  if (target.bitrate === undefined) target.bitrate = src.bitrate
+  if (target.sampleRate === undefined) target.sampleRate = src.sampleRate
+  if (target.title === undefined) target.title = src.title
+  if (target.artists === undefined) target.artists = src.artists
+  if (target.album === undefined) target.album = src.album
+  if (target.year === undefined) target.year = src.year
+  return target
+}
+
 /**
  * 按文件内容手动读取元数据
+ *
+ * 先走头部窗口（FLAC / ID3v2 / 裸 MPEG），头部拿不到封面时再补读尾部窗口
+ * （APEv2 / 尾部 ID3 chunk）。两趟互不阻塞。
+ *
  * @returns 无法识别的格式返回 null
  */
 export async function readMetaManually(filePath: string): Promise<ManualMeta | null> {
+  let head: ManualMeta | null = null
+  try {
+    head = await readHeadMeta(filePath)
+  } catch {
+    head = null
+  }
+  // 头部已经拿到封面（绝大多数 MP3/FLAC）就不必再开一次文件读尾部
+  if (head?.cover) return head
+
+  let tail: ManualMeta | null = null
+  try {
+    tail = await readTailMeta(filePath)
+  } catch {
+    tail = null
+  }
+
+  if (!tail) return head
+  if (!head) return tail
+  return mergeManualMeta(head, tail)
+}
+
+/** 头部窗口解析 */
+async function readHeadMeta(filePath: string): Promise<ManualMeta | null> {
   let buf: Buffer
   let fileSize: number
   try {
@@ -152,6 +226,7 @@ export async function readMetaManually(filePath: string): Promise<ManualMeta | n
 
 function parseFlac(buf: Buffer, flacAt: number): ManualMeta | null {
   const res: ManualMeta = {}
+  let coverIsFront = false
   let pos = flacAt + 4
   let last = false
   while (!last && pos + 4 <= buf.length) {
@@ -180,10 +255,14 @@ function parseFlac(buf: Buffer, flacAt: number): ManualMeta | null {
       // VORBIS_COMMENT
       parseVorbisComment(buf, blockStart, blockEnd, res)
     } else if (type === 6) {
-      // PICTURE
+      // PICTURE：同一文件可能同时带前封面/封底/艺人照，优先取 type=3 的前封面
       const pic = parseFlacPicture(buf, blockStart, blockEnd)
-      if (pic && !res.cover) {
-        res.cover = { mimeType: pic.mime || 'image/jpeg', base64: pic.data.toString('base64') }
+      if (pic) {
+        const isFront = pic.type === 3
+        if (!res.cover || (isFront && !coverIsFront)) {
+          res.cover = { mimeType: pic.mime || undefined, data: pic.data }
+          coverIsFront = isFront
+        }
       }
     }
     pos = blockEnd
@@ -227,9 +306,10 @@ function parseFlacPicture(
   buf: Buffer,
   start: number,
   end: number
-): { mime: string; data: Buffer } | null {
+): { type: number; mime: string; data: Buffer } | null {
   let pos = start
   if (pos + 8 > end) return null
+  const pictureType = buf.readUInt32BE(pos)
   pos += 4 // 图片类型
   const mimeLen = buf.readUInt32BE(pos)
   pos += 4
@@ -245,7 +325,7 @@ function parseFlacPicture(
   const dataLen = buf.readUInt32BE(pos)
   pos += 4
   if (pos + dataLen > end || dataLen <= 0) return null
-  return { mime: mime || 'image/jpeg', data: Buffer.from(buf.subarray(pos, pos + dataLen)) }
+  return { type: pictureType, mime, data: Buffer.from(buf.subarray(pos, pos + dataLen)) }
 }
 
 // ==================== ID3v2 / MPEG ====================
@@ -257,15 +337,31 @@ function syncsafeInt(b: Buffer, o: number): number {
 }
 
 function parseId3(buf: Buffer, fileSize: number): ManualMeta | null {
+  return parseId3At(buf, 0, fileSize, true)
+}
+
+/**
+ * 从 buf 的任意偏移解析一个独立的 ID3v2 标签块。
+ *
+ * @param withDuration 是否顺带按 MPEG 帧估算时长。只有「标签在文件头」时才有意义；
+ *   尾部 ID3 的宿主可能是 WAV/AIFF，在那种文件里按 MPEG 帧扫描纯属误判。
+ */
+function parseId3At(
+  buf: Buffer,
+  offset: number,
+  fileSize: number,
+  withDuration: boolean
+): ManualMeta | null {
+  if (buf.length < offset + 10) return null
   const res: ManualMeta = {}
-  if (buf.length >= 10) {
-    const major = buf[3]
-    const tagSize = syncsafeInt(buf, 6)
-    const bodyStart = 10
-    const bodyEnd = Math.min(bodyStart + tagSize, buf.length)
-    if (major === 2 || major === 3 || major === 4) {
-      parseId3Frames(buf, bodyStart, bodyEnd, major, res)
-    }
+  const major = buf[offset + 3]
+  const tagSize = syncsafeInt(buf, offset + 6)
+  const bodyStart = offset + 10
+  const bodyEnd = Math.min(bodyStart + tagSize, buf.length)
+  if (major === 2 || major === 3 || major === 4) {
+    parseId3Frames(buf, bodyStart, bodyEnd, major, res, { isFront: false })
+  }
+  if (withDuration) {
     // 标签结束后扫描 MPEG 帧估算时长
     const audio = estimateMpegDuration(buf, fileSize, bodyEnd)
     if (audio) {
@@ -282,7 +378,8 @@ function parseId3Frames(
   start: number,
   end: number,
   major: number,
-  res: ManualMeta
+  res: ManualMeta,
+  state: CoverPickState
 ): void {
   let pos = start
   while (pos + 10 <= end) {
@@ -290,7 +387,7 @@ function parseId3Frames(
       const id = buf.toString('latin1', pos, pos + 3)
       if (!/^[A-Z0-9]{3}$/.test(id)) break
       const size = (buf[pos + 3] << 16) | (buf[pos + 4] << 8) | buf[pos + 5]
-      handleId3Frame(buf, pos + 6, Math.min(pos + 6 + size, end), id, major, res)
+      handleId3Frame(buf, pos + 6, Math.min(pos + 6 + size, end), id, major, res, state)
       pos += 6 + size
     } else {
       const id = buf.toString('latin1', pos, pos + 4)
@@ -300,7 +397,7 @@ function parseId3Frames(
         // v2.4 帧大小允许非 syncsafe 写入，兼容异常写法
         size = buf.readUInt32BE(pos + 4)
       }
-      handleId3Frame(buf, pos + 10, Math.min(pos + 10 + size, end), id, major, res)
+      handleId3Frame(buf, pos + 10, Math.min(pos + 10 + size, end), id, major, res, state)
       pos += 10 + size
     }
     if (pos > end) break
@@ -313,13 +410,19 @@ function handleId3Frame(
   end: number,
   id: string,
   major: number,
-  res: ManualMeta
+  res: ManualMeta,
+  state: CoverPickState
 ): void {
   if (end <= start) return
   if (id.startsWith('APIC') || (major === 2 && id === 'PIC')) {
-    if (!res.cover) {
-      const pic = parseApic(buf, start, end, major === 2)
-      if (pic) res.cover = pic
+    const pic = parseApic(buf, start, end, major === 2)
+    if (pic) {
+      // 同一文件可能有多张图（前封面/封底/艺人照），type=3 的前封面优先
+      const isFront = pic.type === 3
+      if (!res.cover || (isFront && !state.isFront)) {
+        res.cover = { mimeType: pic.mimeType, data: pic.data }
+        state.isFront = isFront
+      }
     }
     return
   }
@@ -383,7 +486,7 @@ function parseApic(
   start: number,
   end: number,
   isV22: boolean
-): { mimeType: string; base64: string } | null {
+): { type: number; mimeType?: string; data: Buffer } | null {
   if (end - start < 4) return null
   const enc = buf[start]
   let pos = start + 1
@@ -396,6 +499,7 @@ function parseApic(
     pos += 3
   }
   if (pos >= end) return null
+  const pictureType = buf[pos]
   pos += 1 // 图片类型
   if (pos >= end) return null
   if (enc === 0 || enc === 3) {
@@ -416,8 +520,172 @@ function parseApic(
   }
   if (pos >= end) return null
   return {
-    mimeType: mime || 'image/jpeg',
-    base64: buf.subarray(pos, end).toString('base64')
+    type: pictureType,
+    mimeType: mime || undefined,
+    data: Buffer.from(buf.subarray(pos, end))
+  }
+}
+
+// ==================== 尾部标签（APEv2 / 尾部 ID3） ====================
+
+const APE_SIGNATURE = Buffer.from('APETAGEX', 'latin1')
+const ID3_SIGNATURE = Buffer.from('ID3', 'latin1')
+/** footer 的 flags bit29：为 1 表示这块是 header 而不是 footer */
+const APE_FLAG_IS_HEADER = 0x20000000
+
+/** 在缓冲区里从尾部往前找 APEv2 footer，返回其偏移；找不到返回 -1 */
+function findApeFooter(buf: Buffer): number {
+  let at = buf.lastIndexOf(APE_SIGNATURE)
+  while (at >= 0) {
+    if (at + 32 <= buf.length) {
+      const flags = buf.readUInt32LE(at + 20)
+      if ((flags & APE_FLAG_IS_HEADER) === 0) return at
+    }
+    if (at === 0) break
+    at = buf.lastIndexOf(APE_SIGNATURE, at - 1)
+  }
+  return -1
+}
+
+/** APEv2 的封面项值是「文件名 \0 图片数据」，但部分写入器省略了文件名 */
+function extractApePicture(value: Buffer): ManualCover | null {
+  if (value.length === 0) return null
+  if (sniffImageMime(value)) return { data: value }
+  const nul = value.indexOf(0)
+  if (nul >= 0 && nul + 1 < value.length) {
+    const after = value.subarray(nul + 1)
+    if (sniffImageMime(after)) return { data: after }
+  }
+  return null
+}
+
+/**
+ * 解析一个完整的 APEv2 标签块（items 与 footer 都必须落在 buf 内）。
+ *
+ * 项布局：valueSize(u32LE) + itemFlags(u32LE) + key(\0 结尾) + value。
+ * footer 32 字节：'APETAGEX' + version + tagSize + itemCount + flags + 8 字节保留，
+ * 其中 tagSize 覆盖 items 与 footer，但不含可选的 header。
+ *
+ * 抽成纯函数是为了能单测（见 src/main/utils/__tests__/apeCover.test.ts）。
+ */
+export function parseApeTag(buf: Buffer): ManualMeta | null {
+  const footerAt = findApeFooter(buf)
+  if (footerAt < 0) return null
+
+  const tagSize = buf.readUInt32LE(footerAt + 12)
+  const itemCount = buf.readUInt32LE(footerAt + 16)
+  const itemsStart = footerAt + 32 - tagSize
+  if (tagSize < 32 || itemsStart < 0 || itemCount > 4096) return null
+
+  const res: ManualMeta = {}
+  let coverIsFront = false
+  let pos = itemsStart
+
+  for (let i = 0; i < itemCount; i++) {
+    if (pos + 8 > footerAt) break
+    const valueSize = buf.readUInt32LE(pos)
+    const keyStart = pos + 8
+    const keyEnd = buf.indexOf(0, keyStart)
+    if (keyEnd < 0 || keyEnd >= footerAt) break
+    const key = buf.toString('latin1', keyStart, keyEnd)
+    const valueStart = keyEnd + 1
+    // 越界说明文件被截断或 tagSize 不可信，停止解析
+    if (valueSize > footerAt - valueStart) break
+    const value = buf.subarray(valueStart, valueStart + valueSize)
+    pos = valueStart + valueSize
+
+    const upper = key.toUpperCase()
+    if (upper.startsWith('COVER ART')) {
+      const isFront = upper.includes('FRONT')
+      if (!res.cover || (isFront && !coverIsFront)) {
+        const pic = extractApePicture(value)
+        if (pic) {
+          res.cover = pic
+          coverIsFront = isFront
+        }
+      }
+      continue
+    }
+
+    const text = value.toString('utf8')
+    if (!text) continue
+    if (upper === 'TITLE' && res.title === undefined) {
+      res.title = text
+    } else if (upper === 'ARTIST' && res.artists === undefined) {
+      res.artists = [text]
+    } else if (upper === 'ALBUM' && res.album === undefined) {
+      res.album = text
+    } else if ((upper === 'YEAR' || upper === 'DATE') && res.year === undefined) {
+      const y = parseInt(text, 10)
+      if (Number.isFinite(y)) res.year = y
+    }
+  }
+
+  return hasAny(res) ? res : null
+}
+
+/** 在尾部窗口里从后往前找形如 "ID3" + 版本(2/3/4) + 0x00 的独立标签块 */
+function findTailId3(buf: Buffer): number {
+  let at = buf.lastIndexOf(ID3_SIGNATURE)
+  while (at >= 0) {
+    if (at + 10 <= buf.length) {
+      const major = buf[at + 3]
+      const revision = buf[at + 4]
+      if ((major === 2 || major === 3 || major === 4) && revision === 0) return at
+    }
+    if (at === 0) break
+    at = buf.lastIndexOf(ID3_SIGNATURE, at - 1)
+  }
+  return -1
+}
+
+/**
+ * 尾部窗口解析。
+ *
+ * 覆盖两类「只有从文件尾才看得见」的标签：
+ * - APEv2：`.ape` / `.wv` 的唯一标签容器，封面存在 `Cover Art (Front)` 二进制项里
+ * - 尾部 ID3v2：WAV / AIFF 的 "ID3 " chunk 常被写在 RIFF/FORM 声明范围之外
+ */
+async function readTailMeta(filePath: string): Promise<ManualMeta | null> {
+  const fd = await fs.open(filePath, 'r')
+  try {
+    const { size: fileSize } = await fd.stat()
+    if (fileSize < 128) return null
+
+    const len = Math.min(fileSize, TAIL_PROBE_BYTES)
+    const start = fileSize - len
+    const view = await readAt(fd, start, len)
+    const res: ManualMeta = {}
+
+    const footerAt = findApeFooter(view)
+    if (footerAt >= 0) {
+      const tagSize = view.readUInt32LE(footerAt + 12)
+      if (tagSize >= 32 && tagSize <= APE_MAX_TAG_BYTES) {
+        const itemsStartInFile = start + footerAt + 32 - tagSize
+        if (itemsStartInFile >= 0) {
+          // 整块已在窗口内就直接切片，否则按 tagSize 精确回读（超大封面标签）
+          const tagBuf =
+            itemsStartInFile >= start
+              ? view.subarray(footerAt + 32 - tagSize)
+              : await readAt(fd, itemsStartInFile, tagSize)
+          const ape = parseApeTag(tagBuf)
+          if (ape) mergeManualMeta(res, ape)
+        }
+      }
+    }
+
+    if (res.cover) return res
+
+    // 尾部 ID3：不做 MPEG 时长估算，宿主可能是 WAV/AIFF
+    const id3At = findTailId3(view)
+    if (id3At >= 0) {
+      const id3 = parseId3At(view, id3At, fileSize, false)
+      if (id3) mergeManualMeta(res, id3)
+    }
+
+    return hasAny(res) ? res : null
+  } finally {
+    await fd.close()
   }
 }
 

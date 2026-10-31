@@ -7,8 +7,9 @@
  */
 
 import { app, ipcMain } from 'electron';
-import { join } from 'path';
-import { mkdirSync, writeFileSync } from 'fs';
+import { basename, join } from 'path';
+import { fileURLToPath, pathToFileURL } from 'url';
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'fs';
 import { getMainWindow } from '../windows/mainWindow';
 import { tryLoadNativeModule as tryLoadNative } from './nativeModuleLoader';
 
@@ -17,7 +18,8 @@ export interface MediaControlStatus {
   title?: string;
   artist?: string;
   album?: string;
-  cover?: string; // data: | http(s): | 本地文件路径 | blob:(渲染层先转 data:)
+  /** data: | http(s): | file: | 本地绝对文件路径 | blob:(渲染层先转 data:) */
+  cover?: string;
   durationMs?: number;
   playing: boolean;
   positionMs?: number;
@@ -74,6 +76,46 @@ let coverDir: string | null = null;
  * 命中同一 src 时直接复用上次的文件路径。
  */
 let coverMemo: { src: string; path: string } | null = null;
+/**
+ * 上一次被判定为「无法转换」的封面地址：
+ * 进度上报是 1Hz 的，同一张坏封面会反复进入这里，只告警一次避免刷屏。
+ */
+let rejectedCoverSrc: string | null = null;
+/**
+ * 被原生模块 / 系统拒绝过的封面地址（例如系统下载失败）：
+ * 命中后直接当作「无封面」，避免每秒重试一次 setMetadata 失败。
+ */
+let nativeRejectedCover: string | null = null;
+
+/** Windows 绝对路径：盘符（C:\ 或 C:/）或 UNC（\\server\share） */
+const WIN_ABS_PATH_RE = /^(?:[a-zA-Z]:[\\/]|\\\\)/;
+
+/**
+ * 判断字符串是否为当前平台可直接交给原生模块的本地绝对路径
+ * Windows 上 `/xxx` 属于「当前驱动器相对路径」而非绝对路径，
+ * 若原样下发，SMTC 会抛 0x80070057（不是有效的绝对 URI）。
+ */
+function isLocalAbsolutePath(p: string): boolean {
+  return process.platform === 'win32' ? WIN_ABS_PATH_RE.test(p) : p.startsWith('/');
+}
+
+/**
+ * 本地封面文件 → 原生模块可消费的地址。
+ *
+ * 三个平台的 souvlaki 后端对封面地址的要求不同：
+ * - Windows：`file://` 分支是用 `trim_start_matches("file://")` 粗剪成路径的，
+ *   `file:///C:/x.png` 会被剪成 `/C:/x.png` 而读不到文件，因此这里直接给纯盘符路径；
+ * - macOS（NSURL initWithContentsOfURL）/ Linux（mpris:artUrl）：必须是 file:// URI，
+ *   纯路径会被当成无 scheme 的相对 URL，封面同样不显示。
+ */
+function toNativeCoverUrl(filePath: string): string {
+  return process.platform === 'win32' ? filePath : pathToFileURL(filePath).href;
+}
+
+/** 告警时截断超长地址（data: URL 可达数 MB） */
+function truncateForLog(value: string): string {
+  return value.length > 160 ? `${value.slice(0, 160)}…` : value;
+}
 
 /**
  * 加载原生模块（统一路径解析 + 失败降级）
@@ -111,46 +153,105 @@ function getCoverDir(): string {
 }
 
 /**
+ * 把封面文件落实为原生模块能读到的真实磁盘路径。
+ * 打包后默认封面等资源位于 asar 虚拟文件系统内，WinRT StorageFile / 系统媒体控件
+ * 都读不到 `app.asar` 里的文件，需要先复制一份到封面缓存目录。
+ * @param filePath 真实存在的磁盘/asar 路径
+ * @returns 可交付给原生模块的路径；复制失败返回空串
+ */
+function materializeCoverFile(filePath: string): string {
+  if (!filePath.includes('.asar')) return filePath;
+  try {
+    const target = join(getCoverDir(), `asar-${basename(filePath)}`);
+    copyFileSync(filePath, target);
+    return target;
+  } catch (error: any) {
+    console.warn('[MediaControl] 复制 asar 内封面失败，降级为空封面:', error?.message ?? error);
+    return '';
+  }
+}
+
+/**
  * 封面本地化：
  * - data: URL → 解码为 Buffer 写入固定文件，返回文件路径
- * - http(s): / 本地绝对路径 → 原样透传
- * - 空串 / asset 相对 URL 等 → 返回空字符串（表示无封面）
+ * - http(s): → 原样透传（由原生模块自行下载）
+ * - file:// → 转为本地路径（asar 内文件先复制出来）
+ * - 本地绝对路径（Windows 盘符 / UNC / POSIX 绝对路径）→ 校验存在后透传
+ * - 其余（如渲染层的 `/src/assets/default-cover.png` 等相对资源路径）→ 返回空串并告警
+ *
+ * 原生模块（souvlaki / SMTC）只接受**绝对 URI 或真实文件路径**，
+ * 相对路径会直接抛 0x80070057 并导致封面不显示。
  */
 function localizeCover(cover?: string): string {
   if (!cover) return '';
+
+  // 被系统拒绝过的封面不再重试（否则每秒都会 setMetadata 失败）
+  if (nativeRejectedCover === cover) return '';
 
   // 同一张封面只处理一次（进度上报是 1Hz 的）
   if (coverMemo && coverMemo.src === cover) return coverMemo.path;
 
   let result = '';
 
-  // data: URL → 解码并落盘为文件，原生模块通过文件路径读取
   if (cover.startsWith('data:')) {
+    // data: URL → 解码并落盘为文件，原生模块通过文件路径读取
     try {
       const match = /^data:([^;,]*)?(;base64)?,(.*)$/s.exec(cover);
-      if (!match) return '';
-      const mime = (match[1] || '').toLowerCase();
-      const ext =
-        mime === 'image/png' ? 'png' : mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : 'bin';
-      const buffer = match[2] ? Buffer.from(match[3], 'base64') : Buffer.from(decodeURIComponent(match[3]), 'utf8');
-      const filePath = join(getCoverDir(), `current-cover.${ext}`);
-      writeFileSync(filePath, buffer);
-      result = filePath;
+      if (match) {
+        const mime = (match[1] || '').toLowerCase();
+        const ext =
+          mime === 'image/png'
+            ? 'png'
+            : mime === 'image/jpeg'
+              ? 'jpg'
+              : mime === 'image/webp'
+                ? 'webp'
+                : 'bin';
+        const buffer = match[2]
+          ? Buffer.from(match[3], 'base64')
+          : Buffer.from(decodeURIComponent(match[3]), 'utf8');
+        if (buffer.length > 0) {
+          const filePath = join(getCoverDir(), `current-cover.${ext}`);
+          writeFileSync(filePath, buffer);
+          result = toNativeCoverUrl(filePath);
+        }
+      }
     } catch (error: any) {
       console.warn('[MediaControl] 写入封面文件失败，降级为空封面:', error?.message ?? error);
+      rejectedCoverSrc = cover;
       return '';
     }
   } else if (/^https?:\/\//i.test(cover)) {
     // http(s): URL → 原样透传（由原生模块自行下载）
     result = cover;
-  } else if (cover.startsWith('file://') || /^[a-zA-Z]:[\\/]/.test(cover) || cover.startsWith('/')) {
-    // 本地绝对路径（Windows 盘符 / UNC / Unix 绝对路径 / file://）→ 原样透传
-    result = cover;
+  } else if (cover.startsWith('file://')) {
+    try {
+      const filePath = fileURLToPath(cover);
+      const usable = existsSync(filePath) ? materializeCoverFile(filePath) : '';
+      if (usable) result = toNativeCoverUrl(usable);
+    } catch {
+      // file:// 地址非法（例如 file://C:/x.png 这种缺第三斜杠的写法）
+      result = '';
+    }
+  } else if (isLocalAbsolutePath(cover) && existsSync(cover)) {
+    const usable = materializeCoverFile(cover);
+    if (usable) result = toNativeCoverUrl(usable);
   }
 
-  // 只缓存成功结果：写盘失败时下次仍会重试，与改动前一致
-  if (result) coverMemo = { src: cover, path: result };
-  return result;
+  if (result) {
+    coverMemo = { src: cover, path: result };
+    rejectedCoverSrc = null;
+    return result;
+  }
+
+  // 未命中任何可用形式：只在地址变化时告警一次（1Hz 上报会重复进入这里）
+  if (rejectedCoverSrc !== cover) {
+    rejectedCoverSrc = cover;
+    console.warn(
+      `[MediaControl] 封面地址不是原生模块可用的绝对 URI / 本地路径，已忽略: ${truncateForLog(cover)}`
+    );
+  }
+  return '';
 }
 
 /**
@@ -222,6 +323,11 @@ function handleUpdate(_event: Electron.IpcMainEvent, status: MediaControlStatus)
 
   if (!nativeMediaControl) return;
 
+  // 封面地址变化（切歌）后重新给被系统拒过的封面一次机会，避免一次失败就永久丢封面
+  if (nativeRejectedCover && nativeRejectedCover !== currentStatus.cover) {
+    nativeRejectedCover = null;
+  }
+
   try {
     const coverUrl = localizeCover(currentStatus.cover);
 
@@ -234,20 +340,27 @@ function handleUpdate(_event: Electron.IpcMainEvent, status: MediaControlStatus)
       lastMetadataSent.coverUrl !== coverUrl ||
       lastMetadataSent.durationMs !== currentStatus.durationMs;
     if (metadataChanged) {
-      nativeMediaControl.setMetadata({
-        title: currentStatus.title,
-        artist: currentStatus.artist,
-        album: currentStatus.album,
-        coverUrl,
-        durationMs: currentStatus.durationMs,
-      });
-      lastMetadataSent = {
+      const metadata = {
         title: currentStatus.title,
         artist: currentStatus.artist,
         album: currentStatus.album,
         coverUrl,
         durationMs: currentStatus.durationMs,
       };
+      let sentCoverUrl = coverUrl;
+      try {
+        nativeMediaControl.setMetadata(metadata);
+      } catch (error: any) {
+        // 封面被系统拒绝（非绝对 URI / 文件读不到）时降级为「无封面」重试：
+        // 否则标题、歌手、时长会随封面一起丢失，表现为系统控件信息整体不更新
+        console.warn('[MediaControl] 设置元数据失败，降级为无封面重试:', error?.message ?? error);
+        nativeMediaControl.setMetadata({ ...metadata, coverUrl: '' });
+        sentCoverUrl = '';
+        // 记下这张被系统拒绝的封面，避免每秒重试；同时清掉缓存，切歌后可重新尝试
+        nativeRejectedCover = currentStatus.cover ?? null;
+        coverMemo = null;
+      }
+      lastMetadataSent = { ...metadata, coverUrl: sentCoverUrl };
     }
 
     // 播放状态：仅变化时调用 setPlaybackState
@@ -362,6 +475,9 @@ export function destroyMediaControl(): void {
   lastPlayingSent = null;
   lastPositionSent = null;
   commandDedupMap.clear();
+  coverMemo = null;
+  rejectedCoverSrc = null;
+  nativeRejectedCover = null;
   nativeMediaControl = null;
   nativeModule = null;
   initialized = false;

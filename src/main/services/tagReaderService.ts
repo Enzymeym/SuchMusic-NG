@@ -23,6 +23,10 @@ export interface NativeTagInfo {
   comment?: string
   composer?: string
   picture?: NativePicture
+  /** 文件内图片总数（仅 includeCover=true 时有值），用于诊断 */
+  pictureCount?: number
+  /** 选中图片的 ID3 APIC 类型码：3=前封面 4=封底 0=其他 */
+  pictureType?: number
   durationMs?: number
   sampleRate?: number
   bitDepth?: number
@@ -47,7 +51,14 @@ export interface NativeTags {
   durationMs?: number
   bitrate?: number
   sampleRate?: number
-  cover?: { mimeType: string; base64: string }
+  /**
+   * 封面原始字节。MIME 可能是空串或脏值，编码与裁决统一交给
+   * imageSniff.finalizeCover 在解析出口完成，这里不做猜测与 base64。
+   */
+  cover?: { mimeType?: string; data: Uint8Array }
+  /** 选中图片的 APIC 类型码（3=前封面），供上层判断是否需要再向其它解析器求证 */
+  pictureType?: number
+  pictureCount?: number
   title?: string
   artists?: string[]
   artist?: string
@@ -139,11 +150,11 @@ function normalizeTags(info: NativeTagInfo | null): NativeTags | null {
       .filter((s) => s.length > 0)
   }
 
-  let cover: { mimeType: string; base64: string } | undefined
+  let cover: { mimeType?: string; data: Uint8Array } | undefined
   if (info.picture && info.picture.data && info.picture.data.byteLength > 0) {
     cover = {
-      mimeType: info.picture.mimeType || 'image/jpeg',
-      base64: Buffer.from(info.picture.data).toString('base64')
+      mimeType: info.picture.mimeType || undefined,
+      data: info.picture.data
     }
   }
 
@@ -156,6 +167,8 @@ function normalizeTags(info: NativeTagInfo | null): NativeTags | null {
     bitrate: info.bitrate,
     sampleRate: info.sampleRate,
     cover,
+    pictureType: info.pictureType,
+    pictureCount: info.pictureCount,
     title: trimStr(info.title),
     artists,
     artist: trimStr(info.artist),

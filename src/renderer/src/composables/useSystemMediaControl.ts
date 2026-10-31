@@ -12,7 +12,7 @@ export interface MediaControlStatus {
   title?: string
   artist?: string
   album?: string
-  /** data: | http(s): | 本地文件路径 | blob:(渲染层先转 data:) */
+  /** data: | http(s): | file: | 本地文件路径 | blob:(渲染层先转 data:) */
   cover?: string
   durationMs?: number
   playing: boolean
@@ -29,19 +29,19 @@ interface MediaControlCommandPayload {
 const POSITION_THROTTLE_MS = 1000
 
 /**
- * blob: 封面 URL → data: URL 转换缓存
+ * blob: / http(s): 封面 → data: URL 转换缓存
  * 主进程的 SMTC 无法直接消费 blob: URL，需先转为 data: URL；
- * 同一 blob URL 只转换一次，避免重复 fetch/读取。
+ * 同一 URL 只转换一次，避免重复 fetch/读取。
  * data URL 单条可达数 MB，限制条数防止长会话内存无限增长（简单 LRU）。
  */
 const blobCoverCache = new Map<string, string>()
 const BLOB_COVER_CACHE_MAX = 6
 
 /**
- * 将 blob: URL 封面转换为 data: URL
- * 转换失败（fetch 失败 / FileReader 报错）时回退 undefined
+ * 将 blob: / http(s): URL 封面转换为 data: URL
+ * 转换失败（fetch 失败 / FileReader 报错 / 跨域）时回退 undefined
  */
-async function convertBlobCoverToDataUrl(cover: string): Promise<string | undefined> {
+async function convertCoverToDataUrl(cover: string): Promise<string | undefined> {
   const cached = blobCoverCache.get(cover)
   if (cached) {
     // 命中时刷新为最近使用，维持 LRU 顺序
@@ -67,6 +67,51 @@ async function convertBlobCoverToDataUrl(cover: string): Promise<string | undefi
   } catch {
     return undefined
   }
+}
+
+/** 已带 scheme 的绝对 URI（data: / blob: / http(s): / file: ...） */
+const ABSOLUTE_URI_RE = /^[a-z][a-z0-9+.-]*:/i
+
+/**
+ * 归一化封面地址，使其成为主进程 / 原生模块可消费的形式。
+ *
+ * song.cover 有三种来源：
+ * 1. 在线封面（http(s):）与本地音乐封面（data: / blob:）—— 已是绝对 URI 或走既有转换；
+ * 2. Vite 静态资源路径：开发态 `/src/assets/default-cover.png`、打包态 `./assets/default-cover-xxx.png`。
+ *    这类路径是 UI 占位图（默认封面）被写进 song.cover 的结果，**既不是绝对路径也不是绝对 URI**，
+ *    原样下发给 SMTC 会报「不是有效的绝对 URI」(0x80070057)，默认封面因此在系统播放控件里不显示。
+ *    这里统一以文档 baseURI 解析为绝对 URL：开发态得到 http(s):（就地内联为 data: URL），
+ *    打包态得到 file: URL（交给主进程读盘，asar 内文件由主进程复制出来）。
+ *
+ * @returns 归一化后的封面；无法解析时返回 undefined（表示无封面）
+ */
+async function normalizeCover(cover?: string): Promise<string | undefined> {
+  if (!cover) return undefined
+
+  if (ABSOLUTE_URI_RE.test(cover)) {
+    // 绝对 URI：blob: 需转换，其余原样交给主进程
+    return cover.startsWith('blob:') ? await convertCoverToDataUrl(cover) : cover
+  }
+
+  // 相对资源路径 → 解析为绝对 URL
+  let absolute: string
+  try {
+    absolute = new URL(cover, document.baseURI).href
+  } catch {
+    return undefined
+  }
+
+  if (absolute.startsWith('blob:')) return convertCoverToDataUrl(absolute)
+
+  if (/^https?:/i.test(absolute)) {
+    // 开发态：资源由 Vite dev server 提供，取回后内联，避免依赖 SMTC 再次下载。
+    // 若取回的不是图片（例如 dev server 回落成了 HTML），退回绝对 URL 让主进程处理。
+    const inlined = await convertCoverToDataUrl(absolute)
+    return inlined && inlined.startsWith('data:image/') ? inlined : absolute
+  }
+
+  // 打包态：file: URL，由主进程转换为本地路径后交给原生模块
+  return absolute
 }
 
 /**
@@ -112,11 +157,8 @@ export function useSystemMediaControl(): void {
     const positionChanged = Math.abs(positionMs - lastSentPositionMs) >= POSITION_THROTTLE_MS
     if (!force && !songChanged && !positionChanged) return
 
-    // blob: 封面主进程无法消费，异步转换为 data: URL（失败则回退 undefined）
-    let cover: string | undefined = song?.cover
-    if (cover && cover.startsWith('blob:')) {
-      cover = await convertBlobCoverToDataUrl(cover)
-    }
+    // 封面归一化：blob: 转 data:；Vite 资源路径解析为绝对 URI（见 normalizeCover 注释）
+    const cover = await normalizeCover(song?.cover)
 
     const status: MediaControlStatus = {
       title: song?.title,
