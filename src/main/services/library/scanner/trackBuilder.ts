@@ -9,8 +9,8 @@
  */
 import type { ScannedTrack } from '../../../../shared/library/types'
 import { baseName } from '../../../../shared/library/normalize'
-import type { NativeTags } from '../../../tagReaderCore'
-import type { ResolvedAudioMeta } from '../../../audioMetaResolver'
+import type { NativeTags } from '../../tagReaderCore'
+import type { ResolvedAudioMeta } from '../../audioMetaResolver'
 import { guessCodec, type WalkedFile } from './walk'
 import type { CoverRef } from './coverWriter'
 

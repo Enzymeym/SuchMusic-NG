@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { toPosixPath } from '../../../../shared/library/normalize'
+import { toPosixPath } from '../../../../../shared/library/normalize'
 import { guessCodec, walkRoots, type WalkedFile } from '../walk'
 
 let root = ''

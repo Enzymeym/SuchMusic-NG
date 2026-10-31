@@ -48,6 +48,9 @@ export function startScanner(
   handlers: ScannerHandlers = {}
 ): ScannerHandle {
   let settled = false
+  // UtilityProcess 没有 killed 属性，自己记一个，避免重复 kill
+  let child: UtilityProcess | null = null
+  let childKilled = false
   let settle!: (value: ScanDonePayload | null) => void
   const done = new Promise<ScanDonePayload | null>((resolve) => {
     settle = resolve
@@ -58,13 +61,15 @@ export function startScanner(
     settled = true
     settle(value)
     try {
-      if (child && !child.killed) child.kill()
+      if (child && !childKilled) {
+        childKilled = true
+        child.kill()
+      }
     } catch {
       /* ignore */
     }
   }
 
-  let child: UtilityProcess | null = null
   try {
     child = utilityProcess.fork(scannerScriptPath(), [], {
       serviceName: 'such-music-library-scanner'
