@@ -1,4 +1,4 @@
-import { ref, reactive, watch, watchEffect, onScopeDispose } from 'vue'
+import { ref, reactive, watch, watchEffect, onScopeDispose, effectScope } from 'vue'
 import { audioEngine } from '../audio/audio-engine'
 import { isWebAudioMode } from '../utils/audioOutputModeManager'
 
@@ -119,6 +119,27 @@ export interface Preset {
  * 音效引擎状态存储键名
  */
 const ENGINE_STATE_STORAGE_KEY = 'sound-effect-state';
+
+/**
+ * 默认 EQ 频段（与 web-audio-dsp 的 EQ_BAND_FREQUENCIES / 内置「平坦」预设一致）。
+ *
+ * 用于两种情况：
+ * 1. 恢复保存的曲线时补齐缺失频段（旧版本可能只存了几个频段甚至空数组）；
+ * 2. 引擎还没回读频段时，按默认曲线建好频段列表，避免 setEqBand 因
+ *    「当前数组长度不足」而静默跳过 —— 这是「音效设置不保存」的直接原因之一。
+ */
+const DEFAULT_EQ_BANDS: EqBandSettings[] = [
+  { frequency: 32, preGain: 0, postGain: 0, preQ: 0.7, postQ: 0.7, bandType: 'lowShelf' },
+  { frequency: 64, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+  { frequency: 125, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+  { frequency: 250, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+  { frequency: 500, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+  { frequency: 1000, preGain: 0, postGain: 0, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+  { frequency: 2000, preGain: 0, postGain: 0, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+  { frequency: 4000, preGain: 0, postGain: 0, preQ: 1.41, postQ: 1.41, bandType: 'peaking' },
+  { frequency: 8000, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'peaking' },
+  { frequency: 16000, preGain: 0, postGain: 0, preQ: 1, postQ: 1, bandType: 'highShelf' }
+];
 
 /**
  * 预设数据存储键名
@@ -423,8 +444,13 @@ const BUILTIN_PRESETS: Preset[] = [
 /**
  * useAudioEngine Composable
  * 提供音频引擎的响应式接口
+ *
+ * 注意：内部实现见 `createAudioEngineApi`，对外是**全局单例**。
+ * 之前每次调用都会新建一整套 ref，播放页与播放条各挂一个音效面板时就有两套
+ * 互不相干的状态：任一实例的 watchEffect 都会把「自己那份（可能是默认值）」
+ * 写进同一个 localStorage 键，互相覆盖 —— 表现为「音效设置保存不住」。
  */
-export function useAudioEngine() {
+function createAudioEngineApi() {
   const api = getAudioEngineAPI();
 
   // 引擎状态
@@ -490,6 +516,15 @@ export function useAudioEngine() {
   // 预设管理
   const presets = ref<Preset[]>([]);
   const currentPresetId = ref<string>('flat');
+
+  /**
+   * 是否已完成「读取上次保存的音效设置」。
+   *
+   * 启动时 watchEffect 会立刻带着一整套默认值跑一遍，如果此时直接写 localStorage，
+   * 就会在 initialize() 异步回读之前把用户上次的设置覆盖成默认值（读到的已经是默认值，
+   * 于是看起来「每次重启音效都丢了」）。因此所有落盘动作都必须在 hydrated 之后。
+   */
+  const hydrated = ref(false);
 
   /**
    * 加载所有预设（内置 + 自定义）
@@ -695,27 +730,51 @@ export function useAudioEngine() {
   let gainReductionRafId: number | null = null;
 
   /**
+   * 读取并应用上次保存的音效设置，完成后才允许写回存储。
+   * 任何初始化分支（包括失败分支）都必须走这里，否则 hydrated 一直为 false，
+   * 用户之后的调整就永远保存不下来了。
+   */
+  async function restoreSavedState() {
+    try {
+      const savedState = loadEngineState();
+      if (savedState) await applySavedState(savedState);
+    } catch (error) {
+      console.error('[useAudioEngine] 恢复音效状态失败:', error);
+    } finally {
+      hydrated.value = true;
+    }
+  }
+
+  /** 初始化只跑一次：两个音效面板入口（播放页 / 播放条）会各调一次 */
+  let initPromise: Promise<boolean> | null = null;
+  function initialize(): Promise<boolean> {
+    if (!initPromise) {
+      initPromise = doInitialize().then((ok) => {
+        if (!ok) initPromise = null;
+        return ok;
+      });
+    }
+    return initPromise;
+  }
+
+  /**
    * 初始化音频引擎
    */
-  async function initialize() {
+  async function doInitialize(): Promise<boolean> {
     // Web Audio 模式不需要初始化 Rust 引擎
     if (isWebAudioMode()) {
       // 但需要恢复上次保存的音效状态（Web Audio DSP 链懒加载，参数先入内存，
       // 待首次 doPlay 接线时通过 syncAllParams 应用）
-      const savedState = loadEngineState();
-      if (savedState) {
-        try {
-          await applySavedState(savedState);
-        } catch (error) {
-          console.error('[useAudioEngine] Web Audio 恢复音效状态失败:', error);
-        }
-      }
+      await restoreSavedState();
       state.isInitialized = true;
+      startGainReductionPolling();
       return true;
     }
 
     if (!api) {
       console.warn('[useAudioEngine] audioEngine API 不可用');
+      // 引擎不可用也要把设置读回来：否则界面显示默认值、并把它写回存储
+      await restoreSavedState();
       return false;
     }
 
@@ -725,15 +784,13 @@ export function useAudioEngine() {
       try {
         state.isInitialized = true;
         await refreshAllParams();
-        const savedState = loadEngineState();
-        if (savedState) {
-          await applySavedState(savedState);
-        }
+        await restoreSavedState();
         startGainReductionPolling();
         console.log('[useAudioEngine] 复用已有引擎');
         return true;
       } catch (error) {
         console.error('[useAudioEngine] 复用已有引擎失败:', error);
+        await restoreSavedState();
       }
     }
 
@@ -751,36 +808,23 @@ export function useAudioEngine() {
       });
 
       // 检查结果是否为对象且有 success 属性
-      if (result && typeof result === 'object' && result.success) {
+      if ((result && typeof result === 'object' && result.success) || result === true) {
         state.isInitialized = true;
         await refreshAllParams();
         // 恢复上次保存的音效状态
-        const savedState = loadEngineState();
-        if (savedState) {
-          await applySavedState(savedState);
-        }
-        startGainReductionPolling();
-        console.log('[useAudioEngine] 引擎初始化成功');
-        return true;
-      } else if (result === true) {
-        // 直接返回 true 的情况
-        state.isInitialized = true;
-        await refreshAllParams();
-        // 恢复上次保存的音效状态
-        const savedState = loadEngineState();
-        if (savedState) {
-          await applySavedState(savedState);
-        }
+        await restoreSavedState();
         startGainReductionPolling();
         console.log('[useAudioEngine] 引擎初始化成功');
         return true;
       } else {
         const errorMsg = result && result.error ? result.error : '未知错误';
         console.error('[useAudioEngine] 初始化失败:', errorMsg);
+        await restoreSavedState();
         return false;
       }
     } catch (error) {
       console.error('[useAudioEngine] 初始化错误:', error);
+      await restoreSavedState();
       return false;
     }
   }
@@ -790,6 +834,7 @@ export function useAudioEngine() {
    */
   async function destroy() {
     stopGainReductionPolling();
+    initPromise = null;
     if (engineSaveTimer) {
       clearTimeout(engineSaveTimer);
       engineSaveTimer = null;
@@ -919,18 +964,33 @@ export function useAudioEngine() {
    * @param snapshot - 可选的预构建快照，避免重复浅拷贝
    */
   function saveEngineState(snapshot?: Record<string, unknown>) {
+    // 还没读完上次的设置就写盘 = 用默认值覆盖用户设置
+    if (!hydrated.value) return;
     try {
-      const stateData = snapshot ?? {
-        eqEnabled: eqEnabled.value,
-        eqBands: eqBands.value,
-        compressorEnabled: compressorEnabled.value,
-        compressor: compressor.value,
-        limiterEnabled: limiterEnabled.value,
-        limiter: limiter.value,
-        loudness: loudness.value,
-        virtualBass: virtualBass.value,
-        softClipper: softClipper.value
-      };
+      const stateData: Record<string, unknown> = snapshot
+        ? { ...snapshot }
+        : {
+            eqEnabled: eqEnabled.value,
+            eqBands: eqBands.value.map((b) => ({ ...b })),
+            compressorEnabled: compressorEnabled.value,
+            compressor: { ...compressor.value },
+            limiterEnabled: limiterEnabled.value,
+            limiter: { ...limiter.value },
+            loudness: { ...loudness.value },
+            virtualBass: { ...virtualBass.value },
+            softClipper: { ...softClipper.value }
+          };
+
+      // 频段列表意外为空时（引擎回读失败 / 初始化早期）沿用已保存的曲线，
+      // 绝不能用空数组覆盖，否则下次启动就没有曲线可恢复了
+      const bands = stateData.eqBands;
+      if (!Array.isArray(bands) || bands.length === 0) {
+        const prev = loadEngineState();
+        if (prev && Array.isArray(prev.eqBands) && prev.eqBands.length > 0) {
+          stateData.eqBands = prev.eqBands;
+        }
+      }
+
       localStorage.setItem(ENGINE_STATE_STORAGE_KEY, JSON.stringify(stateData));
     } catch (error) {
       console.error('[useAudioEngine] 保存引擎状态失败:', error);
@@ -944,6 +1004,7 @@ export function useAudioEngine() {
   let engineSaveTimer: ReturnType<typeof setTimeout> | null = null;
   function debouncedSaveEngineState(delayOrSnapshot: number | Record<string, unknown> = 300) {
     if (engineSaveTimer) clearTimeout(engineSaveTimer);
+    if (!hydrated.value) return;
     if (typeof delayOrSnapshot === 'object') {
       // 从 watchEffect 传入的预构建快照
       engineSaveTimer = setTimeout(() => {
@@ -980,20 +1041,32 @@ export function useAudioEngine() {
     if (!savedState) return;
 
     try {
-      // 应用 EQ 状态
-      if (savedState.eqEnabled !== undefined) {
-        await setEqEnabled(savedState.eqEnabled);
-      }
-      if (savedState.eqBands && Array.isArray(savedState.eqBands)) {
-        // 通过 setEqBand 逐个恢复到 Rust API
-        for (let i = 0; i < savedState.eqBands.length; i++) {
-          const band = savedState.eqBands[i];
+      // 应用 EQ 频段：先把频段列表落到本地，再逐个下发给引擎。
+      // setEqBand 依赖「当前频段列表长度」，Web Audio 模式启动时列表是空的，
+      // 若先调用它会全部静默跳过 —— 保存的曲线就是这样丢的。
+      if (savedState.eqBands && Array.isArray(savedState.eqBands) && savedState.eqBands.length > 0) {
+        eqBands.value = DEFAULT_EQ_BANDS.map((band, i) => {
+          const saved = savedState.eqBands[i];
+          if (!saved) return { ...band };
+          return {
+            frequency: saved.frequency ?? band.frequency,
+            preGain: saved.preGain ?? 0,
+            postGain: saved.postGain ?? 0,
+            preQ: saved.preQ ?? band.preQ,
+            postQ: saved.postQ ?? band.postQ,
+            bandType: saved.bandType ?? band.bandType
+          };
+        });
+        for (let i = 0; i < eqBands.value.length; i++) {
           try {
-            await setEqBand(i, band);
+            await setEqBand(i, eqBands.value[i]);
           } catch (e) {
             console.error(`[useAudioEngine] 恢复 EQ 频段 ${i} 失败:`, e);
           }
         }
+      }
+      if (savedState.eqEnabled !== undefined) {
+        await setEqEnabled(savedState.eqEnabled);
       }
 
       // 应用压缩器状态
@@ -1031,14 +1104,17 @@ export function useAudioEngine() {
         }
       }
 
-      // 应用虚拟低频状态
+      // 应用虚拟低频状态（旧实现只写了本地 ref，从未下发到 DSP 链，
+      // 于是「开着重启还是关的」）
       if (savedState.virtualBass) {
-        virtualBass.value = { ...savedState.virtualBass };
+        virtualBass.value = { ...virtualBass.value, ...savedState.virtualBass };
+        audioEngine.setVirtualBassParams({ ...virtualBass.value });
       }
 
-      // 应用软限幅器状态
+      // 应用软限幅器状态（同上，必须下发到 DSP 链）
       if (savedState.softClipper) {
-        softClipper.value = { ...savedState.softClipper };
+        softClipper.value = { ...softClipper.value, ...savedState.softClipper };
+        audioEngine.setSoftClipperParams({ ...softClipper.value });
       }
 
       console.log('[useAudioEngine] 已恢复保存的音效状态');
@@ -1069,7 +1145,11 @@ export function useAudioEngine() {
    * @param settings - 频段设置（部分更新）
    */
   async function setEqBand(bandIndex: number, settings: Partial<EqBandSettings>) {
-    if (bandIndex < 0 || bandIndex >= eqBands.value.length) return;
+    if (bandIndex < 0) return;
+    // 频段列表还没建立（Web Audio 模式启动时不会回读引擎频段）：
+    // 旧实现此时直接 return，保存的曲线永远恢复不上来，还会被当成「空曲线」写回存储。
+    if (bandIndex >= eqBands.value.length) ensureDefaultEqBands();
+    if (bandIndex >= eqBands.value.length) return;
 
     const updated = { ...eqBands.value[bandIndex], ...settings };
     eqBands.value[bandIndex] = updated;
@@ -1082,10 +1162,19 @@ export function useAudioEngine() {
     }
   }
 
+  /** 补齐默认 EQ 频段（保留已有的频段，仅补足到默认 10 段） */
+  function ensureDefaultEqBands() {
+    if (eqBands.value.length >= DEFAULT_EQ_BANDS.length) return;
+    eqBands.value = DEFAULT_EQ_BANDS.map((band, i) => ({
+      ...(eqBands.value[i] ?? band)
+    }));
+  }
+
   /**
    * 设置所有 EQ 频段增益
    */
   function setEqGains(gains: number[]) {
+    if (eqBands.value.length === 0) ensureDefaultEqBands();
     const newBands = eqBands.value.map((band, i) => ({
       ...band,
       preGain: gains[i] ?? 0
@@ -1213,9 +1302,35 @@ export function useAudioEngine() {
     audioEngine.setSoftClipperParams(softClipper.value);
   }
 
+  /**
+   * 把当前内存中的音效设置重新下发到当前后端。
+   *
+   * 切换输出模式（Web Audio ↔ WASAPI）会换一套后端：WASAPI 引擎是新建的，
+   * Web Audio 的 DSP 链也还没接过线。旧实现切换后不做任何重放，用户看到开关是开的、
+   * 实际却没生效，很容易被当成「音效设置没保存」。
+   */
+  async function reapplyCurrentState() {
+    // 还没跑过初始化时，内存里全是默认值，先恢复上次保存的设置再重放
+    if (!hydrated.value) await initialize();
+    if (eqBands.value.length === 0) ensureDefaultEqBands();
+    await setEqEnabled(eqEnabled.value);
+    for (let i = 0; i < eqBands.value.length; i++) {
+      await setEqBand(i, eqBands.value[i]);
+    }
+    await setCompressorEnabled(compressorEnabled.value);
+    await setCompressorParams(compressor.value);
+    await setLimiterEnabled(limiterEnabled.value);
+    await setLimiterParams(limiter.value);
+    await setLoudnessParams(loudness.value);
+    audioEngine.setVirtualBassParams({ ...virtualBass.value });
+    audioEngine.setSoftClipperParams({ ...softClipper.value });
+  }
+
   // === 监听音效参数变化，自动保存到 localStorage ===
   // 使用单个 watchEffect 替代 8 个独立 deep watch，减少重复序列化
   watchEffect(() => {
+    // 必须先读完上次的设置（hydrated），否则启动瞬间就把默认值写回去了
+    if (!hydrated.value) return
     // 访问所有需要追踪的属性，建立响应式依赖
     const snapshot = {
       eqEnabled: eqEnabled.value,
@@ -1232,8 +1347,8 @@ export function useAudioEngine() {
     debouncedSaveEngineState(snapshot)
   })
 
-  // 组件作用域销毁兜底：即使调用方忘记显式调用 destroy()，
-  // 也确保停止增益轮询 rAF 循环并清理防抖定时器，避免残留 60fps 空转与定时器
+  // 作用域销毁兜底只清理定时器/动画帧，**不要**把状态清空：
+  // 现在整套状态是全局共享单例，后续挂载的组件还要继续用它。
   onScopeDispose(() => {
     stopGainReductionPolling();
     if (engineSaveTimer) {
@@ -1295,8 +1410,29 @@ export function useAudioEngine() {
     // 生命周期
     initialize,
     destroy,
-    refreshAllParams
+    refreshAllParams,
+    reapplyCurrentState
   };
+}
+
+/**
+ * 全局单例作用域（detached）：
+ * 用 effectScope(true) 让内部 watch / watchEffect 不随首个调用方组件销毁而失效，
+ * 否则播放条被卸载后设置就再也不落盘了。
+ */
+const engineScope = effectScope(true);
+
+let sharedApi: ReturnType<typeof createAudioEngineApi> | null = null;
+
+/**
+ * useAudioEngine Composable（全局单例）
+ */
+export function useAudioEngine(): ReturnType<typeof createAudioEngineApi> {
+  if (!sharedApi) {
+    sharedApi = engineScope.run(() => createAudioEngineApi()) ?? null;
+  }
+  // engineScope 内同步执行，必定有返回值
+  return sharedApi as ReturnType<typeof createAudioEngineApi>;
 }
 
 export default useAudioEngine;

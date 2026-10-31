@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'fs';
 import { getMainWindow } from '../windows/mainWindow';
 import { tryLoadNativeModule as tryLoadNative } from './nativeModuleLoader';
+import { getCoversDir } from './library/coverStore';
 
 // 类型定义
 export interface MediaControlStatus {
@@ -231,6 +232,20 @@ function localizeCover(cover?: string): string {
       if (usable) result = toNativeCoverUrl(usable);
     } catch {
       // file:// 地址非法（例如 file://C:/x.png 这种缺第三斜杠的写法）
+      result = '';
+    }
+  } else if (cover.startsWith('such-cover://')) {
+    // 曲库封面走自定义协议：渲染层拿到的是 such-cover://cover/<hash>.<ext>?size=full，
+    // 而原生 SMTC / souvlaki 只认真实文件路径，这里翻译成 userData/covers 下的绝对路径。
+    // 顺带修掉旧版「本地歌曲在系统媒体控件里没有封面」的问题（那时传的是 blob:）。
+    try {
+      const parsed = new URL(cover);
+      const name = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
+      if (/^[a-f0-9]{8,64}\.[a-z0-9]{2,5}$/i.test(name)) {
+        const filePath = join(getCoversDir(), name);
+        if (existsSync(filePath)) result = toNativeCoverUrl(filePath);
+      }
+    } catch {
       result = '';
     }
   } else if (isLocalAbsolutePath(cover) && existsSync(cover)) {

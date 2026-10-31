@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { NCard, NSwitch, NSlider, NSelect, NAlert, NColorPicker, NInput } from 'naive-ui'
+import { computed, ref, watch } from 'vue'
+import { NCard, NSwitch, NSlider, NSelect, NAlert, NColorPicker, NInput, NButton } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
 
 /**
@@ -88,6 +88,78 @@ const playerBackgroundStyleOptions = [
   { label: '传统模糊背景', value: 'classic' },
   { label: '动态背景（AMLL）', value: 'amll' }
 ]
+
+/**
+ * 动态背景参数（仅在播放页背景样式为 amll 时展示）
+ * 每个 setter 都做区间夹取，避免旧配置或手改存档写出越界值
+ */
+const isDynamicBackground = computed(
+  () => settingsStore.playback.playerBackgroundStyle === 'amll'
+)
+
+const dynamicBgFlowSpeed = computed({
+  get: () => settingsStore.playback.dynamicBackgroundFlowSpeed,
+  set: (val: number) =>
+    (settingsStore.playback.dynamicBackgroundFlowSpeed = Math.min(Math.max(val, 0.5), 6))
+})
+
+const dynamicBgFps = computed({
+  get: () => settingsStore.playback.dynamicBackgroundFps,
+  set: (val: number) =>
+    (settingsStore.playback.dynamicBackgroundFps = Math.min(Math.max(val, 15), 60))
+})
+
+const dynamicBgAudioReactive = computed({
+  get: () => settingsStore.playback.dynamicBackgroundAudioReactive,
+  set: (val: number) =>
+    (settingsStore.playback.dynamicBackgroundAudioReactive = Math.min(Math.max(val, 0), 2))
+})
+
+const dynamicBgRenderScale = computed({
+  get: () => settingsStore.playback.dynamicBackgroundRenderScale,
+  set: (val: number) =>
+    (settingsStore.playback.dynamicBackgroundRenderScale = Math.min(Math.max(val, 0.25), 1))
+})
+
+/**
+ * 渲染分辨率的拖动中间值：改分辨率会触发画布重分配与 FBO 重建，
+ * 逐帧写回设置会让拖动过程持续重建纹理，因此只在停手 150ms 后提交一次。
+ */
+const dynamicBgRenderScaleDraft = ref(settingsStore.playback.dynamicBackgroundRenderScale)
+let renderScaleTimer: ReturnType<typeof setTimeout> | null = null
+
+const onRenderScaleInput = (val: number) => {
+  dynamicBgRenderScaleDraft.value = val
+  if (renderScaleTimer) clearTimeout(renderScaleTimer)
+  renderScaleTimer = setTimeout(() => {
+    renderScaleTimer = null
+    dynamicBgRenderScale.value = val
+  }, 150)
+}
+
+// 外部（如“恢复默认”）改动设置时同步滑块的显示值
+watch(
+  () => settingsStore.playback.dynamicBackgroundRenderScale,
+  (val) => {
+    if (!renderScaleTimer && val !== dynamicBgRenderScaleDraft.value) {
+      dynamicBgRenderScaleDraft.value = val
+    }
+  }
+)
+
+/** 恢复动态背景的默认参数 */
+const resetDynamicBackground = () => {
+  // 清掉待提交的拖动值，否则 150ms 后会把旧值写回去
+  if (renderScaleTimer) {
+    clearTimeout(renderScaleTimer)
+    renderScaleTimer = null
+  }
+  settingsStore.playback.dynamicBackgroundFlowSpeed = 2
+  settingsStore.playback.dynamicBackgroundFps = 30
+  settingsStore.playback.dynamicBackgroundAudioReactive = 1.0
+  settingsStore.playback.dynamicBackgroundRenderScale = 0.45
+  dynamicBgRenderScaleDraft.value = 0.45
+}
 
 </script>
 
@@ -258,6 +330,116 @@ const playerBackgroundStyleOptions = [
         />
       </div>
     </n-card>
+
+    <!-- 动态背景专属设置：仅在选中 AMLL 动态背景时展示 -->
+    <template v-if="isDynamicBackground">
+      <div class="section-group-title section-group-title--inline" style="margin-top: 12px">
+        <span>动态背景效果</span>
+        <n-button text size="tiny" @click="resetDynamicBackground">恢复默认</n-button>
+      </div>
+
+      <n-card
+        class="setting-item"
+        :bordered="true"
+        size="small"
+        :style="{ backgroundColor: props.settingItemBgColor, borderColor: props.settingItemBorderColor }"
+      >
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="main-label">流动速度</div>
+            <div class="sub-label">颜色流动的快慢，数值越大背景变化越明显</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px; min-width: 220px">
+            <n-slider
+              v-model:value="dynamicBgFlowSpeed"
+              :min="0.5"
+              :max="6"
+              :step="0.1"
+              :tooltip="false"
+              style="width: 160px"
+            />
+            <span class="time-text">{{ dynamicBgFlowSpeed.toFixed(1) }}×</span>
+          </div>
+        </div>
+      </n-card>
+
+      <n-card
+        class="setting-item"
+        :bordered="true"
+        size="small"
+        :style="{ backgroundColor: props.settingItemBgColor, borderColor: props.settingItemBorderColor }"
+      >
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="main-label">动画帧率</div>
+            <div class="sub-label">降低帧率可减少着色器开销，长时间播放更省电</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px; min-width: 220px">
+            <n-slider
+              v-model:value="dynamicBgFps"
+              :min="15"
+              :max="60"
+              :step="5"
+              :tooltip="false"
+              style="width: 160px"
+            />
+            <span class="time-text">{{ dynamicBgFps }} FPS</span>
+          </div>
+        </div>
+      </n-card>
+
+      <n-card
+        class="setting-item"
+        :bordered="true"
+        size="small"
+        :style="{ backgroundColor: props.settingItemBgColor, borderColor: props.settingItemBorderColor }"
+      >
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="main-label">音乐响应强度</div>
+            <div class="sub-label">背景随低频鼓点起伏的幅度，0 表示完全不跟随音乐</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px; min-width: 220px">
+            <n-slider
+              v-model:value="dynamicBgAudioReactive"
+              :min="0"
+              :max="2"
+              :step="0.05"
+              :tooltip="false"
+              style="width: 160px"
+            />
+            <span class="time-text">{{ Math.round(dynamicBgAudioReactive * 100) }}%</span>
+          </div>
+        </div>
+      </n-card>
+
+      <n-card
+        class="setting-item"
+        :bordered="true"
+        size="small"
+        :style="{ backgroundColor: props.settingItemBgColor, borderColor: props.settingItemBorderColor }"
+      >
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="main-label">渲染分辨率</div>
+            <div class="sub-label">背景画布的实际渲染比例，越低越省 GPU，画面也会更柔和</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px; min-width: 220px">
+            <n-slider
+              :value="dynamicBgRenderScaleDraft"
+              :min="0.25"
+              :max="1"
+              :step="0.05"
+              :tooltip="false"
+              style="width: 160px"
+              @update:value="onRenderScaleInput"
+              @dragend="onRenderScaleInput(dynamicBgRenderScaleDraft)"
+            />
+            <span class="time-text">{{ Math.round(dynamicBgRenderScaleDraft * 100) }}%</span>
+          </div>
+        </div>
+      </n-card>
+    </template>
 
     <n-card
       class="setting-item"
@@ -709,6 +891,16 @@ const playerBackgroundStyleOptions = [
 </template>
 
 <style scoped lang="scss">
+/**
+ * 带右侧操作按钮的小标题（动态背景分组用）
+ */
+.section-group-title--inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+}
+
 /**
  * 歌词预览卡片样式
  */

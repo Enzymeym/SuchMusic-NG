@@ -8,6 +8,8 @@ import type { PlayerSong } from '../stores/playerStore'
 import { useLocalMusicStore } from '../stores/localMusicStore'
 import { useSourcePluginStore } from '../stores/sourcePluginStore'
 import { normalizeSourceKey, resolvePluginUrlDetailed } from '../utils/pluginSource'
+import { useLibrarySearch } from '../composables/useLibrarySearch'
+import { normalizeSearchText } from '../../../shared/library/normalize'
 
 const route = useRoute()
 const router = useRouter()
@@ -63,16 +65,30 @@ const getSongArtist = (song: any): string => {
   return '未知歌手'
 }
 
-// 本地搜索结果：按关键词过滤本地音乐
-const searchResults = computed(() => {
-  if (!keywords.value.trim()) return []
-  const keyword = keywords.value.toLowerCase().trim()
-  return localMusicStore.songs.filter((song) => {
-    const name = song.name?.toLowerCase() || ''
-    const artist = getSongArtist(song).toLowerCase()
-    const album = (song.al?.name || '').toLowerCase()
-    return name.includes(keyword) || artist.includes(keyword) || album.includes(keyword)
-  })
+// 本地搜索结果：走统一的曲库搜索（标题 / 歌手 / 专辑 / 文件名，支持字段前缀）。
+// 本页没有输入框（关键词来自路由 query），所以用 submit 跳过防抖直接生效。
+const localSearch = useLibrarySearch({
+  source: () => localMusicStore.songs,
+  limit: 200
+})
+
+watch(
+  keywords,
+  (value) => localSearch.submit(value ?? ''),
+  { immediate: true }
+)
+
+const searchResults = computed(() =>
+  localSearch.hasQuery.value ? localSearch.results.value : []
+)
+
+/** 命中的文件夹歌单（最多 6 个，避免把歌曲列表挤下去） */
+const matchedFolders = computed(() => {
+  const q = normalizeSearchText(keywords.value)
+  if (!q) return []
+  return localMusicStore.folderPlaylists
+    .filter((folder) => normalizeSearchText(folder.displayName).includes(q))
+    .slice(0, 6)
 })
 
 // 处理歌曲点击播放（仅本地文件）
@@ -460,6 +476,24 @@ const resultCountText = computed(() => {
     <div class="search-content">
       <!-- 本地搜索 -->
       <template v-if="activeTab === 'local'">
+        <!-- 命中的文件夹歌单：先给「整张专辑/某个目录」的入口，再列单曲 -->
+        <div v-if="matchedFolders.length > 0" class="folder-hits">
+          <div class="folder-hits-title">文件夹</div>
+          <div class="folder-hits-list">
+            <button
+              v-for="folder in matchedFolders"
+              :key="folder.id"
+              type="button"
+              class="folder-hit"
+              @click="router.push(`/folder/${folder.id}`)"
+            >
+              <i class="mgc_folder_2_line"></i>
+              <span class="folder-hit-name">{{ folder.displayName }}</span>
+              <span class="folder-hit-count">{{ folder.totalTrackCount }}</span>
+            </button>
+          </div>
+        </div>
+
         <SongList
           v-if="searchResults.length > 0"
           :songs="searchResults"
@@ -467,13 +501,14 @@ const resultCountText = computed(() => {
           @song-click="handleSongClick"
         />
 
-        <div v-else-if="keywords" class="empty-state">
+        <div v-else-if="keywords && matchedFolders.length === 0" class="empty-state">
           <p>本地音乐中未找到匹配"{{ keywords }}"的歌曲</p>
           <p class="hint">请确保已添加本地音乐目录，或切换「网易云」标签在线搜索</p>
         </div>
 
-        <div v-else class="empty-state">
+        <div v-else-if="!keywords" class="empty-state">
           <p>请输入关键词搜索本地音乐</p>
+          <p class="hint">支持按标题、歌手、专辑、文件名匹配，也可用 artist:xxx 限定字段</p>
         </div>
       </template>
 
@@ -695,6 +730,47 @@ const resultCountText = computed(() => {
 .empty-state .hint {
   font-size: 13px;
   color: #aaa;
+}
+
+/* 本地搜索：命中的文件夹歌单 */
+.folder-hits {
+  padding: 4px 4px 12px;
+}
+
+.folder-hits-title {
+  font-size: 13px;
+  color: var(--n-text-color-3, #888);
+  margin: 4px 0 10px;
+}
+
+.folder-hits-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.folder-hit {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--n-border-color, rgba(0, 0, 0, 0.08));
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.16s ease, border-color 0.16s ease;
+}
+
+.folder-hit:hover {
+  background: var(--n-color-hover, rgba(0, 0, 0, 0.04));
+  border-color: var(--n-border-color-hover, rgba(0, 0, 0, 0.16));
+}
+
+.folder-hit-count {
+  font-size: 12px;
+  color: var(--n-text-color-3, #999);
 }
 
 /* 网易云热搜 */

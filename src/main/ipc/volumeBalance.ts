@@ -2,21 +2,22 @@
  * 音量平衡（本地响度分析）IPC 处理器
  *
  * 优先使用 native 流式解码（decode_audio_stream）分块喂给 EBU R128 分析器，
- * 内存占用恒定在「单块 2048 帧」量级。
+ * 内存占用恒定在「单块 2048 帧」量级（TSFN 队列有界 + Blocking 背压）。
  *
- * 旧实现一次性 decode_audio_to_pcm 把整首歌解成 `Vec<f64>` → JS `number[]`，
- * 4 分钟立体声约 2100 万样本，Rust 侧 Vec 与 JS 数组各占约 170MB，
- * 渲染层并发 2 时峰值可达 600MB+。整曲解码仅作为流式不可用时的兜底。
+ * 历史包袱（2026-10 已在原生侧修掉，改这里时别再走回去）：
+ * - 旧的整曲解码把整首歌解成 `Vec<f64>` → JS `number[]`，4 分钟立体声约 2100 万样本，
+ *   Rust Vec 与 V8 数组各占 170MB 以上，逐元素跨语言转换还会把主线程按死。
+ * - `n_frames` 缺失时旧实现按「1 小时」预分配，一次性申请 2.5GB。
+ * - TSFN 队列无上限 + NonBlocking，解码线程按磁盘速度灌，主线程按 GC 速度排，
+ *   于是「流式回调若干块后彻底停住」——那不是解码停了，是主线程被淹到排不动队。
+ * 现在整曲解码仅作兜底：f32 + 预分配封顶 + AsyncTask（不阻塞主线程）。
  *
- * ⚠️ `decode_audio_stream`（resources/native/symphonia_napi_decoder.node）在特定环境
- * 会「回调若干块后彻底停住、且不置 finished」（离线复现：3 秒 FLAC 只收到 7 块，300 秒
- * WAV 收到 602 块）。该接口此前在渲染层没有任何调用方，所以线上一直未暴露。
- * 因此这里把流式做成「试探 + 熔断」：首块超时或中途停摆即判定不可用，本进程后续
- * 全部直接走整曲解码，绝不会出现「每首歌先白等 10 秒再回退」。
+ * 熔断逻辑保留：一旦流式真的不可用（旧二进制 / 奇怪的容器），首块超时或中途停摆
+ * 就判定不可用，本进程后续文件直接走整曲解码，避免「每首歌先白等一次超时」。
  */
 
 import { ipcMain } from 'electron'
-import { loadNativeDecoder } from '../services/nativeDecoder'
+import { getSampleRate, loadNativeDecoder, normalizePcmData } from '../services/nativeDecoder'
 import { LoudnessAnalyzer } from '../services/loudnessAnalyzer'
 
 /** 首块超时：解码器启动后迟迟不回调，说明流式路径不可用 */
@@ -93,16 +94,17 @@ function analyzeByStream(filePath: string, analyzer: LoudnessAnalyzer): Promise<
           sample_rate?: number
           sampleRate?: number
           channels?: number
-          data?: number[]
+          data?: unknown
           finished?: boolean
         } | null
-        const data = Array.isArray(chunk?.data) ? chunk!.data! : []
+        // 新二进制给的是 f32 字节 Buffer，旧二进制是 number[]，统一走归一化
+        const data = normalizePcmData(chunk?.data) ?? []
         const channels = Math.max(1, Number(chunk?.channels) || 2)
         if (data.length > 0) {
           gotChunk = true
           lastDataAt = Date.now()
           analyzer.pushChunk({
-            sampleRate: Number(chunk?.sample_rate ?? chunk?.sampleRate) || 44_100,
+            sampleRate: getSampleRate(chunk, 44_100),
             channels,
             data
           })
@@ -117,16 +119,23 @@ function analyzeByStream(filePath: string, analyzer: LoudnessAnalyzer): Promise<
   })
 }
 
-/** 兜底：整曲解码后一次性分析（内存峰值高，仅在流式不可用时使用） */
-function analyzeFullDecode(filePath: string): number | null {
+/**
+ * 兜底：整曲解码后一次性分析（内存峰值高，仅在流式不可用时使用）
+ *
+ * ⚠️ 即使有兜底也必须注意：新二进制的 `decode_audio_to_pcm` 是 `AsyncTask`，返回 Promise
+ * 且解码跑在 libuv 线程池里；旧的同步实现会把主线程堵住数秒，连带把 TSFN 队列里的
+ * 流式回调也饿死（这正是「流式解码回调若干块后停住」的放大器）。
+ */
+async function analyzeFullDecode(filePath: string): Promise<number | null> {
   const { decode_audio_to_pcm } = loadNativeDecoder()
-  const decoded = decode_audio_to_pcm(filePath)
-  if (!decoded || !Array.isArray(decoded.data) || decoded.data.length === 0) return null
+  const decoded = await decode_audio_to_pcm(filePath)
+  const data = normalizePcmData(decoded?.data)
+  if (!data || data.length === 0) return null
   const analyzer = new LoudnessAnalyzer()
   analyzer.pushChunk({
-    sampleRate: decoded.sample_rate ?? 44_100,
-    channels: decoded.channels ?? 2,
-    data: decoded.data
+    sampleRate: getSampleRate(decoded, 44_100),
+    channels: Number(decoded?.channels) || 2,
+    data
   })
   return analyzer.getIntegratedLoudness()
 }
@@ -146,7 +155,7 @@ export function registerVolumeBalanceHandlers(): void {
 
     if (lufs === null || !Number.isFinite(lufs)) {
       try {
-        lufs = analyzeFullDecode(filePath)
+        lufs = await analyzeFullDecode(filePath)
       } catch (error) {
         console.error('[VolumeBalance] 解码失败:', filePath, error)
         return { success: false, error: `解码失败: ${String(error)}` }

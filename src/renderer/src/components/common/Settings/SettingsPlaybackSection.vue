@@ -2,6 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { NCard, NSwitch, NSlider, NSelect, NButton, NButtonGroup, NAlert, NInputNumber } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
+import { useAudioEngine } from '../../../composables/useAudioEngine'
 import SettingsMorphaeumSection from './SettingsMorphaeumSection.vue'
 import {
   AudioOutputModeManager,
@@ -27,6 +28,22 @@ const volumeBoostPercent = computed({
 
 /// 输出模式管理器实例
 const outputManager = new AudioOutputModeManager()
+
+/// 音效引擎（全局单例）：切换输出模式后要把当前音效设置重放到新后端
+const soundEngine = useAudioEngine()
+
+/**
+ * 切换后端后重新下发音效设置。
+ * 新后端（新建的 WASAPI 引擎 / 未接线的 Web Audio DSP 链）里没有任何参数，
+ * 不重放就会出现「音效面板显示已开启，实际没效果」。
+ */
+async function reapplySoundEffects() {
+  try {
+    await soundEngine.reapplyCurrentState()
+  } catch (err) {
+    console.warn('[Settings] 重新应用音效设置失败:', err)
+  }
+}
 
 /// 可用音频设备列表
 const audioDevices = ref<AudioDevice[]>([])
@@ -156,6 +173,7 @@ async function applyOutputMode(mode: AudioOutputMode, deviceId?: string) {
       if (result.success) {
         settingsStore.playback.audioOutputMode = 'webaudio'
         modeSwitchError.value = ''
+        await reapplySoundEffects()
       }
     } catch (err) {
       modeSwitchError.value = cleanRustError(String(err))
@@ -201,6 +219,7 @@ async function applyOutputMode(mode: AudioOutputMode, deviceId?: string) {
           result.deviceName || resolved.deviceName || settingsStore.playback.audioOutputDeviceName
       }
       modeSwitchError.value = ''
+      await reapplySoundEffects()
     } else {
       console.warn('[Settings] 模式切换失败:', result.error)
       // 不将 wasapiAvailable 置为 false — 枚举成功就说明 WASAPI 可用
@@ -208,12 +227,14 @@ async function applyOutputMode(mode: AudioOutputMode, deviceId?: string) {
       modeSwitchError.value = result.error || '未知'
       // 回退到 Web Audio
       settingsStore.playback.audioOutputMode = 'webaudio'
+      await reapplySoundEffects()
     }
   } catch (err) {
     const msg = cleanRustError(String(err))
     console.warn('[Settings] 模式切换异常:', msg)
     modeSwitchError.value = msg
     settingsStore.playback.audioOutputMode = 'webaudio'
+    await reapplySoundEffects()
   } finally {
     modeSwitching.value = false
   }

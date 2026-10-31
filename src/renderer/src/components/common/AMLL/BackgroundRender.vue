@@ -9,6 +9,7 @@ import {
   MeshGradientRenderer,
 } from "@applemusic-like-lyrics/core";
 import { useTemplateRef, shallowRef, onMounted, onBeforeUnmount, watch } from "vue";
+import { onFftData } from "../../../audio/audio-engine";
 
 
 export interface BackgroundRenderProps {
@@ -26,6 +27,11 @@ export interface BackgroundRenderProps {
   hasLyric?: boolean;
   /** 低频音量大小 [0.0-1.0]，默认为 1.0 */
   lowFreqVolume?: number;
+  /**
+   * 音乐响应强度（0 表示关闭动态响应，使用固定的 lowFreqVolume）。
+   * 大于 0 时组件会自行订阅 FFT，用实时低频能量驱动背景起伏。
+   */
+  audioReactive?: number;
   /** 渲染缩放比例，默认为 0.5 */
   renderScale?: number;
   /** 渲染器类，默认为 MeshGradientRenderer */
@@ -43,6 +49,7 @@ const props = withDefaults(defineProps<BackgroundRenderProps>(), {
   flowSpeed: 2,
   hasLyric: true,
   lowFreqVolume: 1.0,
+  audioReactive: 0,
   renderScale: 0.5,
   renderer: () => MeshGradientRenderer,
   albumIsVideo: false,
@@ -52,6 +59,45 @@ const wrapperRef = useTemplateRef<HTMLDivElement>("wrapper-ref");
 
 // 外部类实例
 const bgRenderRef = shallowRef<AbstractBaseRenderer>();
+
+/**
+ * 音频响应：Mesh 渲染器只接受一个「当时」的 lowFreqVolume（core 内部再 /10
+ * 转成着色器 u_volume），自己不会去取音频数据。开启音乐响应后由本组件订阅
+ * 统一 FFT 回调（Web Audio / WASAPI 两种输出模式都由 audioEngine 统一提供），
+ * 取低频段能量做「起音快、回落慢」的平滑后直接写进渲染器。
+ *
+ * 刻意不每帧回写 prop：FFT 回调约 30 次/秒，走响应式会让父组件反复重渲染。
+ */
+const BASS_BIN_COUNT = 8;
+let bassLevel = 0;
+let fftCleanup: (() => void) | null = null;
+
+const stopAudioReactive = () => {
+  fftCleanup?.();
+  fftCleanup = null;
+  bassLevel = 0;
+  // 退订后回到固定音量，避免背景停在某一帧的低频强度上
+  bgRenderRef.value?.setLowFreqVolume(props.lowFreqVolume);
+};
+
+const startAudioReactive = () => {
+  if (fftCleanup) return;
+  fftCleanup = onFftData((spectrum) => {
+    // 前 8 个 bin（fftSize=256）覆盖约 0-1.4kHz，基本就是底鼓与贝斯的范围
+    const count = Math.min(BASS_BIN_COUNT, spectrum.length);
+    if (count === 0) return;
+    let sum = 0;
+    for (let i = 0; i < count; i++) sum += spectrum[i];
+    const target = Math.min(1, (sum / count) * 1.6);
+    bassLevel += (target - bassLevel) * (target > bassLevel ? 0.6 : 0.12);
+    bgRenderRef.value?.setLowFreqVolume(bassLevel * props.audioReactive);
+  });
+};
+
+const syncAudioReactive = () => {
+  if (props.audioReactive > 0 && props.playing && bgRenderRef.value) startAudioReactive();
+  else stopAudioReactive();
+};
 
 /**
  * 统一更新状态
@@ -89,10 +135,12 @@ onMounted(() => {
     el.style.display = "block";
     wrapperRef.value.appendChild(el);
     updateRendererState();
+    syncAudioReactive();
   }
 });
 
 onBeforeUnmount(() => {
+  stopAudioReactive();
   const renderer = bgRenderRef.value;
   if (renderer) {
     bgRenderRef.value = undefined;
@@ -127,6 +175,14 @@ watch(
     } else {
       bgRenderRef.value?.pause();
     }
+    syncAudioReactive();
+  },
+);
+
+watch(
+  () => props.audioReactive,
+  () => {
+    syncAudioReactive();
   },
 );
 

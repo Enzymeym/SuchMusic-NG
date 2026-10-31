@@ -140,6 +140,14 @@ watch(
   { immediate: true }
 )
 
+/**
+ * 播放页背景图地址（唯一来源）。
+ * 模板里以它为 `:key` 驱动交叉淡入淡出：烘焙结果晚于切歌到达，
+ * 因此淡入恰好发生在「新背景真正可用」的那一帧，旧背景一直保留到那时，
+ * 不会出现中间的空底或误闪。
+ */
+const bgImageSrc = computed(() => blurredBgUrl.value || player.currentSong?.cover || defaultCover)
+
 const {
   isControlsVisible,
   isFullscreen,
@@ -490,21 +498,38 @@ watch(
         <!-- 窗口隐藏时整层 display:none：静态模糊背景同样占用一个合成层 -->
         <div v-show="windowActive" class="player-bg">
           <template v-if="settingsStore.playback.playerBackgroundStyle === 'amll'">
+            <!-- 垫底层：AMLL 画布是带 alpha 的 WebGL 画布，且渲染器每帧先
+                 clearColor(0,0,0,0) 再画，首个封面/无封面状态下整体是透明的
+                 （新封面 alpha 从 0 起淡入约 500ms）。没有这层不透明底就会直接
+                 透出主界面的列表与侧边栏，看起来像背景漏了。 -->
+            <img
+              v-if="blurredBgUrl"
+              :src="blurredBgUrl"
+              class="bg-image bg-image--base"
+              alt=""
+              aria-hidden="true"
+            />
             <BackgroundRender
               :album="player.currentSong?.cover || defaultCover"
               :playing="player.isPlaying && windowActive"
               :has-lyric="!!lyricsData"
-              :flow-speed="2"
-              :render-scale="0.45"
+              :flow-speed="settingsStore.playback.dynamicBackgroundFlowSpeed"
+              :fps="settingsStore.playback.dynamicBackgroundFps"
+              :audio-reactive="settingsStore.playback.dynamicBackgroundAudioReactive"
+              :render-scale="settingsStore.playback.dynamicBackgroundRenderScale"
             />
             <div class="bg-mask"></div>
           </template>
           <template v-else>
-            <img
-              :src="blurredBgUrl || player.currentSong?.cover || defaultCover"
-              class="bg-image"
-              :class="{ 'bg-image--fallback': !blurredBgUrl }"
-            />
+            <!-- 切歌时交叉淡入淡出：新旧两张背景图重叠，新图淡入、旧图同步淡出 -->
+            <Transition name="bg-fade">
+              <img
+                :key="bgImageSrc"
+                :src="bgImageSrc"
+                class="bg-image"
+                :class="{ 'bg-image--fallback': !blurredBgUrl }"
+              />
+            </Transition>
             <div class="bg-mask"></div>
           </template>
         </div>

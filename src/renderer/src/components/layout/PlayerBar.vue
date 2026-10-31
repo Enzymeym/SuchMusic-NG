@@ -20,6 +20,7 @@ import {
 } from 'naive-ui'
 import { usePlayerStore, type PlayerSong } from '../../stores/playerStore'
 import { usePlaylistStore } from '../../stores/playlistStore'
+import { useLocalMusicStore } from '../../stores/localMusicStore'
 import { useVolumeBalanceStore } from '../../stores/volumeBalanceStore'
 import defaultCover from '@renderer/assets/default-cover.png'
 import { audioEngine } from '../../audio/audio-engine'
@@ -56,6 +57,7 @@ const router = useRouter()
 // 获取全局播放器 store
 const player = usePlayerStore()
 const playlistStore = usePlaylistStore()
+const localMusicStore = useLocalMusicStore()
 // 获取全局设置 store
 const settingsStore = useSettingsStore()
 // 音量平衡（本地响度分析）store
@@ -1149,6 +1151,41 @@ watch(
 
 const playlistContainerRef = ref<HTMLElement | null>(null)
 
+/**
+ * 队列封面：本地曲目一律以**曲库当前封面**为准。
+ *
+ * 队列项里的 `cover` 只是入队那一刻的快照，而本地封面地址会随扫描结果变化：
+ * 重新扫描、编辑标签换封面后封面哈希就变了，旧地址在抽屉里就是一张空白图
+ * （历史数据里还可能是旧实现创建的 blob: 地址，重启即失效）。
+ * 这里按文件路径回查曲库，命中就用曲库的缩略图；在线曲目完全不受影响。
+ */
+const localCoverByPath = computed(() => {
+  const map = new Map<string, string>()
+  for (const song of localMusicStore.songs) {
+    const url = song.picUrl || song.al?.picUrl
+    if (!url) continue
+    if (song.filePath) map.set(song.filePath, url)
+    if (typeof song.id === 'string' && song.id !== song.filePath) map.set(song.id, url)
+  }
+  return map
+})
+
+function queueCover(song: PlayerSong): string {
+  const key = song.filePath || (typeof song.id === 'string' ? song.id : '')
+  const fresh = key ? localCoverByPath.value.get(key) : undefined
+  if (fresh) return fresh
+  if (!song.cover || song.cover.startsWith('blob:')) return defaultCover
+  return song.cover
+}
+
+/** 封面加载失败（封面文件已被回收 / 地址失效）时退回默认封面，避免留下空白方块 */
+function handleQueueCoverError(event: Event): void {
+  const img = event.target as HTMLImageElement | null
+  if (!img || img.dataset.fallback === '1') return
+  img.dataset.fallback = '1'
+  img.src = defaultCover
+}
+
 const toggleFavorite = () => {
   if (!player.currentSong) return
   const isAdded = playlistStore.toggleFavorite({
@@ -1486,11 +1523,12 @@ watch(
             </div>
             <img
               class="item-cover"
-              :src="song.cover || defaultCover"
+              :src="queueCover(song)"
               alt=""
               referrerpolicy="no-referrer"
               loading="lazy"
               decoding="async"
+              @error="handleQueueCoverError"
             />
             <div class="item-info">
               <div

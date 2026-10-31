@@ -13,7 +13,12 @@
 export interface AudioChunk {
   sampleRate: number
   channels: number
-  data: number[]
+  /**
+   * 交错布局 PCM（范围 -1..1）。
+   * 既接受 `number[]`（旧原生二进制的载荷），也接受 `Float32Array`（新二进制把
+   * f32 打包成 Buffer 传过来）—— 两者都只按下标读取与 `.length`。
+   */
+  data: ArrayLike<number>
 }
 
 interface BiquadCoeffs {

@@ -3,10 +3,11 @@
 #   dev:    .\scripts\build-native.ps1           (Debug)
 #   build:  .\scripts\build-native.ps1 -Release  (Release)
 #
-# Builds three napi-rs crates:
+# Builds four napi-rs crates:
 #   - media-control-napi   (all platforms: Windows/Linux/macOS)
 #   - music-tag-reader-napi (all platforms: Windows/Linux/macOS)
 #   - audio-napi          (Windows only, WASAPI)
+#   - symphonia-napi-decoder (项目根目录下的独立 crate，音频解码)
 
 param(
     [switch]$Release
@@ -68,7 +69,8 @@ function Invoke-CargoBuild {
 function Copy-NativeArtifact {
     param(
         [string]$SourceName,
-        [string]$DestName
+        [string]$DestName,
+        [string]$RootDir = $RustDir
     )
 
     if ([string]::IsNullOrWhiteSpace($SourceName) -or [string]::IsNullOrWhiteSpace($DestName)) {
@@ -76,7 +78,7 @@ function Copy-NativeArtifact {
         return $false
     }
 
-    $SourcePath = Join-Path $RustDir "target\$Profile\$SourceName"
+    $SourcePath = Join-Path $RootDir "target\$Profile\$SourceName"
     if (-not (Test-Path -LiteralPath $SourcePath)) {
         Write-Host "[native-build] Warning: artifact not found at $SourcePath" -ForegroundColor Yellow
         return $false
@@ -210,6 +212,47 @@ try {
             # 路径写在这里唯一确定，交给 Remove-StaleArtifact 做尽力删除（失败仅告警）。
             [void](Remove-StaleArtifact -Path (Join-Path $ResourcesDir "audio_napi.dll"))
         }
+    }
+
+    # --- Build symphonia-napi-decoder ---
+    # 这个 crate 独立于 native/rust-audio-engine，直接放在项目根目录，
+    # 因此不会被 workspace 的 `cargo build -p` 带上。历史上它一直被漏编译：
+    # 改了解码器代码、跑了 npm run build:native，resources/native 里的 .node
+    # 还是旧的，症状就是「代码看着改了但行为没变」。
+    $SymphoniaDir = Join-Path $ProjectRoot "symphonia-napi-decoder"
+    if (Test-Path $SymphoniaDir) {
+        Push-Location $SymphoniaDir
+        try {
+            $symArgs = @("build")
+            if ($Release) {
+                $symArgs += "--release"
+            }
+
+            if ((Invoke-CargoBuild -BuildArgs $symArgs) -ne 0) {
+                Write-Host "[native-build] symphonia-napi-decoder build failed, using existing native module if available" -ForegroundColor Red
+            } else {
+                if (-not (Test-Path -LiteralPath $ResourcesDir)) {
+                    New-Item -ItemType Directory -Force -Path $ResourcesDir | Out-Null
+                }
+
+                $symCandidates = if ($IsWindowsOS) {
+                    @("symphonia_napi_decoder.dll", "libsymphonia_napi_decoder.dylib", "libsymphonia_napi_decoder.so")
+                } else {
+                    @("libsymphonia_napi_decoder.dylib", "libsymphonia_napi_decoder.so", "symphonia_napi_decoder.dll")
+                }
+                $symSource = $symCandidates | Where-Object { Test-Path (Join-Path $SymphoniaDir "target\$Profile\$_") } | Select-Object -First 1
+
+                if ($symSource) {
+                    [void](Copy-NativeArtifact -RootDir $SymphoniaDir -SourceName $symSource -DestName "symphonia_napi_decoder.node")
+                } else {
+                    Write-Host "[native-build] Warning: symphonia_napi_decoder artifact not found in symphonia-napi-decoder\target\$Profile" -ForegroundColor Yellow
+                }
+            }
+        } finally {
+            Pop-Location
+        }
+    } else {
+        Write-Host "[native-build] symphonia-napi-decoder source dir not found, keeping existing .node" -ForegroundColor Yellow
     }
 
     Write-Host "[native-build] Done!" -ForegroundColor Green

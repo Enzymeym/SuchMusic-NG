@@ -116,6 +116,13 @@ export interface NormalizedCover {
   bytes: number
 }
 
+/** 不编码 base64 的裁决结果：曲库扫描直接拿裸字节落盘，省掉一次编码/解码往返 */
+export interface NormalizedCoverRaw {
+  mimeType: CoverMime
+  data: Uint8Array
+  bytes: number
+}
+
 /** 低于此值的一律视为畸形封面（只有帧头、没有图像数据） */
 export const COVER_MIN_BYTES = 256
 
@@ -144,6 +151,26 @@ export function finalizeCover(
   data: Uint8Array | undefined | null,
   opts?: { minBytes?: number; maxBytes?: number }
 ): NormalizedCover | null {
+  const raw = finalizeCoverRaw(declared, data, opts)
+  if (!raw) return null
+  return {
+    mimeType: raw.mimeType,
+    base64: Buffer.from(raw.data).toString('base64'),
+    bytes: raw.bytes
+  }
+}
+
+/**
+ * 与 `finalizeCover` 同一套裁决，但只返回裸字节。
+ *
+ * 曲库扫描把封面按内容哈希写进 `userData/covers/`，全程不需要 base64：
+ * 1 万首曲库若每张封面都编码一次再解码，纯属把 CPU 和内存浪费在中间态上。
+ */
+export function finalizeCoverRaw(
+  declared: string | undefined,
+  data: Uint8Array | undefined | null,
+  opts?: { minBytes?: number; maxBytes?: number }
+): NormalizedCoverRaw | null {
   if (!data || data.length === 0) return null
   const minBytes = opts?.minBytes ?? COVER_MIN_BYTES
   const maxBytes = opts?.maxBytes ?? 16 * 1024 * 1024
@@ -152,9 +179,5 @@ export function finalizeCover(
   const mimeType = resolveCoverMime(declared, data)
   if (!mimeType) return null
 
-  return {
-    mimeType,
-    base64: Buffer.from(data).toString('base64'),
-    bytes: data.length
-  }
+  return { mimeType, data, bytes: data.length }
 }

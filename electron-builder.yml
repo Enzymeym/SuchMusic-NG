@@ -15,6 +15,9 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - resources/**
+  # better-sqlite3 的 .node 无法从 asar 内加载（Electron 的 smartUnpack 本会自动识别，
+  # 这里显式写死，让打包结果可预期、也便于出问题时快速核对）
+  - node_modules/better-sqlite3/**
 extraResources:
   # 将 resources/native 下编译好的 .node 拷贝到 <resources>/native（app.asar 之外）。
   # 只有 .node 会被 require；cargo 在 Windows 产出的 .dll 是同一份二进制的重命名副本，

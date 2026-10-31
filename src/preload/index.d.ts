@@ -1,4 +1,21 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
+import type {
+  FolderPatch,
+  FolderTracksQuery,
+  LibraryBootstrap,
+  LibraryFolder,
+  LibraryTrack,
+  ScanProgress,
+  ScanStats
+} from '../../shared/library/types'
+
+/** 扫描结束事件载荷 */
+export interface LibraryScanDoneEvent {
+  ok: boolean
+  stats?: ScanStats
+  lastScanAt?: number
+  error?: string
+}
 
 /** 网易云归一化歌曲结构（渲染层可直接喂给 SongList） */
 export interface NeteaseSong {
@@ -96,6 +113,19 @@ declare global {
         }>
       }
       audioEngine: any
+      /** 本地曲库（SQLite）与文件夹歌单 */
+      library: {
+        bootstrap: () => Promise<LibraryBootstrap>
+        scan: (roots?: string[]) => Promise<{ started: boolean; jobId: string }>
+        cancelScan: () => Promise<unknown>
+        folderTracks: (folderId: number, options?: FolderTracksQuery) => Promise<LibraryTrack[]>
+        folderChildren: (parentPath: string) => Promise<LibraryFolder[]>
+        updateFolder: (folderId: number, patch: FolderPatch) => Promise<LibraryFolder | null>
+        reloadTracks: (filePaths: string[]) => Promise<{ updated: number }>
+        reveal: (filePath: string) => Promise<boolean>
+        onScanProgress: (callback: (progress: ScanProgress) => void) => () => void
+        onScanDone: (callback: (event: LibraryScanDoneEvent) => void) => () => void
+      }
       wasapi: {
         enumerateDevices: () => Promise<{ success: boolean; devices?: any[]; error?: string }>
         create: (

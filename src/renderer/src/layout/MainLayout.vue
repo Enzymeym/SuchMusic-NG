@@ -125,7 +125,7 @@ onUnmounted(() => {
             <router-view v-slot="{ Component, route }">
               <PageTransition>
                 <keep-alive
-                  :include="['local', 'playlist', 'recent', 'singer', 'album']"
+                  :include="['local', 'playlist', 'recent', 'singer', 'album', 'folder-detail']"
                   :max="3">
                   <component :is="Component" :key="route.fullPath" />
                 </keep-alive>

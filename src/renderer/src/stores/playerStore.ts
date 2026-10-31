@@ -598,38 +598,40 @@ export const usePlayerStore = defineStore('player', {
       }
     },
     /**
-     * 根据本地歌曲已加载的封面恢复当前歌曲和播放队列封面
-     * 启动时从持久化恢复的状态会剥离 base64 封面，本地音乐扫描完后调用此方法补全
+     * 以本地曲库的封面为准，同步当前歌曲与整条播放队列。
      *
-     * 本地封面使用 blob URL，重新扫描时会 revoke 旧 URL 并生成新 URL，
-     * 因此除了补空封面外，还要把已失效的 blob: 封面刷新为新的本地封面，
-     * 否则播放队列/当前歌曲仍指向已 revoke 的 URL，导致封面消失。
+     * 队列里的封面是「入队那一刻的快照」，而本地封面地址随扫描结果变化：
+     * 重新扫描、编辑标签换封面、封面文件被 GC 之后 hash 都会变，旧地址必然 404，
+     * 队列/抽屉里就出现空白封面。因此**只要命中曲库里的曲目就无条件对齐**，
+     * 不再只在「空封面或 blob:」时才补（旧判定漏掉了失效的 such-cover: 地址）。
+     *
+     * @param localSongs 曲库曲目，id / filePath 任一能对上即认为是同一首
      */
-    restoreCoversFromLocalSongs(localSongs: { id: string | number; picUrl?: string }[]): void {
-      const coverMap = new Map<string | number, string>()
+    restoreCoversFromLocalSongs(
+      localSongs: { id: string | number; picUrl?: string; filePath?: string }[]
+    ): void {
+      const coverMap = new Map<string, string>()
       localSongs.forEach((song) => {
-        if (song.picUrl) {
-          coverMap.set(song.id, song.picUrl)
-        }
+        if (!song.picUrl) return
+        // 同时按 id 与路径建索引：历史队列里可能残留旧的 id 形态（不是路径），
+        // 只按 id 匹配会漏掉这些曲目，封面就一直是空的
+        coverMap.set(String(song.id), song.picUrl)
+        if (song.filePath) coverMap.set(song.filePath, song.picUrl)
       })
+      if (coverMap.size === 0) return
 
-      // 空封面或指向已失效 blob URL 的封面都视为需要刷新
-      const needsRefresh = (cover: string | undefined) => !cover || cover.startsWith('blob:')
-
-      if (
-        this.currentSong &&
-        this.currentSong.id != null &&
-        coverMap.has(this.currentSong.id) &&
-        needsRefresh(this.currentSong.cover)
-      ) {
-        this.currentSong.cover = coverMap.get(this.currentSong.id)!
+      const syncCover = (song: PlayerSong): void => {
+        const next =
+          (song.id != null ? coverMap.get(String(song.id)) : undefined) ??
+          (song.filePath ? coverMap.get(song.filePath) : undefined)
+        if (!next || next === song.cover) return
+        // 会话内临时指定的封面（data:，例如从歌词库匹配到的在线封面）不覆盖
+        if (song.cover && song.cover.startsWith('data:')) return
+        song.cover = next
       }
 
-      this.playlist.forEach((song) => {
-        if (song.id != null && coverMap.has(song.id) && needsRefresh(song.cover)) {
-          song.cover = coverMap.get(song.id)!
-        }
-      })
+      if (this.currentSong) syncCover(this.currentSong)
+      this.playlist.forEach(syncCover)
     },
     // 记录一次播放
     recordPlay(song: PlayerSong) {

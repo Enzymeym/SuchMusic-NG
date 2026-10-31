@@ -51,6 +51,14 @@ export interface PlaybackSettings {
   lyricsBlurEnabled: boolean
   lyricsSpringEnabled: boolean
   playerBackgroundStyle: 'classic' | 'amll'
+  /** 动态背景流动速度（0.5-6，越大流动越快，默认 2） */
+  dynamicBackgroundFlowSpeed: number
+  /** 动态背景动画帧率（15-60，越低越省 GPU，默认 30） */
+  dynamicBackgroundFps: number
+  /** 动态背景低频响应强度（0-2，0 为不随音乐起伏，默认 1） */
+  dynamicBackgroundAudioReactive: number
+  /** 动态背景渲染分辨率比例（0.25-1，越低越省性能、画面越糊，默认 0.45） */
+  dynamicBackgroundRenderScale: number
   /** 是否显示翻译歌词 */
   lyricsShowTranslation: boolean
   /** 是否显示音译歌词（罗马音等） */
@@ -157,6 +165,11 @@ export const useSettingsStore = defineStore('settings', () => {
     // Apple 风格歌词弹簧效果开关
     lyricsSpringEnabled: true,
     playerBackgroundStyle: 'classic',
+    // 动态背景（AMLL）参数，默认值与旧版硬编码保持一致
+    dynamicBackgroundFlowSpeed: 2,
+    dynamicBackgroundFps: 30,
+    dynamicBackgroundAudioReactive: 1.0,
+    dynamicBackgroundRenderScale: 0.45,
     // 翻译与音译
     lyricsShowTranslation: true,
     lyricsShowTransliteration: true,

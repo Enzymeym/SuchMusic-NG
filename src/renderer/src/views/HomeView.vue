@@ -263,6 +263,15 @@ const heroIndex = ref(0)
 const heroPosition = computed(() => (heroIndex.value < heroPool.value.length ? heroIndex.value : 0))
 const hero = computed<PlayerSong | null>(() => heroPool.value[heroPosition.value] || null)
 const heroPreview = computed(() => heroPool.value.slice(0, 4))
+
+/**
+ * 卡片内容的切换标识。
+ *
+ * 用「曲目 id + 位置」而不是只靠 id：本地池重新抽样时可能抽到同一首，
+ * 只按 id 做 key 会让过渡在「换一首但内容没变」时静默失效。
+ * 有了它，封面走 `<Transition>` 交叉淡入，文字块靠重建元素触发入场动画。
+ */
+const heroKey = computed(() => `${hero.value?.id ?? 'empty'}-${heroPosition.value}`)
 const heroSource = computed(() =>
   dailyPool.value.length
     ? { label: '每日推荐', icon: 'mgc_calendar_day_line' }
@@ -535,7 +544,10 @@ onUnmounted(() => {
         <div v-else-if="hero" class="hero-body">
           <div class="hero-left">
             <div class="hero-cover" @click="playHero">
-              <img :src="hero.cover" alt="" />
+              <!-- 换一首时新旧封面交叉淡入，并带一点点缩放，避免「啪」地换图 -->
+              <Transition name="hero-cover">
+                <img :key="heroKey" :src="hero.cover" alt="" />
+              </Transition>
               <div class="hero-cover-play">
                 <n-icon size="26"><i class="mgc_play_fill"></i></n-icon>
               </div>
@@ -555,8 +567,11 @@ onUnmounted(() => {
                   换一首
                 </n-button>
               </div>
-              <h2 class="hero-title">随机翻到了「{{ hero.title }}」</h2>
-              <p class="hero-meta">{{ heroMeta }}</p>
+              <!-- 文字块整体重建触发入场动画：淡入 + 轻微上浮，不做 out-in 以免卡片高度抖动 -->
+              <div :key="heroKey" class="hero-text">
+                <h2 class="hero-title">随机翻到了「{{ hero.title }}」</h2>
+                <p class="hero-meta">{{ heroMeta }}</p>
+              </div>
               <div class="hero-actions">
                 <n-button type="primary" round strong @click="playHero">
                   <template #icon>
@@ -574,7 +589,7 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <ul class="hero-list">
+          <TransitionGroup tag="ul" name="hero-row" class="hero-list">
             <li
               v-for="(track, index) in heroPreview"
               :key="`${track.id}-${index}`"
@@ -585,7 +600,7 @@ onUnmounted(() => {
               <span class="hero-row-title">{{ track.title }}</span>
               <span class="hero-row-artist">{{ track.artist }}</span>
             </li>
-          </ul>
+          </TransitionGroup>
         </div>
         <n-empty v-else size="small" description="曲库还没有歌，先扫描本地音乐吧" />
       </n-card>
@@ -819,6 +834,9 @@ html[data-theme='light'] .home-view {
 }
 
 .hero-cover img {
+  /* 交叉淡入需要新旧两张图重叠，故绝对定位铺满卡片；transform 的过渡留给悬停缩放 */
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -826,9 +844,33 @@ html[data-theme='light'] .home-view {
   transition: transform 0.4s cubic-bezier(0.25, 0.1, 0.25, 1);
 }
 
+/* 「换一首」时的封面交叉淡入：新图淡入并轻微放大，旧图淡出，不会「啪」地跳图 */
+.hero-cover img.hero-cover-enter-active,
+.hero-cover img.hero-cover-leave-active {
+  transition:
+    opacity 0.5s ease,
+    transform 0.5s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.hero-cover img.hero-cover-enter-from {
+  opacity: 0;
+  transform: scale(1.08);
+}
+
+.hero-cover img.hero-cover-leave-to {
+  opacity: 0;
+  transform: scale(1);
+}
+
+.hero-cover img.hero-cover-enter-active {
+  z-index: 1;
+}
+
 .hero-cover-play {
   position: absolute;
   inset: 0;
+  /* 高于过渡期间新封面的 z-index:1，否则悬停播放遮罩会被新图盖住 */
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -872,6 +914,30 @@ html[data-theme='light'] .hero-tag {
 .hero-reroll {
   font-size: 12px;
   color: var(--home-text-weak);
+}
+
+/**
+ * 文字块（标题 + 来源说明）随「换一首」重建时的入场动画。
+ * 不做 out-in 过渡：文字块一消失卡片高度会塌一下，换行进换行出的观感反而更跳。
+ */
+.hero-text {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  animation: hero-text-in 0.36s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+@keyframes hero-text-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .hero-title {
@@ -931,6 +997,24 @@ html[data-theme='light'] .hero-tag {
 
 .hero-row:hover {
   background: var(--home-surface-hover);
+}
+
+/* 预览列表换池（如本地重新抽样）时的行级淡入与位移 */
+.hero-row-enter-active,
+.hero-row-leave-active {
+  transition:
+    opacity 0.3s ease,
+    transform 0.3s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.hero-row-enter-from,
+.hero-row-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.hero-row-move {
+  transition: transform 0.3s cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 .hero-row-index {
@@ -1232,6 +1316,28 @@ html[data-theme='light'] .hero-tag {
 
   .hero-title {
     font-size: 20px;
+  }
+}
+
+/* 系统开启「减少动态效果」时，卡片信息不做位移动画，只保留短促的透明度变化 */
+@media (prefers-reduced-motion: reduce) {
+  .hero-text {
+    animation: none;
+  }
+
+  .hero-cover img.hero-cover-enter-active,
+  .hero-cover img.hero-cover-leave-active,
+  .hero-row-enter-active,
+  .hero-row-leave-active,
+  .hero-row-move {
+    transition: opacity 0.12s linear;
+  }
+
+  .hero-cover img.hero-cover-enter-from,
+  .hero-cover img.hero-cover-leave-to,
+  .hero-row-enter-from,
+  .hero-row-leave-to {
+    transform: none;
   }
 }
 </style>

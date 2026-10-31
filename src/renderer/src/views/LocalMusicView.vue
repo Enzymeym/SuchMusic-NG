@@ -3,7 +3,15 @@
     <div class="header">
       <div class="title">
         歌曲
-        <span class="subtitle"> <i class="mgc_music_2_fill"></i> {{ songs.length }} 首</span>
+        <span class="subtitle">
+          <i class="mgc_music_2_fill"></i> {{ songs.length }} 首
+          <template v-if="searchKeyword"> · 匹配 {{ searchTotal }}</template>
+          <template v-if="localMusicStore.scanning">
+            · 扫描中<template v-if="localMusicStore.scanProgress?.scanned">
+              {{ localMusicStore.scanProgress.scanned }} 个文件</template
+            >
+          </template>
+        </span>
       </div>
       <div class="actions">
         <div style="display: flex; gap: 10px">
@@ -45,13 +53,16 @@
           </n-button>
         </div>
         <n-input
-          v-model:value="searchKeyword"
-          placeholder="模糊搜索"
+          :value="searchKeyword"
+          placeholder="搜索标题 / 歌手 / 专辑 / 文件名"
           clearable
           size="large"
           round
           class="search-input"
-          style="width: 200px"
+          style="width: 240px"
+          @update:value="updateSearch"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
         >
           <template #prefix>
             <n-icon size="18" color="#999">
@@ -134,6 +145,7 @@ import TagEditDialog from '../components/common/TagEditDialog.vue'
 import { usePlayerStore } from '../stores/playerStore'
 import { usePlaylistStore } from '../stores/playlistStore'
 import { useLocalMusicStore, type LocalSong } from '../stores/localMusicStore'
+import { useLibrarySearch } from '../composables/useLibrarySearch'
 
 // 本地音乐歌曲结构，尽量对齐 SongList 组件
 // Use LocalSong from store instead of defining locally, but for compatibility with existing code we can alias it or just use it.
@@ -141,7 +153,6 @@ type Song = LocalSong
 
 const localMusicStore = useLocalMusicStore()
 const songs = computed(() => localMusicStore.songs)
-const searchKeyword = ref('')
 const loading = computed(() => localMusicStore.loading)
 const message = useMessage()
 const dialog = useDialog()
@@ -247,15 +258,20 @@ const handleCreatePlaylistFromSelection = () => {
   message.success('已创建本地歌单')
 }
 
-const filteredSongs = computed(() => {
-  if (!searchKeyword.value) return localMusicStore.songs
-  const keyword = searchKeyword.value.toLowerCase().trim()
-  return localMusicStore.songs.filter((song) => {
-    const name = song.name?.toLowerCase() || ''
-    const artist = getSongArtist(song).toLowerCase()
-    const album = (song.al?.name || '').toLowerCase()
-    return name.includes(keyword) || artist.includes(keyword) || album.includes(keyword)
-  })
+/**
+ * 搜索统一走 useLibrarySearch：防抖 200ms、中文输入法合成期不触发、
+ * 支持 title:/artist:/album:/file: 字段限定。
+ */
+const {
+  keyword: searchKeyword,
+  results: filteredSongs,
+  total: searchTotal,
+  update: updateSearch,
+  onCompositionStart,
+  onCompositionEnd
+} = useLibrarySearch({
+  source: () => localMusicStore.songs,
+  limit: 500
 })
 
 onMounted((): void => {
@@ -346,8 +362,7 @@ const handleContextMenuSelect = (key: string, song: Song) => {
       break
     case 'openFileLocation':
       if (song.filePath) {
-        // window.electron.ipcRenderer.send('show-item-in-folder', song.filePath)
-        message.info(`文件路径: ${song.filePath}`)
+        void localMusicStore.revealInFolder(song.filePath)
       }
       break
     default:
@@ -356,7 +371,12 @@ const handleContextMenuSelect = (key: string, song: Song) => {
 }
 
 const handleTagSaved = () => {
-  // 重新扫描以更新列表信息
+  // 只重读被编辑的那一首，避免为了刷新一行标签去整库扫描
+  const filePath = currentEditingSongPath.value
+  if (filePath) {
+    void localMusicStore.reloadTracks([filePath])
+    return
+  }
   void scanMusic()
 }
 

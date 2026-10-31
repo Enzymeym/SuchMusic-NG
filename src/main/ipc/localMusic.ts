@@ -3,6 +3,7 @@ import { promises as fs } from 'fs'
 import { join, extname, basename, dirname } from 'path'
 import { writeAudioMeta } from '../utils/musicMetaWriter'
 import { resolveAudioMeta } from '../services/audioMetaResolver'
+import { getNativeTagReader } from '../services/tagReaderService'
 
 // 本地音乐扫描结果的数据结构
 interface LocalMusicTrack {
@@ -51,7 +52,10 @@ export function registerLocalMusicHandlers(): void {
     'local-music:get-meta',
     async (_event, filePath: string, options?: { includeCover?: boolean }) => {
       try {
-        return await resolveAudioMeta(filePath, { includeCover: options?.includeCover })
+        return await resolveAudioMeta(filePath, {
+          includeCover: options?.includeCover,
+          reader: getNativeTagReader()
+        })
       } catch (error) {
         console.error('get-meta failed:', filePath, error)
         return {}

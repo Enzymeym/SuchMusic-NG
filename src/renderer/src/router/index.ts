@@ -7,6 +7,7 @@ const StatisticsView = () => import('../views/StatisticsView.vue')
 const LocalMusicView = () => import('../views/LocalMusicView.vue')
 const PlaylistView = () => import('../views/PlaylistView.vue')
 const PlaylistDetailView = () => import('../views/PlaylistDetailView.vue')
+const FolderDetailView = () => import('../views/FolderDetailView.vue')
 const RecentPlayView = () => import('../views/RecentPlayView.vue')
 const SearchView = () => import('../views/SearchView.vue')
 const SingerView = () => import('../views/SingerView.vue')
@@ -42,6 +43,13 @@ const router = createRouter({
           path: 'playlist/:id',
           name: 'playlist-detail',
           component: PlaylistDetailView
+        },
+        {
+          // 文件夹歌单详情。id 是库里 folders.id（整数），刷新后依然稳定；
+          // 不要用路径做 param —— Windows 反斜杠/斜杠与编码会把路由打散。
+          path: 'folder/:id',
+          name: 'folder-detail',
+          component: FolderDetailView
         },
         {
           path: 'recent',

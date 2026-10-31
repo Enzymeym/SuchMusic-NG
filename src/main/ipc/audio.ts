@@ -5,7 +5,7 @@ import { pipeline } from 'stream/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createHash } from 'crypto'
-import { loadNativeDecoder } from '../services/nativeDecoder'
+import { getSampleRate, loadNativeDecoder, normalizePcmData } from '../services/nativeDecoder'
 import { getActiveNeteaseCookie } from '../services/neteaseService'
 
 // ====== 在线音频缓存 ======
@@ -391,18 +391,30 @@ export function registerAudioHandlers(): void {
     }
 
     const webContents = event.sender
+    const stopChannel = 'audio:decode-stream:stop'
     let cancelled = false
 
-    const stopChannel = 'audio:decode-stream:stop'
+    const safeSend = (channel: string, payload?: unknown): void => {
+      if (!webContents.isDestroyed()) webContents.send(channel, payload)
+    }
+
+    // 无论正常结束、出错、被取消还是窗口销毁，都必须把监听器摘掉：
+    // 旧实现只在「收到 stop」分支里 removeListener，解码中途失败或窗口销毁会永久留下
+    // 一个闭包（持有 webContents + 已缓冲的 chunk），反复开流就会一点点涨上去。
+    const cleanup = (): void => {
+      ipcMain.removeListener(stopChannel, stopHandler)
+      if (!webContents.isDestroyed()) webContents.removeListener('destroyed', cleanup)
+    }
+
     const stopHandler = (stopEvent: IpcMainEvent): void => {
-      if (stopEvent.sender === webContents) {
-        cancelled = true
-        webContents.send('audio:decode-stream:stopped')
-        ipcMain.removeListener(stopChannel, stopHandler)
-      }
+      if (stopEvent.sender !== webContents) return
+      cancelled = true
+      safeSend('audio:decode-stream:stopped')
+      cleanup()
     }
 
     ipcMain.on(stopChannel, stopHandler)
+    webContents.once('destroyed', cleanup)
 
     try {
       decode_audio_stream(filePath, (chunkRaw: unknown) => {
@@ -411,43 +423,41 @@ export function registerAudioHandlers(): void {
         const chunk = chunkRaw as {
           sample_rate?: number
           sampleRate?: number
-          channels: number
-          data: number[]
+          channels?: number
+          data?: unknown
           finished?: boolean
-        }
+        } | null
 
-        const sampleRate = chunk.sample_rate ?? chunk.sampleRate ?? 44_100
-        const basePayload = {
-          sampleRate,
-          channels: chunk.channels,
-          data: Array.isArray(chunk.data) ? chunk.data : [],
-          finished: !!chunk.finished
-        }
+        // 新二进制给 f32 字节 Buffer，旧二进制是 number[]：
+        // `Array.isArray(Float32Array)` 恒为 false，历史上这里会静默把音频当成空数组。
+        const data = normalizePcmData(chunk?.data) ?? []
+        const sampleRate = getSampleRate(chunk, 44_100)
+        const channels = Math.max(1, Number(chunk?.channels) || 2)
 
         // 兜底：如果 native 没有正确标记 finished，
         // 则当数据块长度小于满块大小时认为是最后一块
         const framesPerChunk = 2048
-        const expectedSamplesPerChunk = framesPerChunk * basePayload.channels
+        const expectedSamplesPerChunk = framesPerChunk * channels
         const isLastChunk =
-          basePayload.finished ||
-          basePayload.data.length < expectedSamplesPerChunk
+          !!chunk?.finished ||
+          (data.length > 0 && data.length < expectedSamplesPerChunk)
 
-        const payload = {
-          ...basePayload,
+        safeSend('audio:decode-stream:chunk', {
+          sampleRate,
+          channels,
+          data,
           finished: isLastChunk
-        }
-
-        webContents.send('audio:decode-stream:chunk', payload)
+        })
 
         if (isLastChunk) {
-          webContents.send('audio:decode-stream:finished')
-          ipcMain.removeListener(stopChannel, stopHandler)
+          safeSend('audio:decode-stream:finished')
+          cleanup()
         }
       })
     } catch (error) {
       console.error('audio:decode-stream failed:', error)
-      webContents.send('audio:decode-stream:error', String(error))
-      ipcMain.removeListener(stopChannel, stopHandler)
+      safeSend('audio:decode-stream:error', String(error))
+      cleanup()
     }
   })
 

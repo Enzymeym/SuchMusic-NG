@@ -29,6 +29,8 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { usePlayerStore } from '../../stores/playerStore'
 import { usePlaylistStore } from '../../stores/playlistStore'
 import { useLocalMusicStore } from '../../stores/localMusicStore'
+import { getSearchIndex } from '../../utils/librarySearch'
+import { normalizeSearchText } from '../../../../shared/library/normalize'
 const router = useRouter()
 const route = useRoute()
 const settingsStore = useSettingsStore()
@@ -289,10 +291,12 @@ let hotSearchLoaded = false
 const suggestions = ref<{
   localSongs: any[]
   localPlaylists: any[]
+  localFolders: any[]
   recent: any[]
 }>({
   localSongs: [],
   localPlaylists: [],
+  localFolders: [],
   recent: []
 })
 const suggestionLoading = ref(false)
@@ -326,33 +330,33 @@ watch(searchText, (newVal) => {
   searchTimer = setTimeout(async () => {
     suggestionLoading.value = true
     try {
-      const keyword = newVal.toLowerCase().trim()
-
-      // 1. Local Songs
-      const localSongs = localMusicStore.songs
-        .filter(
-          (s) =>
-            s.name?.toLowerCase().includes(keyword) ||
-            s.ar?.some((a) => a.name.toLowerCase().includes(keyword)) ||
-            s.al?.name?.toLowerCase().includes(keyword)
-        )
-        .slice(0, 5)
+      // 本地匹配统一交给曲库搜索（标题/歌手/专辑/文件名，同一套归一化规则）
+      const localSongs = getSearchIndex(localMusicStore.songs).search(newVal, { limit: 5 }).items
 
       // 2. Local Playlists
+      const normalized = normalizeSearchText(newVal)
       const localPlaylists = playlistStore.playlists
-        .filter((p) => p.name.toLowerCase().includes(keyword))
+        .filter((p) => normalizeSearchText(p.name).includes(normalized))
         .slice(0, 3)
+
+      // 2.5 文件夹歌单（目录名命中，直接跳文件夹详情）
+      const localFolders = localMusicStore.folderPlaylists
+        .filter((f) => normalizeSearchText(f.displayName).includes(normalized))
+        .slice(0, 4)
 
       // 3. Recent Play
       const recent = playerStore.playHistory
         .filter(
-          (p) => p.title.toLowerCase().includes(keyword) || p.artist.toLowerCase().includes(keyword)
+          (p) =>
+            normalizeSearchText(p.title).includes(normalized) ||
+            normalizeSearchText(p.artist).includes(normalized)
         )
         .slice(0, 5)
 
       suggestions.value = {
         localSongs,
         localPlaylists,
+        localFolders,
         recent
       }
 
@@ -403,14 +407,9 @@ const handleSuggestionClick = (type: string, item: any) => {
     playerStore.setCurrentSong(song)
     playerStore.recordPlay(song)
   } else if (type === 'local-playlist') {
-    // Navigate to playlist detail? Or play?
-    // Assuming we have a route for local playlist or just playlist detail
-    // For now, maybe just do nothing or implement if playlist detail supports it
-    // The current PlaylistDetailView seems to support 'id' param.
-    // Let's assume we can navigate to it.
-    // But wait, playlistStore playlists are user created.
-    // We need to check routes.
     router.push({ name: 'playlist-detail', params: { id: item.id } })
+  } else if (type === 'folder') {
+    router.push({ name: 'folder-detail', params: { id: String(item.id) } })
   } else if (type === 'recent') {
     const song = {
       id: item.songId,
@@ -687,12 +686,31 @@ const headerPaddingStyle = computed(() => {
                 </div>
               </template>
 
+              <!-- 文件夹歌单 -->
+              <template v-if="suggestions.localFolders.length">
+                <div class="suggestion-header">文件夹</div>
+                <div class="playlist-grid">
+                  <div
+                    v-for="item in suggestions.localFolders"
+                    :key="'fd-' + item.id"
+                    class="playlist-item"
+                    @click="handleSuggestionClick('folder', item)"
+                  >
+                    <div class="playlist-cover-wrapper">
+                      <n-icon size="40"><i class="mgc_folder_2_line"></i></n-icon>
+                    </div>
+                    <div class="playlist-title">{{ item.displayName }}</div>
+                  </div>
+                </div>
+              </template>
+
               <div
                 v-if="
                   !neteaseSuggestions.length &&
                   !suggestions.recent.length &&
                   !suggestions.localSongs.length &&
-                  !suggestions.localPlaylists.length
+                  !suggestions.localPlaylists.length &&
+                  !suggestions.localFolders.length
                 "
                 class="no-suggestions"
               >

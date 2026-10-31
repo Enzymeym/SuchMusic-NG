@@ -476,6 +476,34 @@ const api = {
     getReport: () => ipcRenderer.invoke('memory:get-report')
   },
 
+  /**
+   * 本地曲库。数据源是主进程 SQLite，渲染层只做展示与搜索。
+   * 订阅方法统一返回 unsubscribe 闭包，避免组件重挂载时监听器累积。
+   */
+  library: {
+    bootstrap: () => ipcRenderer.invoke('library:bootstrap'),
+    scan: (roots?: string[]) => ipcRenderer.invoke('library:scan', roots),
+    cancelScan: () => ipcRenderer.invoke('library:scan-cancel'),
+    folderTracks: (folderId: number, options?: Record<string, unknown>) =>
+      ipcRenderer.invoke('library:folder-tracks', folderId, toCloneable(options)),
+    folderChildren: (parentPath: string) =>
+      ipcRenderer.invoke('library:folder-children', parentPath),
+    updateFolder: (folderId: number, patch: Record<string, unknown>) =>
+      ipcRenderer.invoke('library:folder-update', folderId, toCloneable(patch)),
+    reloadTracks: (filePaths: string[]) => ipcRenderer.invoke('library:reload-tracks', filePaths),
+    reveal: (filePath: string) => ipcRenderer.invoke('library:reveal', filePath),
+    onScanProgress: (callback: (progress: unknown) => void): (() => void) => {
+      const wrapper = (_event: unknown, payload: unknown): void => callback(payload)
+      ipcRenderer.on('library:scan-progress', wrapper)
+      return () => ipcRenderer.removeListener('library:scan-progress', wrapper)
+    },
+    onScanDone: (callback: (event: unknown) => void): (() => void) => {
+      const wrapper = (_event: unknown, payload: unknown): void => callback(payload)
+      ipcRenderer.on('library:scan-done', wrapper)
+      return () => ipcRenderer.removeListener('library:scan-done', wrapper)
+    }
+  },
+
   audioEngine: {
     create: (config?: AudioEngineConfig) => audioEngineManager.create(config),
     destroy: () => audioEngineManager.destroy(),

@@ -202,27 +202,35 @@ export const usePlaylistStore = defineStore('playlist', {
       })
     },
     /**
-     * 根据本地歌曲已加载的封面恢复用户歌单中缺失的封面
-     * 仅补充空封面或指向已失效 blob URL 的曲目，并持久化到 storage
+     * 以本地曲库的封面为准，同步用户歌单里的本地曲目封面。
      *
-     * 本地封面使用 blob URL，重新扫描时会 revoke 旧 URL 并生成新 URL，
-     * 若歌单仍持有旧 blob URL 且封面非空，则不会被补全，导致封面消失。
+     * 曲目入歌单时记下的封面是快照：重新扫描、编辑标签换封面后 hash 会变，
+     * 旧地址（历史数据里还可能是已 revoke 的 blob:）一律 404。
+     * 因此命中曲库就无条件对齐，而不是只在「空封面 / blob:」时才补。
      */
-    restoreCoversFromLocalSongs(localSongs: { id: string | number; picUrl?: string }[]): void {
-      const coverMap = new Map<string | number, string>()
+    restoreCoversFromLocalSongs(
+      localSongs: { id: string | number; picUrl?: string; filePath?: string }[]
+    ): void {
+      const coverMap = new Map<string, string>()
       localSongs.forEach((song) => {
-        if (song.picUrl) {
-          coverMap.set(song.id, song.picUrl)
-        }
+        if (!song.picUrl) return
+        // 同时按 id 与路径建索引：老歌单里的 id 可能不是路径
+        coverMap.set(String(song.id), song.picUrl)
+        if (song.filePath) coverMap.set(song.filePath, song.picUrl)
       })
+      if (coverMap.size === 0) return
 
       let updated = false
       this.playlists.forEach((pl) => {
         pl.tracks.forEach((t) => {
-          if (t.id != null && coverMap.has(t.id) && (!t.cover || t.cover.startsWith('blob:'))) {
-            t.cover = coverMap.get(t.id)!
-            updated = true
-          }
+          const next =
+            (t.id != null ? coverMap.get(String(t.id)) : undefined) ??
+            (t.filePath ? coverMap.get(t.filePath) : undefined)
+          if (!next || next === t.cover) return
+          // 会话内临时指定的封面（data:）不覆盖
+          if (t.cover && t.cover.startsWith('data:')) return
+          t.cover = next
+          updated = true
         })
       })
 

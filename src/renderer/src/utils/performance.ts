@@ -38,13 +38,21 @@ export function throttle<T extends (...args: any[]) => any>(
   }
 }
 
+export interface DebouncedFunction<T extends (...args: any[]) => any> {
+  (...args: Parameters<T>): void
+  /** 取消尚未执行的调用（搜索框被清空时必须用它，否则旧关键词会“复活”） */
+  cancel: () => void
+  /** 立即执行挂起的调用 */
+  flush: () => void
+}
+
 /**
  * 防抖函数 - 延迟执行直到调用停止超过指定时间
  * 适用于搜索输入、表单验证等场景
  *
  * @param fn - 需要防抖的函数
  * @param delay - 等待时间（毫秒）
- * @returns 防抖后的函数，与原函数签名一致
+ * @returns 节流后的函数，附带 cancel / flush
  *
  * @example
  * const debouncedSearch = debounce(performSearch, 300)
@@ -53,15 +61,36 @@ export function throttle<T extends (...args: any[]) => any>(
 export function debounce<T extends (...args: any[]) => any>(
   fn: T,
   delay: number
-): (...args: Parameters<T>) => void {
+): DebouncedFunction<T> {
   let timer: ReturnType<typeof setTimeout> | null = null
+  let lastArgs: Parameters<T> | null = null
 
-  return (...args: Parameters<T>) => {
-    if (timer) clearTimeout(timer)
-    timer = setTimeout(() => {
-      fn(...args)
-    }, delay)
+  const run = (): void => {
+    timer = null
+    if (!lastArgs) return
+    const args = lastArgs
+    lastArgs = null
+    fn(...args)
   }
+
+  const wrapped = ((...args: Parameters<T>) => {
+    lastArgs = args
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(run, delay)
+  }) as DebouncedFunction<T>
+
+  wrapped.cancel = () => {
+    if (timer) clearTimeout(timer)
+    timer = null
+    lastArgs = null
+  }
+
+  wrapped.flush = () => {
+    if (timer) clearTimeout(timer)
+    run()
+  }
+
+  return wrapped
 }
 
 /**

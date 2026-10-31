@@ -81,7 +81,7 @@ const fmtDb = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`
 const fmtDbCompact = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)}dB`
 
 // ==================== 顶部导航 & 预设 ====================
-const selectedPresetId = ref('flat')
+const selectedPresetId = ref(audioEngine.currentPresetId.value || 'flat')
 watch(
   () => audioEngine.currentPresetId.value,
   (val) => {
@@ -169,8 +169,8 @@ const handleGoToSound = () => {
   openPlaybackSettings()
 }
 
-// ==================== PEQ 曲线图 ====================
-// 已统一为参数均衡器（PEQ）：不再区分「原EQ（post）/预EQ（pre）」，
+// ==================== EQ 曲线图 ====================
+// 已统一为参数均衡器（EQ）：不再区分「原EQ（post）/预EQ（pre）」，
 // 每个频段只有一个增益（沿用引擎的 preGain 字段），直接在曲线上拖动调节。
 const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 const EQ_MIN_DB = -10
@@ -191,7 +191,7 @@ const eqEnabled = computed<boolean>({
   }
 })
 
-/** PEQ 各频段增益（dB），直接映射引擎频段的 preGain */
+/** EQ 各频段增益（dB），直接映射引擎频段的 preGain */
 const eqGains = computed(() => audioEngine.eqBands.value.map((b: any) => b.preGain ?? 0))
 
 /**
@@ -425,7 +425,7 @@ function ensureEqBands(band: number) {
   audioEngine.eqBands.value = EQ_FREQS.map((_, i) => bands[i] ?? defaults[i])
 }
 
-// ==================== PEQ 强度 ====================
+// ==================== EQ 强度 ====================
 // 强度是「相对基准曲线」的缩放倍率：每次调节都从基准曲线重新换算，
 // 而不是在当前增益上累乘。旧实现用 ratio 累乘 + 0.5dB 取整，多次调节后
 // 曲线会因取整误差与 ±10dB 钳制而漂移、塌陷 —— 这就是「多次调节后曲线异常」的根因。
@@ -460,7 +460,7 @@ function handleEqStrengthChange(v: number) {
 
 // ==================== 等响度（EQ 响度补偿） ====================
 // 语义：调整 EQ 后保持整体响度与调整前一致。
-// DSP 按各频段在整体响度中的权重，算出当前 PEQ 曲线带来的响度变化，
+// DSP 按各频段在整体响度中的权重，算出当前 EQ 曲线带来的响度变化，
 // 再对输出施加等量反向增益（见 web-audio-dsp.ts 的 syncLoudness）。
 // 本组件只负责开关、强度，并展示算出来的补偿量。
 const loudnessEnabled = computed<boolean>({
@@ -479,7 +479,7 @@ function handleLoudnessAmount(v: number) {
   audioEngine.setLoudnessParams({ compensation: clamp(Math.round(v), 0, 200) / 100 })
 }
 
-/** 当前 PEQ 曲线带来的响度净变化（dB），与 DSP 使用同一套权重换算 */
+/** 当前 EQ 曲线带来的响度净变化（dB），与 DSP 使用同一套权重换算 */
 const eqLoudnessDelta = computed(() => computeEqLoudnessDb(normalizedGains()))
 
 /** 实际下发的补偿增益（dB，已计入强度与上下限） */
@@ -497,10 +497,10 @@ const loudnessStatus = computed(() =>
 )
 
 const loudnessCompHint = computed(() => {
-  if (!eqEnabled.value) return 'PEQ 已关闭（旁通），不产生响度变化，无需补偿。'
+  if (!eqEnabled.value) return 'EQ 已关闭（旁通），不产生响度变化，无需补偿。'
   const delta = eqLoudnessDelta.value
-  if (Math.abs(delta) < 0.1) return '当前 PEQ 曲线几乎不改变整体响度，无需补偿。'
-  return `当前 PEQ 曲线使整体${delta > 0 ? '变响' : '变轻'} ${Math.abs(delta).toFixed(1)} dB，已自动补偿 ${fmtDbCompact(loudnessCompDb.value)}。`
+  if (Math.abs(delta) < 0.1) return '当前 EQ 曲线几乎不改变整体响度，无需补偿。'
+  return `当前 EQ 曲线使整体${delta > 0 ? '变响' : '变轻'} ${Math.abs(delta).toFixed(1)} dB，已自动补偿 ${fmtDbCompact(loudnessCompDb.value)}。`
 })
 
 // ==================== 低音量高低频补偿（Fletcher-Munson 近似） ====================
@@ -762,6 +762,8 @@ watch(
 
 // ==================== 界面状态持久化 ====================
 const UI_STORAGE_KEY = 'sound-effects-ui'
+/** loadUiState 读出的基准曲线，供 onMounted 决定是否重新采集 */
+let restoredBaseEqGains: number[] | null = null
 function loadUiState() {
   try {
     const raw = localStorage.getItem(UI_STORAGE_KEY)
@@ -777,10 +779,26 @@ function loadUiState() {
       balance.value = clamp(((r - l) / 12) * 100, -100, 100)
     }
     if (typeof d.volumeMemory === 'boolean') volumeMemoryEnabled.value = d.volumeMemory
+    // EQ 强度与它对应的基准曲线必须成对恢复：
+    // 实际增益已经（按强度缩放后）写进 engine 状态，这里只还原「显示用的倍率 + 基准」，
+    // 不能再用基准重算一遍，否则重启后曲线会被二次缩放。
+    if (Array.isArray(d.baseEqGains) && d.baseEqGains.length === EQ_FREQS.length) {
+      restoredBaseEqGains = d.baseEqGains.map((v: unknown) =>
+        typeof v === 'number' && Number.isFinite(v) ? clamp(v, EQ_MIN_DB, EQ_MAX_DB) : 0
+      )
+    }
+    if (restoredBaseEqGains && typeof d.eqStrength === 'number') {
+      // 强度必须和基准成对生效：只有基准恢复成功时还原倍率，否则 displayed 强度与实际增益不符
+      eqStrength.value = clamp(Math.round(d.eqStrength), 0, 200)
+    }
+    if (typeof d.mbcBands === 'number') {
+      mbcBands.value = clamp(Math.round(d.mbcBands), 2, 4)
+    }
   } catch {
     /* ignore */
   }
 }
+
 let uiSaveTimer: ReturnType<typeof setTimeout> | null = null
 function saveUiState() {
   if (uiSaveTimer) clearTimeout(uiSaveTimer)
@@ -791,7 +809,10 @@ function saveUiState() {
         JSON.stringify({
           balanceEnabled: balanceEnabled.value,
           balance: balance.value,
-          volumeMemory: volumeMemoryEnabled.value
+          volumeMemory: volumeMemoryEnabled.value,
+          eqStrength: eqStrength.value,
+          baseEqGains: baseEqGains.value,
+          mbcBands: mbcBands.value
         })
       )
     } catch {
@@ -799,7 +820,9 @@ function saveUiState() {
     }
   }, 300)
 }
-watch([balanceEnabled, balance, volumeMemoryEnabled], saveUiState)
+watch([balanceEnabled, balance, volumeMemoryEnabled, eqStrength, baseEqGains, mbcBands], saveUiState, {
+  deep: true
+})
 
 // ==================== 底部控制栏 ====================
 const handleFooterSettings = () => {
@@ -819,8 +842,13 @@ onMounted(async () => {
   // 应用持久化的声道平衡 / 音量记忆（此前这两项只是本地状态，从未生效）
   applyBalance()
   restoreVolumeMemory()
-  // 以当前曲线为 PEQ 强度基准
-  captureBaseEqGains()
+  // 以当前曲线为 EQ 强度基准：只有没存过基准时才重新采集，
+  // 否则会把「已按强度缩放过的实际增益」当成基准，再乘一次强度就二次缩放
+  if (restoredBaseEqGains) {
+    baseEqGains.value = restoredBaseEqGains
+  } else {
+    captureBaseEqGains()
+  }
   if (graphWrap.value) {
     resizeObserver = new ResizeObserver(handleResize)
     resizeObserver.observe(graphWrap.value)
@@ -918,10 +946,10 @@ export default {
       <!-- 内容区 -->
       <n-scrollbar class="se-scroll">
         <div class="se-body">
-          <!-- PEQ 参数均衡器曲线图（已合并原「原EQ / 预EQ」为单一参数均衡器） -->
+          <!-- EQ 参数均衡器曲线图（已合并原「原EQ / 预EQ」为单一参数均衡器） -->
           <section class="se-section">
             <header class="se-sec-head">
-              <span class="se-sec-title">PEQ 参数均衡器</span>
+              <span class="se-sec-title">EQ 参数均衡器</span>
               <span class="se-sec-status">在曲线上拖动频点直接调节</span>
             </header>
             <div ref="graphWrap" class="se-graph-wrap">
@@ -938,10 +966,10 @@ export default {
             </div>
           </section>
 
-          <!-- PEQ 强度 -->
+          <!-- EQ 强度 -->
           <section class="se-section" :class="{ disabled: !eqEnabled }">
             <header class="se-sec-head">
-              <span class="se-sec-title">PEQ 强度</span>
+              <span class="se-sec-title">EQ 强度</span>
               <span class="se-sec-status">{{ eqEnabled ? '已开启' : '已关闭' }}</span>
               <n-switch v-model:value="eqEnabled" size="small" />
             </header>

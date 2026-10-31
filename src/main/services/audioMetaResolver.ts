@@ -11,16 +11,25 @@
  * 其它解析器，导致「lofty 能打开文件但读不到 picture」的歌永远没有封面。
  */
 import { promises as fs } from 'fs'
-import { readNativeTags, type NativeTags } from './tagReaderService'
+import { readTagsWith, type NativeTagReader, type NativeTags } from './tagReaderCore'
 import { readMetaManually, type ManualMeta } from '../utils/musicMetaReader'
-import { finalizeCover, isUsableCoverData } from '../utils/imageSniff'
+import { finalizeCoverRaw, isUsableCoverData } from '../utils/imageSniff'
 
 /** 封面来源，用于日志与诊断 */
 export type CoverSource = 'native' | 'music-metadata' | 'manual'
 
 export interface ResolvedCover {
   mimeType: string
+  /** 仅 coverFormat='base64' 时有值 */
   base64: string
+  source: CoverSource
+  bytes: number
+}
+
+/** 裸字节封面：曲库扫描走这条路径，直接按内容哈希落盘 */
+export interface ResolvedCoverRaw {
+  mimeType: string
+  data: Uint8Array
   source: CoverSource
   bytes: number
 }
@@ -29,7 +38,14 @@ export interface ResolvedAudioMeta {
   durationMs?: number
   bitrate?: number
   sampleRate?: number
+  /** 采样精度（位深） */
+  bitsPerSample?: number
+  channels?: number
+  /** 容器/编码格式，如 FLAC / MP3 */
+  codec?: string
   cover?: ResolvedCover
+  /** coverFormat='raw' 时的封面（与 cover 互斥） */
+  coverData?: ResolvedCoverRaw
   title?: string
   artists: string[]
   album?: string
@@ -66,6 +82,9 @@ interface TagFields {
   durationMs?: number
   bitrate?: number
   sampleRate?: number
+  bitsPerSample?: number
+  channels?: number
+  codec?: string
   title?: string
   artists: string[]
   album?: string
@@ -105,21 +124,29 @@ function coverRank(c: CoverCandidate): number {
   return 2
 }
 
+/** 通过裁决的封面候选（裸字节） */
+interface PickedCover {
+  mimeType: string
+  source: CoverSource
+  bytes: number
+  data: Uint8Array
+}
+
 /** 按优先级挑第一个能通过 MIME 裁决与大小校验的候选 */
-function pickCover(candidates: CoverCandidate[]): ResolvedCover | undefined {
+function pickCover(candidates: CoverCandidate[]): PickedCover | undefined {
   const ordered = candidates
     .map((c, index) => ({ c, index }))
     .sort((a, b) => coverRank(a.c) - coverRank(b.c) || a.index - b.index)
     .map((entry) => entry.c)
 
   for (const candidate of ordered) {
-    const normalized = finalizeCover(candidate.mimeType, candidate.data)
+    const normalized = finalizeCoverRaw(candidate.mimeType, candidate.data)
     if (normalized) {
       return {
         mimeType: normalized.mimeType,
-        base64: normalized.base64,
         source: candidate.source,
-        bytes: normalized.bytes
+        bytes: normalized.bytes,
+        data: normalized.data
       }
     }
   }
@@ -143,6 +170,9 @@ function mergeNativeFields(fields: TagFields, native: NativeTags): void {
   fields.durationMs ??= native.durationMs
   fields.bitrate ??= native.bitrate
   fields.sampleRate ??= native.sampleRate
+  fields.bitsPerSample ??= native.bitsPerSample
+  fields.channels ??= native.channels
+  fields.codec ??= native.codec ?? native.fileFormat
   fields.title ??= native.title
   fields.album ??= native.album
   fields.year ??= native.year
@@ -168,6 +198,9 @@ interface MusicMetadataResult {
   durationMs?: number
   bitrate?: number
   sampleRate?: number
+  bitsPerSample?: number
+  channels?: number
+  codec?: string
   title?: string
   artists: string[]
   album?: string
@@ -218,6 +251,11 @@ async function parseWithMusicMetadata(
       numberOfSamples?: number
       sampleRate?: number
       bitrate?: number
+      bitsPerSample?: number
+      bitsPerPixel?: number
+      numberOfChannels?: number
+      codec?: string
+      container?: string
     }
     common?: {
       title?: string
@@ -276,6 +314,9 @@ async function parseWithMusicMetadata(
     durationMs,
     bitrate: format?.bitrate,
     sampleRate: format?.sampleRate,
+    bitsPerSample: format?.bitsPerSample ?? format?.bitsPerPixel,
+    channels: format?.numberOfChannels,
+    codec: format?.codec ?? format?.container,
     title: common?.title?.trim() || undefined,
     artists,
     album: common?.album?.trim() || undefined,
@@ -290,12 +331,21 @@ async function parseWithMusicMetadata(
  *
  * @param opts.includeCover=false 时只取歌词/时长等轻量字段：既不解析封面，
  *   也不会因为封面缺失去跑 music-metadata 或手动嗅探（播放条取歌词的快路径）。
+ * @param opts.coverFormat='base64'（默认）时封面编码成 base64 走 IPC；
+ *   'raw' 时只返回裸字节，供曲库扫描直接按内容哈希落盘。
+ * @param opts.reader 原生标签读取器。由调用方注入（主进程用 nativeModuleLoader
+ *   加载，scanner 子进程用主进程传入的绝对路径加载），本模块不依赖 electron。
  */
 export async function resolveAudioMeta(
   filePath: string,
-  opts?: { includeCover?: boolean }
+  opts?: {
+    includeCover?: boolean
+    coverFormat?: 'base64' | 'raw'
+    reader?: NativeTagReader | null
+  }
 ): Promise<ResolvedAudioMeta> {
   const includeCover = opts?.includeCover !== false
+  const coverFormat = opts?.coverFormat ?? 'base64'
   const fields: TagFields = { artists: [] }
   const candidates: CoverCandidate[] = []
 
@@ -303,8 +353,8 @@ export async function resolveAudioMeta(
   let nativeOk = false
   let nativePictureType: number | undefined
   try {
-    const native = await readNativeTags(filePath, { includeCover })
-    if (native !== 'UNAVAILABLE' && native !== null) {
+    const native = await readTagsWith(opts?.reader ?? null, filePath, { includeCover })
+    if (native !== null) {
       nativeOk = true
       mergeNativeFields(fields, native)
       nativePictureType = native.pictureType
@@ -344,6 +394,9 @@ export async function resolveAudioMeta(
       fields.durationMs ??= mm.durationMs
       fields.bitrate ??= mm.bitrate
       fields.sampleRate ??= mm.sampleRate
+      fields.bitsPerSample ??= mm.bitsPerSample
+      fields.channels ??= mm.channels
+      fields.codec ??= mm.codec
       fields.title ??= mm.title
       fields.album ??= mm.album
       fields.year ??= mm.year
@@ -379,6 +432,9 @@ export async function resolveAudioMeta(
       fields.durationMs = mm.durationMs
       fields.bitrate ??= mm.bitrate
       fields.sampleRate ??= mm.sampleRate
+      fields.bitsPerSample ??= mm.bitsPerSample
+      fields.channels ??= mm.channels
+      fields.codec ??= mm.codec
     }
   }
 
@@ -386,19 +442,37 @@ export async function resolveAudioMeta(
   const sidecar = await readSidecarLyrics(filePath)
   const lyrics = sidecar ?? fields.lyrics
 
-  const cover = includeCover ? pickCover(candidates) : undefined
+  const pick = includeCover ? pickCover(candidates) : undefined
 
-  if (includeCover && !cover && process.env.SUCH_DEBUG_COVER === '1') {
+  if (includeCover && !pick && process.env.SUCH_DEBUG_COVER === '1') {
     // 整库扫描时这类日志可能上千条，默认关闭，用 SUCH_DEBUG_COVER=1 或
     // scripts/diagnose-cover.mjs 做排查
     console.warn('[audioMeta] 三个解析器都没取到可用封面:', filePath)
   }
 
+  const rawCover: ResolvedCoverRaw | undefined =
+    pick && coverFormat === 'raw'
+      ? { mimeType: pick.mimeType, data: pick.data, source: pick.source, bytes: pick.bytes }
+      : undefined
+  const base64Cover: ResolvedCover | undefined =
+    pick && coverFormat === 'base64'
+      ? {
+          mimeType: pick.mimeType,
+          base64: Buffer.from(pick.data).toString('base64'),
+          source: pick.source,
+          bytes: pick.bytes
+        }
+      : undefined
+
   return {
     durationMs: fields.durationMs,
     bitrate: fields.bitrate,
     sampleRate: fields.sampleRate,
-    cover,
+    bitsPerSample: fields.bitsPerSample,
+    channels: fields.channels,
+    codec: fields.codec,
+    cover: base64Cover,
+    coverData: rawCover,
     title: fields.title,
     artists: fields.artists,
     album: fields.album,
