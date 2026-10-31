@@ -9,6 +9,15 @@
   font-display: swap;
 }
 
+/* 英文手写字体：歌手详情页歌手名（仅拉丁字符，中文名回退常规字体） */
+@font-face {
+  font-family: 'Florida Vibes';
+  src: url('../assets/Florida-Vibes.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 [class^='mgc_']::before,
 [class*=' mgc_']::before {
   color: inherit !important;
@@ -102,9 +111,6 @@ html[data-theme='light'] .n-base-select-menu {
   transform: translateY(10px);
 }
 
-.n-scrollbar > .n-scrollbar-container > .n-scrollbar-content {
-  padding-top: 0 !important;
-}
 
 /* 全局禁止文本与图片拖拽/选择，保持音乐播放器风格 */
 * {

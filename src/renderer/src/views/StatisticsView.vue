@@ -569,7 +569,7 @@ function playTop(item: TopItem | null): void {
   <div class="statistics-view">
     <n-scrollbar
       style="height: 100%"
-      content-style="padding: 80px clamp(16px, 2vw, 24px) 32px; margin-top: 80px;"
+      content-style="padding: 80px clamp(16px, 2vw, 24px) 32px;"
     >
       <!-- 自适应容器：所有卡片断点都以「本组件实际可用宽度」为准（见 <style> 里的 @container） -->
       <div class="stats-container">

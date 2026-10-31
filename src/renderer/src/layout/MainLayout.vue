@@ -11,7 +11,7 @@ import PlayerBar from '../components/layout/PlayerBar.vue'
 const route = useRoute()
 const player = usePlayerStore()
 
-const immersiveRoutes = ['playlist-detail']
+const immersiveRoutes = ['playlist-detail', 'singer-detail']
 
 const isImmersive = computed(() => {
   return immersiveRoutes.includes(route.name as string)

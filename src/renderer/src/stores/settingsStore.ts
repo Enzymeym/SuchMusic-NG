@@ -29,7 +29,7 @@ export interface AppearanceSettings {
   playlistLayoutStyle: 'classic' | 'modern'
   songListStyle: 'card' | 'plain'
   themeColorFollowsCover: boolean
-  /** 首页是否显示信息展示卡片（关闭后显示随时间变化的问候标语） */
+  /** 首页是否显示推荐主卡片（关闭后首页只保留问候语与快捷入口） */
   homeShowInfoCards: boolean
 }
 
@@ -242,6 +242,8 @@ export const useSettingsStore = defineStore('settings', () => {
       if (newFont) {
         const stack = buildFontStack(newFont)
         document.body.style.fontFamily = stack
+        // 供局部特殊字体（如歌手详情页的手写体）作为逐字回退用
+        document.body.style.setProperty('--app-font-family', stack)
         setGlobalFontFamily(stack)
       }
     },

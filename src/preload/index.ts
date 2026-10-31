@@ -33,15 +33,7 @@ interface MediaControlStatus {
 
 // 系统媒体控制命令类型
 type MediaControlCommand =
-  | 'play'
-  | 'pause'
-  | 'toggle'
-  | 'next'
-  | 'prev'
-  | 'stop'
-  | 'seek'
-  | 'seekRelative'
-  | 'setVolume'
+  'play' | 'pause' | 'toggle' | 'next' | 'prev' | 'stop' | 'seek' | 'seekRelative' | 'setVolume'
 
 // EQ 频段设置接口
 interface EqBandSettings {
@@ -512,7 +504,15 @@ const api = {
     logout: (userId?: string) => ipcRenderer.invoke('netease:logout', userId),
     playlistDetail: (id: number) => ipcRenderer.invoke('netease:playlist-detail', id),
     playlistTracks: (id: number) => ipcRenderer.invoke('netease:playlist-tracks', id),
-    userPlaylists: () => ipcRenderer.invoke('netease:user-playlists')
+    userPlaylists: () => ipcRenderer.invoke('netease:user-playlists'),
+    dailySongs: () => ipcRenderer.invoke('netease:daily-songs'),
+    recommendPlaylists: (limit = 12) => ipcRenderer.invoke('netease:recommend-playlists', limit),
+    artistDetail: (id: number) => ipcRenderer.invoke('netease:artist-detail', id),
+    artistSongs: (id: number, offset = 0, limit = 200) =>
+      ipcRenderer.invoke('netease:artist-songs', id, offset, limit),
+    artistAlbums: (id: number, offset = 0, limit = 100) =>
+      ipcRenderer.invoke('netease:artist-albums', id, offset, limit),
+    albumTracks: (id: number) => ipcRenderer.invoke('netease:album-tracks', id)
   },
 
   // 在线音频缓存（缓存目录管理 / 统计 / 清理）
@@ -527,7 +527,8 @@ const api = {
     update: (status: MediaControlStatus) => ipcRenderer.send('media-control:update', status),
     getStatus: () => ipcRenderer.invoke('media-control:get-status'),
     onCommand: (cb) => {
-      const handler = (_event: any, payload: { command: MediaControlCommand; value?: number }) => cb(payload)
+      const handler = (_event: any, payload: { command: MediaControlCommand; value?: number }) =>
+        cb(payload)
       // 保存包装后的 handler 引用，供 offCommand 精确移除对应监听器
       ;(cb as any)._mediaControlHandler = handler
       ipcRenderer.on('media-control:command', handler)
@@ -716,8 +717,10 @@ const api = {
     setEnabled: (pluginId: string, enabled: boolean) =>
       ipcRenderer.invoke('source:set-enabled', pluginId, enabled),
     /** 单插件偏好：启用的音乐源 / 首选音质 */
-    setPreferences: (pluginId: string, patch: { sources?: string[] | null; quality?: string | null }) =>
-      ipcRenderer.invoke('source:set-preferences', pluginId, toCloneable(patch)),
+    setPreferences: (
+      pluginId: string,
+      patch: { sources?: string[] | null; quality?: string | null }
+    ) => ipcRenderer.invoke('source:set-preferences', pluginId, toCloneable(patch)),
     /** 搜索（插件源） */
     search: (req: any) => ipcRenderer.invoke('source:search', toCloneable(req)),
     /** 解析播放地址 */

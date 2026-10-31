@@ -199,8 +199,8 @@ const handleCustomColorChange = (color: string | null) => {
     >
       <div class="setting-row">
         <div class="setting-label">
-          <div class="main-label">首页信息展示卡片</div>
-          <div class="sub-label">开启后首页显示歌曲 / 专辑推荐卡片；关闭后显示随时间变化的问候标语</div>
+          <div class="main-label">首页推荐主卡片</div>
+          <div class="sub-label">开启后首页显示「随机翻到了」推荐主卡片；关闭后只保留问候语与下方快捷入口</div>
         </div>
         <n-switch v-model:value="settingsStore.appearance.homeShowInfoCards" />
       </div>

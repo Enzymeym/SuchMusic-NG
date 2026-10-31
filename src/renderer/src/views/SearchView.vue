@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { NAlert, NDropdown, useMessage } from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import { usePlayerStore } from '../stores/playerStore'
@@ -10,6 +10,7 @@ import { useSourcePluginStore } from '../stores/sourcePluginStore'
 import { normalizeSourceKey, resolvePluginUrlDetailed } from '../utils/pluginSource'
 
 const route = useRoute()
+const router = useRouter()
 const playerStore = usePlayerStore()
 const localMusicStore = useLocalMusicStore()
 const message = useMessage()
@@ -195,6 +196,17 @@ const resolveNeteaseSong = async (song: any) => {
     source: 'netease',
     sourceSongId: id
   }
+}
+
+/** 点击网易云搜索结果的歌手名：进入该歌手的网易云歌手详情页 */
+const handleNeteaseArtistClick = (artist: { id?: number | string; name: string }) => {
+  if (!artist?.name) return
+  const id = Number(artist.id)
+  router.push({
+    name: 'singer-detail',
+    params: { name: artist.name },
+    query: id > 0 ? { wy: String(id) } : {}
+  })
 }
 
 // 处理网易云歌曲点击播放
@@ -488,6 +500,8 @@ const resultCountText = computed(() => {
           :loading="neteaseLoading"
           :load-more="neteaseLoadMore"
           :get-playable-song="resolveNeteaseSong"
+          artist-clickable
+          @artist-click="handleNeteaseArtistClick"
           @song-click="handleNeteaseSongClick"
           @scroll="handleNeteaseScroll"
         />

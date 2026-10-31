@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import {
   NModal,
   NSwitch,
+  NTag,
   NSlider,
   NIcon,
   NTooltip,

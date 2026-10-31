@@ -234,8 +234,22 @@
                       <div
                         class="song-artist-ellipsis"
                         :title="getArtistsFormatted(song)"
+                        :class="{ 'song-artist--clickable': artistClickable }"
                       >
-                        {{ getArtistsFormatted(song) }}
+                        <template v-if="artistClickable">
+                          <template
+                            v-for="(item, artistIdx) in getArtistEntries(song)"
+                            :key="`${item.name}-${artistIdx}`"
+                          >
+                            <span
+                              class="artist-name-link"
+                              @click.stop="handleArtistClick(item, song)"
+                              >{{ item.name }}</span
+                            >
+                            <span v-if="artistIdx < getArtistEntries(song).length - 1"> / </span>
+                          </template>
+                        </template>
+                        <template v-else>{{ getArtistsFormatted(song) }}</template>
                       </div>
                     </div>
                   </div>
@@ -410,6 +424,8 @@ interface Props {
   draggable?: boolean
   selectable?: boolean
   selectedIds?: Array<string | number>
+  /** 歌手名是否可点击（点击后由页面决定跳转，如网易云歌手详情） */
+  artistClickable?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -427,11 +443,13 @@ const props = withDefaults(defineProps<Props>(), {
   transparentHeader: false,
   draggable: false,
   selectable: false,
-  selectedIds: () => []
+  selectedIds: () => [],
+  artistClickable: false
 })
 
 const emit = defineEmits<{
   (e: 'song-click', song: Song): void
+  (e: 'artist-click', artist: Artist, song: Song): void
   (e: 'album-click', song: Song): void
   (e: 'context-menu-select', key: string, song: Song): void
   (e: 'sort-change', key: string): void
@@ -933,6 +951,22 @@ function getArtistsFormatted(song: Song) {
   return '未知歌手'
 }
 
+/** 可点击的歌手条目（保留 id，供页面跳转歌手详情使用） */
+function getArtistEntries(song: Song): Artist[] {
+  const list = (song.ar?.length ? song.ar : song.artists) || []
+  if (list.length > 0) return list.filter((a) => !!a?.name)
+  const fallback = getArtistsFormatted(song)
+  return fallback
+    .split(' / ')
+    .filter(Boolean)
+    .map((name) => ({ name }))
+}
+
+function handleArtistClick(artist: Artist, song: Song) {
+  if (!artist?.name) return
+  emit('artist-click', artist, song)
+}
+
 function getAlbumName(song: Song) {
   if (song.al && song.al.name) {
     return song.al.name
@@ -1227,6 +1261,18 @@ const isLargeList = computed(() => props.songs.length > LARGE_LIST_THRESHOLD)
   color: #818181;
   flex: 1;
   min-width: 0;
+}
+
+/* 可点击歌手名：悬停时高亮并出现下划线，提示可进入歌手详情 */
+.artist-name-link {
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.artist-name-link:hover {
+  color: var(--n-primary-color, #3d889b);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .song-album-ellipsis {

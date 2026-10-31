@@ -21,12 +21,31 @@ export interface NeteasePlaylistSummary {
   description?: string
 }
 
-/** 网易云登录用户信息（含 VIP 与等级） */
-export interface NeteaseLoginProfile {
+/** 网易云歌手详情（歌手详情页头部） */
+export interface NeteaseArtistDetail {
+  id: number
+  name: string
+  cover: string
+  briefDesc: string
+  musicSize: number
+  albumSize: number
+  followed: boolean
+}
+
+/** 网易云歌手专辑 */
+export interface NeteaseArtistAlbum {
+  id: number
+  name: string
+  cover: string
+  size: number
+  publishTime: number
+}
+
+/** 网易云登录用户信息（含 VIP 与等级） */export interface NeteaseLoginProfile {
   nickname: string
   userId: string
   avatarUrl?: string
-  /** VIP 类型：0=无 VIP，>0 为黑胶 VIP */
+  /** VIP 类型（位标志）：0=无，1=仅音乐包，10/100/110=黑胶（11=黑胶+音乐包） */
   vipType?: number
   /** 黑胶 VIP 等级 */
   vipLevel?: number
@@ -50,15 +69,7 @@ export interface MediaControlStatus {
 
 /** 系统媒体控制命令 */
 export type MediaControlCommand =
-  | 'play'
-  | 'pause'
-  | 'toggle'
-  | 'next'
-  | 'prev'
-  | 'stop'
-  | 'seek'
-  | 'seekRelative'
-  | 'setVolume'
+  'play' | 'pause' | 'toggle' | 'next' | 'prev' | 'stop' | 'seek' | 'seekRelative' | 'setVolume'
 
 declare global {
   interface Window {
@@ -87,27 +98,54 @@ declare global {
       audioEngine: any
       wasapi: {
         enumerateDevices: () => Promise<{ success: boolean; devices?: any[]; error?: string }>
-        create: (sampleRate: number, channels: number, mode: 'Shared' | 'Exclusive', deviceId?: string) =>
-          Promise<{ success: boolean; engineId?: string; deviceName?: string; mode?: string; error?: string }>
+        create: (
+          sampleRate: number,
+          channels: number,
+          mode: 'Shared' | 'Exclusive',
+          deviceId?: string
+        ) => Promise<{
+          success: boolean
+          engineId?: string
+          deviceName?: string
+          mode?: string
+          error?: string
+        }>
         destroy: (engineId: string) => Promise<{ success: boolean; error?: string }>
         start: (engineId: string) => Promise<{ success: boolean; error?: string }>
         stop: (engineId: string) => Promise<{ success: boolean; error?: string }>
-        outputAudio: (engineId: string, data: number[], channels: number, sampleRate: number) =>
-          Promise<{ success: boolean; error?: string }>
+        outputAudio: (
+          engineId: string,
+          data: number[],
+          channels: number,
+          sampleRate: number
+        ) => Promise<{ success: boolean; error?: string }>
         flush: (engineId: string) => Promise<{ success: boolean; error?: string }>
         getState: (engineId: string) => Promise<{
-          success: boolean; isRunning?: boolean; isReady?: boolean;
-          mode?: string; deviceName?: string; position?: number; error?: string
+          success: boolean
+          isRunning?: boolean
+          isReady?: boolean
+          mode?: string
+          deviceName?: string
+          position?: number
+          error?: string
         }>
         getVersion: () => Promise<{ success: boolean; version?: string; error?: string }>
       }
       netease: {
-        search: (keywords: string, offset?: number, limit?: number) => Promise<{
+        search: (
+          keywords: string,
+          offset?: number,
+          limit?: number
+        ) => Promise<{
           songs: NeteaseSong[]
           hasMore: boolean
           total: number
         }>
-        songUrl: (ids: number[], quality?: string, refresh?: boolean) => Promise<Record<number, string>>
+        songUrl: (
+          ids: number[],
+          quality?: string,
+          refresh?: boolean
+        ) => Promise<Record<number, string>>
         hotSearch: () => Promise<{ searchWord: string; iconUrl?: string }[]>
         suggest: (keywords: string) => Promise<string[]>
         loginQr: () => Promise<{ unikey: string; qrimg: string }>
@@ -131,6 +169,26 @@ declare global {
         playlistDetail: (id: number) => Promise<NeteasePlaylistSummary | null>
         playlistTracks: (id: number) => Promise<NeteaseSong[]>
         userPlaylists: () => Promise<NeteasePlaylistSummary[]>
+        /** 每日推荐歌曲（未登录时返回公共口味推荐） */
+        dailySongs: () => Promise<NeteaseSong[]>
+        /** 首页专属歌单（推荐歌单，登录后按账号口味） */
+        recommendPlaylists: (limit?: number) => Promise<NeteasePlaylistSummary[]>
+        /** 歌手详情（搜索页点击歌手名进入） */
+        artistDetail: (id: number) => Promise<NeteaseArtistDetail | null>
+        /** 歌手歌曲（分页，单页上限 200） */
+        artistSongs: (
+          id: number,
+          offset?: number,
+          limit?: number
+        ) => Promise<{ songs: NeteaseSong[]; hasMore: boolean }>
+        /** 歌手专辑（分页） */
+        artistAlbums: (
+          id: number,
+          offset?: number,
+          limit?: number
+        ) => Promise<{ albums: NeteaseArtistAlbum[]; hasMore: boolean }>
+        /** 专辑全部曲目（歌手页点击专辑按需拉取） */
+        albumTracks: (id: number) => Promise<NeteaseSong[]>
       }
       cache: {
         getInfo: () => Promise<{
@@ -147,7 +205,9 @@ declare global {
         update: (status: MediaControlStatus) => void
         getStatus: () => Promise<MediaControlStatus>
         onCommand: (cb: (payload: { command: MediaControlCommand; value?: number }) => void) => void
-        offCommand: (cb: (payload: { command: MediaControlCommand; value?: number }) => void) => void
+        offCommand: (
+          cb: (payload: { command: MediaControlCommand; value?: number }) => void
+        ) => void
       }
       updater: {
         check: (channel: 'stable' | 'beta') => Promise<any>
@@ -155,15 +215,37 @@ declare global {
         install: (filePath?: string) => Promise<any>
         getCurrentVersion: () => Promise<string>
         cleanup: () => Promise<any>
-        onProgress: (callback: (progress: { downloaded: number; total: number; percent: number; speed: number }) => void) => void
-        offProgress: (callback: (progress: { downloaded: number; total: number; percent: number; speed: number }) => void) => void
+        onProgress: (
+          callback: (progress: {
+            downloaded: number
+            total: number
+            percent: number
+            speed: number
+          }) => void
+        ) => void
+        offProgress: (
+          callback: (progress: {
+            downloaded: number
+            total: number
+            percent: number
+            speed: number
+          }) => void
+        ) => void
       }
       plugins: {
-        load: (filePath: string) => Promise<{ success: boolean; manifest?: any; state?: string; error?: string }>
+        load: (
+          filePath: string
+        ) => Promise<{ success: boolean; manifest?: any; state?: string; error?: string }>
         remove: (pluginId: string) => Promise<{ success: boolean; error?: string }>
         setActive: (pluginId: string | null) => Promise<{ success: boolean; error?: string }>
-        call: (pluginId: string, methodName: string, ...args: any[]) => Promise<{ success: boolean; result?: any; error?: string }>
-        checkUpdate: (pluginId: string) => Promise<{ success: boolean; result?: any; error?: string }>
+        call: (
+          pluginId: string,
+          methodName: string,
+          ...args: any[]
+        ) => Promise<{ success: boolean; result?: any; error?: string }>
+        checkUpdate: (
+          pluginId: string
+        ) => Promise<{ success: boolean; result?: any; error?: string }>
         list: () => Promise<{ success: boolean; plugins?: any[] }>
         selectFile: () => Promise<{ success: boolean; filePath?: string; canceled?: boolean }>
         selectDirectory: () => Promise<{ success: boolean; filePath?: string; canceled?: boolean }>
@@ -171,12 +253,30 @@ declare global {
         onLog: (callback: (level: string, ...args: any[]) => void) => () => void
         onConfirmRequest: (callback: (request: any) => void) => () => void
         onBatchConfirmRequest: (callback: (request: any) => void) => () => void
-        respondConfirm: (response: { requestId: string; confirmed: boolean; skipSession: boolean }) => Promise<void>
-        respondBatchConfirm: (response: { requestId: string; confirmed: boolean; rejectedOpIds?: string[]; skipSession: boolean }) => Promise<void>
-        onEmit: (callback: (data: { pluginId: string; eventName: string; args: any[] }) => void) => () => void
-        onPropsChanged: (callback: (data: { pluginId: string; props: Record<string, any> }) => void) => () => void
+        respondConfirm: (response: {
+          requestId: string
+          confirmed: boolean
+          skipSession: boolean
+        }) => Promise<void>
+        respondBatchConfirm: (response: {
+          requestId: string
+          confirmed: boolean
+          rejectedOpIds?: string[]
+          skipSession: boolean
+        }) => Promise<void>
+        onEmit: (
+          callback: (data: { pluginId: string; eventName: string; args: any[] }) => void
+        ) => () => void
+        onPropsChanged: (
+          callback: (data: { pluginId: string; props: Record<string, any> }) => void
+        ) => () => void
         onPlaylistOp: (callback: (request: any) => void) => () => void
-        respondPlaylistOp: (response: { requestId: string; success: boolean; error?: string; result?: any }) => Promise<void>
+        respondPlaylistOp: (response: {
+          requestId: string
+          success: boolean
+          error?: string
+          result?: any
+        }) => Promise<void>
       }
       sources: {
         list: () => Promise<{ success: boolean; plugins?: any[] }>
@@ -190,7 +290,10 @@ declare global {
         }>
         load: (filePath: string) => Promise<{ success: boolean; info?: any; error?: string }>
         remove: (pluginId: string) => Promise<{ success: boolean; error?: string }>
-        setEnabled: (pluginId: string, enabled: boolean) => Promise<{
+        setEnabled: (
+          pluginId: string,
+          enabled: boolean
+        ) => Promise<{
           success: boolean
           info?: any
           error?: string
@@ -199,7 +302,9 @@ declare global {
           pluginId: string,
           patch: { sources?: string[] | null; quality?: string | null }
         ) => Promise<{ success: boolean; settings?: any; info?: any; error?: string }>
-        search: (req: any) => Promise<{ success: boolean; items?: any[]; nextCursor?: string; error?: string }>
+        search: (
+          req: any
+        ) => Promise<{ success: boolean; items?: any[]; nextCursor?: string; error?: string }>
         resolveUrl: (req: any) => Promise<{
           success: boolean
           result?: any
@@ -235,7 +340,13 @@ declare global {
           query: string,
           limit?: number,
           offset?: number
-        ) => Promise<{ success: boolean; items?: any[]; total?: number; hasMore?: boolean; error?: string }>
+        ) => Promise<{
+          success: boolean
+          items?: any[]
+          total?: number
+          hasMore?: boolean
+          error?: string
+        }>
         onNotice: (callback: (data: any) => void) => () => void
       }
     }
