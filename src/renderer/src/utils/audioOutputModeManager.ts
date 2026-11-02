@@ -53,6 +53,20 @@ export function isWebAudioMode(): boolean {
   }
 }
 
+/**
+ * 判断当前是否为 WASAPI 独占模式。
+ *
+ * 独占模式下应用绕过系统混音器，系统音量对实际输出无效
+ * （用于「低音量补偿」判断是否把系统音量计入实际响度）。
+ */
+export function isWasapiExclusiveMode(): boolean {
+  try {
+    return useSettingsStore().playback.audioOutputMode === 'wasapi-exclusive';
+  } catch {
+    return false;
+  }
+}
+
 /// 音频设备信息接口
 export interface AudioDevice {
   id: string;

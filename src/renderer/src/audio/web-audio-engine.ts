@@ -84,6 +84,66 @@ export class WebAudioOutputEngine {
   // ====== 音频可视化 ======
 
   private analyserNode: AnalyserNode | null = null
+
+  /** attachDspChain 幂等标记：当前已接线的 DSP 链与输出端 */
+  private dspAttachTarget: WebAudioDspChain | null = null
+  private dspAttachDest: AudioNode | null = null
+
+  // ====== 动态 EQ 分析 tap（pre-EQ，高分辨率） ======
+  /**
+   * 专用频谱分析节点：从 masterGain 引出（DSP 链之前），不接 destination。
+   * fftSize=2048（bin 宽 ~21.5Hz @44.1k），保证 32/64/125Hz 低频段有足够分辨率
+   * —— 可视化用的 analyserNode（fftSize=256，bin 宽 ~172Hz）低频完全糊掉。
+   * pre-EQ 取样可避免"自己提升自己"的反馈回路。
+   */
+  private analysisTap: AnalyserNode | null = null
+  private analysisTapBuffer: Float32Array<ArrayBuffer> | null = null
+  /** 分析 tap 的静音输出端（保证 AnalyserNode 被渲染线程驱动） */
+  private analysisTapSink: GainNode | null = null
+
+  /** 确保 pre-EQ 分析 tap 存在并接到 masterGain（connect 对同一对是幂等的） */
+  private ensureAnalysisTap(): void {
+    if (!this.audioContext || !this.masterGain) return
+    if (!this.analysisTap) {
+      const tap = this.audioContext.createAnalyser()
+      tap.fftSize = 2048
+      tap.smoothingTimeConstant = 0.6
+      this.analysisTap = tap
+      this.analysisTapBuffer = new Float32Array(tap.frequencyBinCount)
+      // AnalyserNode 必须位于"有输出"的支路上才会被渲染线程驱动；
+      // 串一个 0 增益 GainNode 到 destination，保证有数据且完全静音。
+      const silent = this.audioContext.createGain()
+      silent.gain.value = 0
+      tap.connect(silent)
+      silent.connect(this.audioContext.destination)
+      this.analysisTapSink = silent
+    }
+    // doPlay / attachDspChain 会调用 masterGain.disconnect() 清掉全部输出，
+    // 这里每次重连保证 tap 始终在线（幂等，无副作用）
+    try {
+      this.masterGain.connect(this.analysisTap)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** 当前 AudioContext 采样率（Hz）；未创建时返回 44100 */
+  get outputSampleRate(): number {
+    return this.audioContext?.sampleRate || 44100
+  }
+
+  /**
+   * 读取 pre-EQ 频谱（dB 域，Float32Array，frequencyBinCount 长度）。
+   * 供动态 EQ 实时分析使用；上下文未就绪返回 null。
+   */
+  readAnalysisSpectrumDb(): Float32Array | null {
+    if (!this.audioContext || !this.masterGain) return null
+    this.ensureAnalysisTap()
+    if (!this.analysisTap || !this.analysisTapBuffer) return null
+    this.analysisTap.getFloatFrequencyData(this.analysisTapBuffer)
+    return this.analysisTapBuffer
+  }
+
   private fftCallbacks: Array<(spectrum: number[]) => void> = []
   private timeDomainCallbacks: Array<(data: Float32Array) => void> = []
   private timeDomainBuffer: Float32Array<ArrayBuffer> | null = null
@@ -412,6 +472,23 @@ export class WebAudioOutputEngine {
       this.analyserNode.disconnect()
       this.analyserNode = null
     }
+    if (this.analysisTap) {
+      try {
+        this.analysisTap.disconnect()
+      } catch {
+        /* ignore */
+      }
+      this.analysisTap = null
+      this.analysisTapBuffer = null
+    }
+    if (this.analysisTapSink) {
+      try {
+        this.analysisTapSink.disconnect()
+      } catch {
+        /* ignore */
+      }
+      this.analysisTapSink = null
+    }
     if (this.audioContext) {
       this.audioContext.close().catch((err) => {
         console.warn('[WebAudioEngine] AudioContext close failed:', err)
@@ -439,14 +516,20 @@ export class WebAudioOutputEngine {
   attachDspChain(chain: WebAudioDspChain): void {
     this.dspChain = chain
     if (this.audioContext && this.masterGain) {
+      const finalDest = this.analyserNode ?? this.audioContext.destination
+      // 幂等保护：动态 EQ 每拍都会走 ensureDspChain → attachDspChain，
+      // 若无条件 disconnect/connect，会每秒数十次反复断线重连（爆音风险，
+      // 且会把 pre-EQ 分析 tap 一起摘掉）。同一链 + 同一输出端时直接返回。
+      if (this.dspAttachTarget === chain && this.dspAttachDest === finalDest) return
       // 断开 masterGain 全部旧输出，确保仅保留唯一输出路径
       try {
         this.masterGain.disconnect()
       } catch {
         /* 忽略 */
       }
-      const finalDest = this.analyserNode ?? this.audioContext.destination
       chain.connect(this.masterGain, finalDest)
+      this.dspAttachTarget = chain
+      this.dspAttachDest = finalDest
     }
   }
 
@@ -531,8 +614,13 @@ export class WebAudioOutputEngine {
       // DSP 链的 connect() 已优化为复用内部节点，仅在首次时构建
       // 此处仅重新连线 masterGain → DSP 链 → finalDest
       this.dspChain.connect(this.masterGain, finalDest)
+      // 记下已接线状态，避免后续 attachDspChain 重复断线重连
+      this.dspAttachTarget = this.dspChain
+      this.dspAttachDest = finalDest
     } else {
       this.masterGain.connect(finalDest)
+      this.dspAttachTarget = null
+      this.dspAttachDest = null
     }
 
     const now = ctx.currentTime

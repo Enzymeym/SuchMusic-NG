@@ -271,8 +271,9 @@ export class SmoothedMax {
 /**
  * 低频基频跟踪器：25–160 Hz 自相关，8:1 抽取后每 100 ms 更新一次。
  *
- * 目的：让第一个可听谐波落在扬声器下限 fLow 附近（f0=50Hz、fLow=120Hz
- * 需要 3 次谐波 150Hz，而不是 2 次谐波 100Hz——后者照样发不出来）。
+ * 目的：让第一个可听谐波落在扬声器下限 fLow 附近（f0=50Hz、fLow=90Hz
+ * 需要 2 次谐波 100Hz，而不是 3 次谐波 150Hz——后者发得出来，但听感是
+ * 「敲纸盒」而不是低音）。
  *
  * 置信度不足（r < 0.3）时置 f0 = 0，上层回落到固定 k*。
  */
@@ -470,8 +471,18 @@ export function chebWeights(kStar, sigma, fLow, f0Hat, maxOrder) {
 /** 默认配置 */
 const DEFAULT_CONFIG = {
   fs: 48000,
-  /** 扬声器下限（Hz）：低于它的内容靠谐波补 */
-  fLow: 120,
+  /**
+   * 扬声器下限（Hz）：低于它的内容靠谐波补。
+   *
+   * 取值权衡（2026-11-02 实测修正）：
+   *   - 取 120 时，41–55 Hz 的贝斯会把主谐波推到 124–165 Hz —— 那是「敲纸盒」
+   *     的频段，听感只有砰砰声没有低音；
+   *   - 取 90 时主谐波落在 82–110 Hz（2 次谐波），正好是「低音有体感」的区间，
+   *     也是笔记本小扬声器仍能挤出一部分输出的下沿；
+   *   - 再低（75）会让 41 Hz 的 2 次谐波落到 82 Hz 而 3 次谐波变弱，谐波簇
+   *     重心过低、音色发闷。
+   */
+  fLow: 90,
   /** 旁链低通转折频率（Hz）：决定混叠上界 K·fCross */
   fCross: 160,
   /** 旁链低通阶数（二阶节数量）：4 = LR8 = 48 dB/oct */
@@ -518,6 +529,22 @@ const DEFAULT_CONFIG = {
   limitEnvReleaseMs: 150,
   /** k* 平滑时间常数（s） */
   kStarSmooth: 0.15,
+  /**
+   * 「按需补低频」门控：基频已高于扬声器下限时不再合成谐波。
+   *
+   * 这是 2026-11-02 实测修掉的核心听感问题：82–130 Hz 的贝斯本身小扬声器
+   * 发得出来，再叠一层 165–390 Hz 的谐波只会变成中频「嗡嗡的敲击」，
+   * 听感与「低音更足」完全相反（实测 110 Hz 音被加上 −9.7 dB 的 330 Hz）。
+   * 门控：f0 ≤ (1−span)·fLow 时满力度，f0 ≥ fLow 时降到 floor，
+   * 中间线性过渡，且与 k* 一起一阶平滑（避免 f0 抖动导致湿声抽气）。
+   */
+  f0Gate: true,
+  /** 门控过渡区宽度（占 fLow 的比例） */
+  f0GateSpan: 0.35,
+  /** 门控下限（不为 0：保留一丝谐波，且避免「开/关」硬切） */
+  f0GateFloor: 0.12,
+  /** 门控平滑时间常数（s）：比 k* 慢，纯淡入淡出不可闻 */
+  f0GateSmooth: 0.3,
   /** 是否启用 f0 自适应；false 时用 f0Override 或固定 k*=2 */
   useF0: true,
   /** 固定 f0（Hz），>0 时优先于自相关估计，供离线测试用 */
@@ -553,6 +580,8 @@ export class VbCore {
     this._buildDcOffset()
     this.kStar = 2
     this.makeup = 1
+    /** 「按需补低频」门控增益（f0GateFloor ~ 1），随 f0 慢速平滑 */
+    this.need = 1
     /** 当前权重下 Σw_k(T_k−T_k(0)) 在 u∈[-1,1] 上的峰值，用于估算余量 */
     this.shaperPeak = 1
     this.f0 = 0
@@ -618,6 +647,10 @@ export class VbCore {
     // 增益平滑系数：下压（攻击）快，回弹（释放）慢 —— 这就是「压缩器」的时间常数
     this._limitAtk = 1 - Math.exp(-1 / ((c.fs * c.limitAttackMs) / 1000))
     this._limitRel = 1 - Math.exp(-1 / ((c.fs * c.limitReleaseMs) / 1000))
+    // 门控过渡区：f0 ∈ [lo, fLow] 线性降到 floor
+    this._needLo = c.fLow * (1 - Math.min(0.8, Math.max(0.05, c.f0GateSpan)))
+    this._needSpan = Math.max(1e-6, c.fLow - this._needLo)
+    this._needFloor = Math.min(1, Math.max(0, c.f0GateFloor))
 
     // 电平门上下沿（-72 dB → gateDb），20 dB 的软过渡避免开合时咔哒
     this._gateLo = Math.pow(10, (c.gateDb - 12) / 20)
@@ -640,6 +673,7 @@ export class VbCore {
     this.tracker.reset()
     this.kStar = 2
     this.makeup = 1
+    this.need = 1
     this.shaperPeak = 1
     this.gainMin = 1
     this.weights.fill(0)
@@ -719,6 +753,23 @@ export class VbCore {
     if (!this._warmed) this.makeup = targetMakeup
     else this.makeup += smooth * (targetMakeup - this.makeup)
 
+    // --- 「按需补低频」门控 ---
+    // f0 未知（跟踪失败）时不做门控：没有依据判断「补不补」，保持原行为。
+    // 注意这里用**慢速**平滑（f0GateSmooth），因为门控系数直接乘在湿声上，
+    // 快变化会听成湿声抽气；快慢的区别在于 kStarSmooth 只影响音色。
+    let needTarget = 1
+    if (c.f0Gate && f0 > 0) {
+      needTarget = (c.fLow - f0) / this._needSpan
+      if (needTarget > 1) needTarget = 1
+      else if (needTarget < 0) needTarget = 0
+      needTarget = this._needFloor + (1 - this._needFloor) * needTarget
+    }
+    if (!this._warmed) this.need = needTarget
+    else {
+      const smoothNeed = 1 - Math.exp(-blockSize / c.fs / Math.max(0.02, c.f0GateSmooth))
+      this.need += smoothNeed * (needTarget - this.need)
+    }
+
     this._lastF0 = f0
     this._warmed = true
   }
@@ -753,6 +804,7 @@ export class VbCore {
     const knee = c.limitKnee
     const atkCoef = this._limitAtk
     const relCoef = this._limitRel
+    const need = this.need
     let limHits = 0
 
     for (let ch = 0; ch < outCount; ch++) {
@@ -802,7 +854,7 @@ export class VbCore {
         if (g > 1) g = 1
         else if (g < 0) g = 0
 
-        const gain = (usePow ? Math.pow(e, gamma) : e) * g
+        const gain = (usePow ? Math.pow(e, gamma) : e) * g * need
         let wet = gain * sum * makeup
         if (useWetHp) {
           for (let s = 0; s < whpN; s++) wet = whp[s].process(wet)

@@ -18,7 +18,8 @@ import type {
   SoftClipperParams
 } from './web-audio-dsp'
 import { WebAudioDspChain } from './web-audio-dsp'
-import { isWebAudioMode } from '../utils/audioOutputModeManager'
+import { computeVirtualBassDrive } from './virtual-bass-presets'
+import { isWebAudioMode, isWasapiExclusiveMode } from '../utils/audioOutputModeManager'
 
 class AudioEngine {
   private onEndedRef: (() => void) | null = null
@@ -26,9 +27,28 @@ class AudioEngine {
   private volumeBoost = 1.0
   /** 按曲补偿增益（dB，音量平衡功能），默认 0 */
   private trackGainDb = 0
+  /**
+   * 系统主音量（0..1）；null = 尚未获取。
+   * 「低音量补偿」判断的是人耳实际听到的响度，因此要计入系统音量。
+   */
+  private loudnessSystemVolume: number | null = null
 
   private getApi() {
     return (window as any).api?.audioEngine
+  }
+
+  /**
+   * 低音量补偿的响度基准音量 = 软件音量 × 系统音量。
+   *
+   * 系统音量在 DSP 之后作用于扬声器实际输出（WASAPI 独占模式除外），
+   * 只按软件音量判断会低估「听不到低频」的程度。独占模式绕过系统混音器，
+   * 系统音量对输出无效，此时只按软件音量。
+   */
+  private get effectiveLoudnessVolume(): number {
+    const software = Math.max(0, Math.min(1, this.currentVolume))
+    const sys = this.loudnessSystemVolume
+    if (sys == null || isWasapiExclusiveMode()) return software
+    return Math.min(1, software * sys)
   }
 
   /** 确保 Web Audio DSP 链已初始化（懒加载），并立即接入输出链路 */
@@ -38,14 +58,28 @@ class AudioEngine {
     }
     // 播放中打开音效面板时立即接线，让参数调整实时生效（无需等下次 doPlay）
     webAudioOutputEngine.attachDspChain(webAudioOutputEngine.dspChain)
-    // 新建的 DSP 链需要立刻拿到当前音量，低音量补偿才能正确跟随
-    webAudioOutputEngine.dspChain.setLoudnessVolume(this.currentVolume)
+    // 新建的 DSP 链需要立刻拿到当前有效音量，低音量补偿才能正确跟随
+    webAudioOutputEngine.dspChain.setLoudnessVolume(this.effectiveLoudnessVolume)
     return webAudioOutputEngine.dspChain
   }
 
-  /** 把当前音量上报给 DSP 链，供「低音量高低频补偿」计算使用 */
+  /** 把当前有效音量（软件 × 系统）上报给 DSP 链，供「低音量高低频补偿」计算使用 */
   private syncLoudnessVolume(): void {
-    webAudioOutputEngine.dspChain?.setLoudnessVolume(this.currentVolume)
+    webAudioOutputEngine.dspChain?.setLoudnessVolume(this.effectiveLoudnessVolume)
+  }
+
+  /**
+   * 上报系统主音量（0..1），供低音量补偿计算实际响度。
+   * null = 不可读（非 Windows / 无默认设备 / 未轮询），回退为只按软件音量。
+   */
+  public setLoudnessSystemVolume(volume: number | null): void {
+    const next =
+      volume == null || !Number.isFinite(volume)
+        ? null
+        : Math.max(0, Math.min(1, volume))
+    if (this.loudnessSystemVolume === next) return
+    this.loudnessSystemVolume = next
+    this.syncLoudnessVolume()
   }
 
   /** 检查 Web Audio API 是否可用 */
@@ -589,22 +623,75 @@ class AudioEngine {
     }
   }
 
-  // ====== 虚拟低频控制 ======
+  // ====== 低频增压控制 ======
 
+  /** WASAPI 模式下缓存的低频增压用户参数 */
+  private _wasapiVbParams: VirtualBassParams = { enabled: false, strength: 3, followSystemVolume: true }
+  /** WASAPI 模式下缓存的系统音量（0..1）；null = 尚未获取到，按满音量 */
+  private _wasapiVbSystemVolume: number | null = null
+
+  /** WASAPI 模式：把（档位 + 系统音量）解析成三元组后经 IPC 下发 */
+  private pushWasapiVirtualBass(): void {
+    const api = this.getApi()
+    if (!api || typeof api.setVirtualBass !== 'function') return
+    const drive = computeVirtualBassDrive(
+      this._wasapiVbParams.strength,
+      this._wasapiVbParams.followSystemVolume ? this._wasapiVbSystemVolume : 1,
+      this._wasapiVbParams.enabled
+    )
+    api
+      .setVirtualBass({
+        enabled: this._wasapiVbParams.enabled,
+        wetGain: drive.wet,
+        gamma: drive.gamma,
+        sigma: drive.sigma
+      })
+      .catch(() => {
+        /* ignore */
+      })
+  }
+
+  /**
+   * 设置低频增压启用状态。
+   * Web Audio：走 DSP 链的 such-virtual-bass worklet；
+   * WASAPI：渲染端解析出 (wetGain, gamma, sigma) 后经 IPC 下发给 Rust 引擎。
+   */
   public setVirtualBassEnabled(enabled: boolean): void {
     if (isWebAudioMode()) {
       const dsp = this.ensureDspChain()
       if (dsp) dsp.setVirtualBassEnabled(enabled)
       return
     }
+    this._wasapiVbParams = { ...this._wasapiVbParams, enabled }
+    this.pushWasapiVirtualBass()
   }
 
+  /**
+   * 设置低频增压参数（档位 / 系统音量联动开关）。
+   * 档位表与联动曲线只在渲染端解析（virtual-bass-presets.ts 是唯一事实来源）。
+   */
   public setVirtualBassParams(params: VirtualBassParams): void {
     if (isWebAudioMode()) {
       const dsp = this.ensureDspChain()
       if (dsp) dsp.setVirtualBassParams(params)
       return
     }
+    this._wasapiVbParams = { ...this._wasapiVbParams, ...params }
+    this.pushWasapiVirtualBass()
+  }
+
+  /**
+   * 上报当前系统音量（0..1），用于低频增压的力度联动。
+   * Web Audio：DSP 链内部换算 wet；WASAPI：立即重发解析后的三元组。
+   */
+  public setVirtualBassSystemVolume(volume: number): void {
+    if (isWebAudioMode()) {
+      const dsp = this.ensureDspChain()
+      if (dsp) dsp.setVirtualBassSystemVolume(volume)
+      return
+    }
+    this._wasapiVbSystemVolume = Math.min(1, Math.max(0, volume))
+    if (this._wasapiVbParams.enabled) this.pushWasapiVirtualBass()
   }
 
   // ====== 软限幅器控制 ======
@@ -645,6 +732,23 @@ class AudioEngine {
       return api.setFftCallback(callback)
     }
     return () => {}
+  }
+
+  // ====== 动态 EQ 实时分析 ======
+
+  /**
+   * 读取 pre-EQ 高分辨率频谱（dB 域）。
+   * 仅 Web Audio 模式可用；WASAPI 模式请改用 onFftData（IPC 推送）。
+   */
+  public readAnalysisSpectrumDb(): Float32Array | null {
+    if (!isWebAudioMode()) return null
+    return webAudioOutputEngine.readAnalysisSpectrumDb()
+  }
+
+  /** 当前引擎采样率（Hz），动态 EQ 计算奈奎斯特频率用；未知时返回 44100 */
+  public getSampleRate(): number {
+    if (isWebAudioMode()) return webAudioOutputEngine.outputSampleRate
+    return 44100
   }
 
   // ====== Automix 智能过渡（Web Audio 模式） ======

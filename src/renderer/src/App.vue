@@ -23,6 +23,7 @@ import { useSetupWizardStore } from './stores/setupWizardStore'
 import { audioEngine } from './audio/audio-engine'
 import { getTransitionController } from './audio/transition-controller'
 import { useVolumeBalanceAutoAnalyze } from './composables/useVolumeBalanceAutoAnalyze'
+import { useSystemVolume } from './composables/useSystemVolume'
 import { debounce } from './utils/performance'
 
 const UpdateNotification = defineAsyncComponent(
@@ -83,6 +84,11 @@ localMusicStore.scanMusic().catch(() => { /* 静默失败，用户可手动扫�
 
 // 音量平衡：曲库新增 / 历史未分析歌曲在后台自动完成响度分析（仅主窗口）
 if (!isAuxWindow.value) useVolumeBalanceAutoAnalyze()
+
+// 系统音量轮询：低频增压力度联动 / 低音量补偿的实际响度都依赖它。
+// 必须在启动时挂上（而不是等用户打开音效面板），否则持久化的「跟随系统音量」
+// 要等到弹窗打开过一次才真正生效。
+if (!isAuxWindow.value) useSystemVolume()
 
 // 开屏动画状态控制
 const appReady = ref(false)
@@ -154,8 +160,8 @@ onUnmounted(() => {
   // 确保设置已保存
   settingsStore.saveSettings()
 
-  // 清除事件监听器
-  if (!isDesktopLyric.value) {
+  // 清除事件监听器（仅主窗口注册过）
+  if (!isAuxWindow.value) {
     window.electron.ipcRenderer.removeAllListeners('player:control')
     window.electron.ipcRenderer.removeAllListeners('plugin:hot-updated')
   }
@@ -163,7 +169,7 @@ onUnmounted(() => {
 })
 
 onMounted(() => {
-  if (!isDesktopLyric.value) {
+  if (!isAuxWindow.value) {
     window.electron.ipcRenderer.on('player:control', (_, action: any) => {
       // 任务栏播控拖动进度条：action 为对象 { action:'seek', positionMs }
       if (action && typeof action === 'object' && action.action === 'seek') {
@@ -239,7 +245,7 @@ onMounted(() => {
       })
     })
   } else {
-    // 桌面歌词窗口不需要开屏
+    // 桌面歌词 / 任务栏播控窗口：不开屏、不跑首次引导、不注册主窗口的播放控制监听
     appReady.value = true
   }
 
@@ -260,9 +266,14 @@ onMounted(() => {
     <n-notification-provider>
       <n-message-provider>
         <n-dialog-provider>
-          <update-notification />
-          <PluginUpdateNotifier />
-          <SetupWizard />
+          <!-- 更新弹窗 / 插件通知 / 首次引导只属于主窗口：
+               桌面歌词、任务栏播控是无边框透明辅助窗口，同样加载本 App.vue，
+               若不屏蔽，更新弹窗会以 500×40 的尺寸糊在任务栏播控窗里。 -->
+          <template v-if="!isAuxWindow">
+            <update-notification />
+            <PluginUpdateNotifier />
+            <SetupWizard />
+          </template>
           <router-view v-show="splashHidden || isAuxWindow" />
         </n-dialog-provider>
       </n-message-provider>

@@ -1,6 +1,7 @@
 import { ref, reactive, watch, watchEffect, onScopeDispose, effectScope } from 'vue'
 import { audioEngine } from '../audio/audio-engine'
 import { isWebAudioMode } from '../utils/audioOutputModeManager'
+import { VB_DEFAULT_STRENGTH, migrateVirtualBassParams } from '../audio/virtual-bass-presets'
 
 /**
  * EQ 频段设置
@@ -61,12 +62,15 @@ export interface LoudnessParams {
 }
 
 /**
- * 虚拟低频参数
+ * 低频增压（小体积扬声器增强）参数。
+ * 强度档位与系统音量联动曲线的语义见 `virtual-bass-presets.ts`（唯一事实来源）。
  */
 export interface VirtualBassParams {
   enabled: boolean;
-  intensity: number;
-  crossoverFreq: number;
+  /** 强度档（1~5） */
+  strength: number;
+  /** 跟随系统音量：音量越低力度越强；关闭 = 固定档位 */
+  followSystemVolume: boolean;
 }
 
 /**
@@ -76,6 +80,26 @@ export interface SoftClipperParams {
   enabled: boolean;
   threshold: number;
   makeupGain: number;
+}
+
+/**
+ * 动态 EQ 走势（四种互斥单选）
+ */
+export type DynamicEqShape = 'bassBoost' | 'trebleBoost' | 'vShape' | 'invertedV';
+
+/**
+ * 动态 EQ 参数
+ *
+ * 实时根据音频频谱（FFT 分析）动态修正各频段增益，使声音贴合选定走势。
+ * strength / efficiency 均为 1~5 档。
+ */
+export interface DynamicEqParams {
+  enabled: boolean;
+  shape: DynamicEqShape;
+  /** 效果强度档（1~5） */
+  strength: number;
+  /** 算法效率档（1~5）：控制分析频率与平滑速度 */
+  efficiency: number;
 }
 
 /**
@@ -113,6 +137,8 @@ export interface Preset {
   virtualBass: VirtualBassParams;
   /** 软限幅器设置 */
   softClipper: SoftClipperParams;
+  /** 动态 EQ 设置（旧预设无此字段，缺省跳过） */
+  dynamicEq?: DynamicEqParams;
 }
 
 /**
@@ -145,6 +171,22 @@ const DEFAULT_EQ_BANDS: EqBandSettings[] = [
  * 预设数据存储键名
  */
 const PRESETS_STORAGE_KEY = 'sound-effect-presets';
+
+/**
+ * 「未保存」哨兵值：当前曲线是用户手动调的、不对应任何预设时的 currentPresetId。
+ * 不能复用 'flat'——那会让界面把实际曲线报成「平坦」。
+ */
+const UNSAVED_PRESET_ID = 'unsaved';
+
+/**
+ * 动态 EQ 默认参数
+ */
+export const DEFAULT_DYNAMIC_EQ: DynamicEqParams = {
+  enabled: false,
+  shape: 'bassBoost',
+  strength: 3,
+  efficiency: 3
+};
 
 /**
  * 获取全局 audioEngine API
@@ -188,7 +230,7 @@ const BUILTIN_PRESETS: Preset[] = [
       followStrength: 1.0,
       referenceLoudness: 0
     },
-    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    virtualBass: { enabled: false, strength: 3, followSystemVolume: true },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
   {
@@ -219,7 +261,7 @@ const BUILTIN_PRESETS: Preset[] = [
       followStrength: 1.0,
       referenceLoudness: 0
     },
-    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    virtualBass: { enabled: false, strength: 3, followSystemVolume: true },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
   {
@@ -250,7 +292,7 @@ const BUILTIN_PRESETS: Preset[] = [
       followStrength: 1.0,
       referenceLoudness: 0
     },
-    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    virtualBass: { enabled: false, strength: 3, followSystemVolume: true },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
   {
@@ -281,7 +323,7 @@ const BUILTIN_PRESETS: Preset[] = [
       followStrength: 1.0,
       referenceLoudness: 0
     },
-    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    virtualBass: { enabled: false, strength: 3, followSystemVolume: true },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
   {
@@ -312,7 +354,7 @@ const BUILTIN_PRESETS: Preset[] = [
       followStrength: 1.0,
       referenceLoudness: 0
     },
-    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    virtualBass: { enabled: false, strength: 3, followSystemVolume: true },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
   {
@@ -343,7 +385,7 @@ const BUILTIN_PRESETS: Preset[] = [
       followStrength: 1.0,
       referenceLoudness: 0
     },
-    virtualBass: { enabled: true, intensity: 60, crossoverFreq: 100 },
+    virtualBass: { enabled: true, strength: 3, followSystemVolume: true },
     softClipper: { enabled: true, threshold: 1.5, makeupGain: 2 }
   },
   {
@@ -374,7 +416,7 @@ const BUILTIN_PRESETS: Preset[] = [
       followStrength: 1.0,
       referenceLoudness: 0
     },
-    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    virtualBass: { enabled: false, strength: 3, followSystemVolume: true },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   },
   {
@@ -405,7 +447,7 @@ const BUILTIN_PRESETS: Preset[] = [
       followStrength: 1.0,
       referenceLoudness: 0
     },
-    virtualBass: { enabled: true, intensity: 80, crossoverFreq: 150 },
+    virtualBass: { enabled: true, strength: 4, followSystemVolume: true },
     softClipper: { enabled: true, threshold: 1.0, makeupGain: 3 }
   },
   {
@@ -436,7 +478,7 @@ const BUILTIN_PRESETS: Preset[] = [
       followStrength: 1.0,
       referenceLoudness: 0
     },
-    virtualBass: { enabled: false, intensity: 50, crossoverFreq: 120 },
+    virtualBass: { enabled: false, strength: 3, followSystemVolume: true },
     softClipper: { enabled: false, threshold: 2.0, makeupGain: 0 }
   }
 ]
@@ -499,11 +541,11 @@ function createAudioEngineApi() {
     referenceLoudness: 0
   });
 
-  // 虚拟低频状态
+  // 低频增压状态（强度档位/系统音量联动语义见 virtual-bass-presets.ts）
   const virtualBass = ref<VirtualBassParams>({
     enabled: false,
-    intensity: 50,
-    crossoverFreq: 120
+    strength: VB_DEFAULT_STRENGTH,
+    followSystemVolume: true
   });
 
   // 软限幅爆音抑制状态
@@ -512,6 +554,9 @@ function createAudioEngineApi() {
     threshold: 2.0,
     makeupGain: 0
   });
+
+  // 动态 EQ 状态（运行时修正量不落在这里，见 useDynamicEq runner）
+  const dynamicEq = ref<DynamicEqParams>({ ...DEFAULT_DYNAMIC_EQ });
 
   // 预设管理
   const presets = ref<Preset[]>([]);
@@ -588,7 +633,8 @@ function createAudioEngineApi() {
       limiter: { ...limiter.value },
       loudness: { ...loudness.value },
       virtualBass: { ...virtualBass.value },
-      softClipper: { ...softClipper.value }
+      softClipper: { ...softClipper.value },
+      dynamicEq: { ...dynamicEq.value }
     };
   }
 
@@ -624,14 +670,19 @@ function createAudioEngineApi() {
       await setLoudnessParams(snapshot.loudness);
     }
 
-    // 应用虚拟低频
+    // 应用低频增压（旧预设快照是 intensity/crossoverFreq，先迁移到档位模型）
     if (snapshot.virtualBass) {
-      await setVirtualBassParams(snapshot.virtualBass);
+      await setVirtualBassParams(migrateVirtualBassParams(snapshot.virtualBass));
     }
 
     // 应用软限幅器
     if (snapshot.softClipper) {
       await setSoftClipperParams(snapshot.softClipper);
+    }
+
+    // 应用动态 EQ（旧预设无此字段时跳过，保留当前设置）
+    if (snapshot.dynamicEq) {
+      setDynamicEqParams(snapshot.dynamicEq);
     }
   }
 
@@ -691,9 +742,11 @@ function createAudioEngineApi() {
     // 重新加载预设列表
     loadPresets();
 
-    // 如果删除的是当前预设，切换到平坦预设
+    // 如果删除的是当前预设，不要切到「平坦」：那会让 UI 显示平坦、
+    // 实际曲线却仍是删除前调好的样子。改用「未保存」哨兵值，
+    // 让界面如实显示为「手动调节（无对应预设）」，曲线本身保持不变。
     if (currentPresetId.value === presetId) {
-      currentPresetId.value = 'flat';
+      currentPresetId.value = UNSAVED_PRESET_ID;
     }
   }
 
@@ -978,7 +1031,8 @@ function createAudioEngineApi() {
             limiter: { ...limiter.value },
             loudness: { ...loudness.value },
             virtualBass: { ...virtualBass.value },
-            softClipper: { ...softClipper.value }
+            softClipper: { ...softClipper.value },
+            dynamicEq: { ...dynamicEq.value }
           };
 
       // 频段列表意外为空时（引擎回读失败 / 初始化早期）沿用已保存的曲线，
@@ -1014,6 +1068,35 @@ function createAudioEngineApi() {
       engineSaveTimer = setTimeout(() => {
         saveEngineState();
       }, delayOrSnapshot);
+    }
+  }
+
+  /**
+   * 只把动态 EQ 参数写回存储（合并进上一条记录，其余字段保持原样）。
+   *
+   * 为什么不走统一的防抖保存：动态 EQ 运行期间 runner 每拍经 setEqGains 改写
+   * eqBands，watchEffect 会跟着每拍重新排一次防抖定时器，而分析间隔是 60~300ms、
+   * 防抖是 300ms —— 定时器被无限推后，用户调的「增强力度 / 算法效率」根本落不了盘
+   * （开着动态 EQ 调完再重启，两个档位全回到默认值）。
+   *
+   * 这里同步合并写：① 不受分析循环影响；② 只替换 dynamicEq 字段，不会把
+   * runner 写入的「基准 + 实时修正」曲线当成用户曲线存下来。
+   */
+  function persistDynamicEqOnly() {
+    if (!hydrated.value) return;
+    // 作废尚未触发的整份状态保存，避免它带着旧快照把刚写入的参数覆盖回去
+    if (engineSaveTimer) {
+      clearTimeout(engineSaveTimer);
+      engineSaveTimer = null;
+    }
+    try {
+      const prev = loadEngineState() || {};
+      localStorage.setItem(
+        ENGINE_STATE_STORAGE_KEY,
+        JSON.stringify({ ...prev, dynamicEq: { ...dynamicEq.value } })
+      );
+    } catch (error) {
+      console.error('[useAudioEngine] 保存动态 EQ 参数失败:', error);
     }
   }
 
@@ -1104,10 +1187,12 @@ function createAudioEngineApi() {
         }
       }
 
-      // 应用虚拟低频状态（旧实现只写了本地 ref，从未下发到 DSP 链，
-      // 于是「开着重启还是关的」）
+      // 应用低频增压状态：旧持久化只有 intensity/crossoverFreq，先迁移到档位模型
       if (savedState.virtualBass) {
-        virtualBass.value = { ...virtualBass.value, ...savedState.virtualBass };
+        virtualBass.value = migrateVirtualBassParams({
+          ...virtualBass.value,
+          ...savedState.virtualBass
+        });
         audioEngine.setVirtualBassParams({ ...virtualBass.value });
       }
 
@@ -1115,6 +1200,12 @@ function createAudioEngineApi() {
       if (savedState.softClipper) {
         softClipper.value = { ...softClipper.value, ...savedState.softClipper };
         audioEngine.setSoftClipperParams({ ...softClipper.value });
+      }
+
+      // 应用动态 EQ 状态：仅恢复持久化参数（enabled 等），
+      // 旧存储无此字段时保持默认值（关闭），零迁移成本。
+      if (savedState.dynamicEq) {
+        dynamicEq.value = { ...DEFAULT_DYNAMIC_EQ, ...savedState.dynamicEq };
       }
 
       console.log('[useAudioEngine] 已恢复保存的音效状态');
@@ -1302,6 +1393,21 @@ function createAudioEngineApi() {
     audioEngine.setSoftClipperParams(softClipper.value);
   }
 
+  // === 动态 EQ 控制 ===
+
+  /**
+   * 设置动态 EQ 参数（部分更新）。
+   * 仅更新持久化状态；实时分析循环由 useDynamicEq runner 驱动，
+   * runner 通过 watch 响应本 ref 的变化自动启停 / 更新档位。
+   *
+   * 落盘走 persistDynamicEqOnly 而不是统一防抖：动态 EQ 运行期间曲线每拍被改写，
+   * 统一的防抖保存会被无限推后（见该函数注释）。
+   */
+  function setDynamicEqParams(params: Partial<DynamicEqParams>) {
+    dynamicEq.value = { ...dynamicEq.value, ...params };
+    persistDynamicEqOnly();
+  }
+
   /**
    * 把当前内存中的音效设置重新下发到当前后端。
    *
@@ -1341,7 +1447,8 @@ function createAudioEngineApi() {
       limiter: { ...limiter.value },
       loudness: { ...loudness.value },
       virtualBass: { ...virtualBass.value },
-      softClipper: { ...softClipper.value }
+      softClipper: { ...softClipper.value },
+      dynamicEq: { ...dynamicEq.value }
     }
     // 防抖写入，避免频繁操作时的性能损耗
     debouncedSaveEngineState(snapshot)
@@ -1398,6 +1505,10 @@ function createAudioEngineApi() {
     // 软限幅器
     softClipper,
     setSoftClipperParams,
+
+    // 动态 EQ
+    dynamicEq,
+    setDynamicEqParams,
 
     // 预设管理
     presets,

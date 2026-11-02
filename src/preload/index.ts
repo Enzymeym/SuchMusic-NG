@@ -365,6 +365,21 @@ class AudioEngineManager {
     return result.enabled ?? false
   }
 
+  // === 低频增压（virtual bass）===
+
+  async setVirtualBass(params: {
+    enabled: boolean
+    wetGain: number
+    gamma: number
+    sigma: number
+  }): Promise<{ success: boolean; error?: string }> {
+    return ipcRenderer.invoke(
+      'audio-engine:set-virtual-bass',
+      await this.ensureEngineId(),
+      params
+    )
+  }
+
   // === 生命周期 ===
 
   /**
@@ -546,6 +561,16 @@ const api = {
     getLoudness: () => audioEngineManager.getLoudness(),
     setLoudnessEnabled: (enabled: boolean) => audioEngineManager.setLoudnessEnabled(enabled),
     isLoudnessEnabled: () => audioEngineManager.isLoudnessEnabled(),
+
+    setVirtualBass: (params: {
+      enabled: boolean
+      wetGain: number
+      gamma: number
+      sigma: number
+    }) => audioEngineManager.setVirtualBass(params),
+
+    /** 读取 Windows 系统主音量（0~1，只读）；不支持/失败时 volume 为 null */
+    getSystemVolume: () => ipcRenderer.invoke('system:get-volume'),
 
     reset: () => audioEngineManager.reset(),
 

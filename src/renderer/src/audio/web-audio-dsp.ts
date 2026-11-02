@@ -6,11 +6,19 @@
  *
  * 处理链顺序：
  *   input → EQ (10x BiquadFilter) → Loudness (EQ 响度补偿 + 低音量补偿架)
- *         → Compressor → Limiter → Virtual Bass → Soft Clipper → output
+ *         → Compressor → Limiter → 低频增压 (such-virtual-bass worklet) → Soft Clipper → output
  *
  * 所有节点始终连接在链中；禁用效果时参数设置为中性值（旁通），
  * 避免动态重连带来的音频断续。
  */
+
+import {
+  VB_DEFAULT_STRENGTH,
+  VB_FIXED_CONFIG,
+  clampStrength,
+  computeVirtualBassDrive
+} from './virtual-bass-presets'
+import { ensureVirtualBassModule } from './virtual-bass-loader'
 
 // ====== DSP 参数类型（与 useAudioEngine 中定义等价，避免循环引用） ======
 
@@ -65,10 +73,16 @@ export interface LoudnessParams {
   referenceLoudness?: number
 }
 
+/**
+ * 低频增压（小体积扬声器增强）参数。
+ * 强度档位与系统音量联动曲线的语义见 `virtual-bass-presets.ts`（唯一事实来源）。
+ */
 export interface VirtualBassParams {
   enabled: boolean
-  intensity: number
-  crossoverFreq: number
+  /** 强度档（1~5） */
+  strength: number
+  /** 跟随系统音量：音量越低力度越强；关闭 = 固定档位 */
+  followSystemVolume: boolean
 }
 
 export interface SoftClipperParams {
@@ -189,15 +203,22 @@ export class WebAudioDspChain {
   private balanceLDb = 0
   private balanceRDb = 0
 
-  // === 虚拟低频节点 ===
-  private virtualBassLowpass: BiquadFilterNode | null = null
-  private virtualBassShaper: WaveShaperNode | null = null
-  private virtualBassWetGain: GainNode | null = null
-  private virtualBassDryGain: GainNode | null = null
-  private virtualBassMixGain: GainNode | null = null
+  // === 低频增压（such-virtual-bass worklet）===
+  /** 常驻 unity 增益槽位：worklet 未挂载/挂载失败时兜底，保证干路无损旁通 */
+  private virtualBassBypass: GainNode | null = null
+  private virtualBassNode: AudioWorkletNode | null = null
+  private virtualBassMounted = false
+  private virtualBassMounting: Promise<boolean> | null = null
   private _virtualBassEnabled = false
-  private virtualBassIntensity = 50
-  private virtualBassCrossover = 120
+  /** 强度档（1~5），语义见 virtual-bass-presets.ts */
+  private _virtualBassStrength = VB_DEFAULT_STRENGTH
+  /** 跟随系统音量：音量越低力度越强 */
+  private _virtualBassFollow = true
+  /** 最近一次上报的系统音量（0..1）；null = 尚未获取到，按满音量处理 */
+  private _virtualBassSystemVolume: number | null = null
+  /** 最近下发给 worklet 的 gamma/sigma，变化时才发 config（触发权重重建） */
+  private _lastVbGamma = 0
+  private _lastVbSigma = 0
 
   // === 软限幅器节点 ===
   private softClipperNode: WaveShaperNode | null = null
@@ -251,6 +272,10 @@ export class WebAudioDspChain {
 
     // 应用已保存的参数
     this.syncAllParams()
+
+    // 挂载低频增压 worklet（异步、幂等；失败保持旁通 GainNode）。
+    // 链的三处创建入口（engine init / load / loadNext）都经过这里，一处钩子全覆盖。
+    void this.mountVirtualBass()
   }
 
   /** 构建完整 DSP 节点链（仅首次或 AudioContext 变更时调用） */
@@ -311,31 +336,12 @@ export class WebAudioDspChain {
     prevNode.connect(this.limiterMakeupGain)
     prevNode = this.limiterMakeupGain
 
-    // --- Virtual Bass (parallel: dry + waveshaper) ---
-    this.virtualBassDryGain = ctx.createGain()
-    this.virtualBassDryGain.gain.value = 1
-    prevNode.connect(this.virtualBassDryGain)
-
-    this.virtualBassLowpass = ctx.createBiquadFilter()
-    this.virtualBassLowpass.type = 'lowpass'
-    this.virtualBassLowpass.frequency.value = this.virtualBassCrossover
-    this.virtualBassLowpass.Q.value = 0.5
-    prevNode.connect(this.virtualBassLowpass)
-
-    this.virtualBassShaper = ctx.createWaveShaper()
-    this.virtualBassShaper.curve = this.makeSineShaperCurve(0) as Float32Array<ArrayBuffer>
-    this.virtualBassShaper.oversample = '2x'
-    this.virtualBassLowpass.connect(this.virtualBassShaper)
-
-    this.virtualBassWetGain = ctx.createGain()
-    this.virtualBassWetGain.gain.value = 0
-    this.virtualBassShaper.connect(this.virtualBassWetGain)
-
-    this.virtualBassMixGain = ctx.createGain()
-    this.virtualBassMixGain.gain.value = 1
-    this.virtualBassDryGain.connect(this.virtualBassMixGain)
-    this.virtualBassWetGain.connect(this.virtualBassMixGain)
-    prevNode = this.virtualBassMixGain
+    // --- 低频增压槽位：常驻 unity 旁通，worklet 挂载成功后定向替换 ---
+    // 关闭/未挂载时它就是一条透明的增益为 1 的直连线（干路无损旁通不变量）
+    this.virtualBassBypass = ctx.createGain()
+    this.virtualBassBypass.gain.value = 1
+    prevNode.connect(this.virtualBassBypass)
+    prevNode = this.virtualBassBypass
 
     // --- Soft Clipper ---
     this.softClipperPreGain = ctx.createGain()
@@ -374,8 +380,7 @@ export class WebAudioDspChain {
       ...this.eqNodes,
       this.loudnessGainNode, this.loudnessLowShelf, this.loudnessHighShelf,
       this.compressorNode, this.limiterNode, this.limiterMakeupGain,
-      this.virtualBassLowpass, this.virtualBassShaper,
-      this.virtualBassWetGain, this.virtualBassDryGain, this.virtualBassMixGain,
+      this.virtualBassBypass,
       this.softClipperNode, this.softClipperPreGain, this.softClipperPostGain,
       this.balanceSplitter, this.balanceGainL, this.balanceGainR, this.balanceMerger
     ].filter((n): n is NonNullable<typeof n> => n != null)
@@ -409,8 +414,7 @@ export class WebAudioDspChain {
     const nodes: (AudioNode | null)[] = [
       this.loudnessGainNode, this.loudnessLowShelf, this.loudnessHighShelf,
       this.compressorNode, this.limiterNode, this.limiterMakeupGain,
-      this.virtualBassLowpass, this.virtualBassShaper,
-      this.virtualBassWetGain, this.virtualBassDryGain, this.virtualBassMixGain,
+      this.virtualBassBypass, this.virtualBassNode,
       this.softClipperNode, this.softClipperPreGain, this.softClipperPostGain,
       this.balanceSplitter, this.balanceGainL, this.balanceGainR, this.balanceMerger
     ]
@@ -426,11 +430,11 @@ export class WebAudioDspChain {
     this.loudnessGainNode = null
     this.loudnessLowShelf = null
     this.loudnessHighShelf = null
-    this.virtualBassLowpass = null
-    this.virtualBassShaper = null
-    this.virtualBassWetGain = null
-    this.virtualBassDryGain = null
-    this.virtualBassMixGain = null
+    this.virtualBassBypass = null
+    this.virtualBassNode = null
+    // AudioContext 变更意味着旧的 worklet 节点已失效，挂载状态一并复位
+    this.virtualBassMounted = false
+    this.virtualBassMounting = null
     this.softClipperNode = null
     this.softClipperPreGain = null
     this.softClipperPostGain = null
@@ -728,62 +732,116 @@ export class WebAudioDspChain {
     }
   }
 
-  // ====== 虚拟低频控制 ======
+  // ====== 低频增压控制 ======
 
   /**
-   * 创建用于生成低频谐波的非线性曲线。
-   *
-   * 旧实现为 `sin(x * π/2 * drive*2)`：当 drive > 0.5 时自变量超过 π/2，
-   * 曲线在 |x| 较大处回折（非单调），输入越大输出反而越小，产生折叠失真，
-   * 听感是「越增强越糊/越乱」。改为归一化 tanh（严格单调奇对称）：
-   * drive 越大谐波越丰富但永不回折，低音增强干净可控。
+   * 幂等挂载 such-virtual-bass worklet：
+   * addModule → AudioWorkletNode → 定向替换旁通 GainNode。
+   * 任一步失败都保持旁通（功能静默降级，干路无损不变量不受影响）。
    */
-  private makeSineShaperCurve(drive: number): Float32Array {
-    const length = 1024
-    const curve = new Float32Array(length)
-    const k = 1 + Math.max(0, drive) * 3
-    const norm = Math.tanh(k) || 1
-    for (let i = 0; i < length; i++) {
-      const x = (i / (length - 1)) * 2 - 1 // -1 to 1
-      curve[i] = Math.tanh(k * x) / norm
-    }
-    return curve
+  async mountVirtualBass(): Promise<boolean> {
+    if (this.virtualBassMounted) return true
+    if (this.virtualBassMounting) return this.virtualBassMounting
+    const ctx = this._ctx
+    const makeup = this.limiterMakeupGain
+    const bypass = this.virtualBassBypass
+    const softClipperIn = this.softClipperPreGain
+    if (!ctx || !makeup || !bypass || !softClipperIn) return false
+
+    // holder 让 finally 块能拿到最终创建的 promise（async IIFE 同步段先执行，
+    // finally 只在异步完成后触发，此时 holder.promise 必已赋值）
+    const holder: { promise: Promise<boolean> | null } = { promise: null }
+    const promise = (async () => {
+      try {
+        await ensureVirtualBassModule(ctx)
+        const node = new AudioWorkletNode(ctx, 'such-virtual-bass', {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+          channelCount: 2,
+          channelCountMode: 'explicit'
+        })
+        // 定向断接：limiterMakeup → bypass → softClipper 改走 worklet。
+        // 旁通节点的唯一输出连接被移除后即可回收。
+        makeup.disconnect(bypass)
+        bypass.disconnect()
+        makeup.connect(node)
+        node.connect(softClipperIn)
+        this.virtualBassNode = node
+        this.virtualBassBypass = null
+        this.virtualBassMounted = true
+        // 应用挂载前缓存的参数（wet/gamma/sigma）
+        this._lastVbGamma = 0
+        this._lastVbSigma = 0
+        this.syncVirtualBass()
+        return true
+      } catch (err) {
+        console.warn('[WebAudioDspChain] 低频增压 worklet 挂载失败，保持旁通:', err)
+        return false
+      } finally {
+        if (this.virtualBassMounting && this.virtualBassMounting === holder.promise) {
+          this.virtualBassMounting = null
+        }
+      }
+    })()
+    holder.promise = promise
+    this.virtualBassMounting = promise
+    return promise
   }
 
-  /**
-   * 设置虚拟低频启用状态
-   */
+  /** 设置低频增压启用状态（禁用 = wet→0，严格无损旁路，节点保留） */
   setVirtualBassEnabled(enabled: boolean): void {
     this._virtualBassEnabled = enabled
     this.syncVirtualBass()
   }
 
-  /**
-   * 设置虚拟低频参数
-   */
+  /** 设置低频增压参数（强度档 / 系统音量联动开关） */
   setVirtualBassParams(params: VirtualBassParams): void {
     if (params.enabled !== undefined) this._virtualBassEnabled = params.enabled
-    if (params.intensity !== undefined) this.virtualBassIntensity = params.intensity
-    if (params.crossoverFreq !== undefined) this.virtualBassCrossover = params.crossoverFreq
+    if (params.strength !== undefined) this._virtualBassStrength = clampStrength(params.strength)
+    if (params.followSystemVolume !== undefined) {
+      this._virtualBassFollow = params.followSystemVolume
+    }
     this.syncVirtualBass()
   }
 
+  /**
+   * 上报当前系统音量（0..1），联动开启时重算湿路增益。
+   * 2 个百分点死区：系统音量拖动时避免无意义的连续下发。
+   */
+  setVirtualBassSystemVolume(volume: number): void {
+    const v = Math.min(1, Math.max(0, volume))
+    if (!Number.isFinite(v)) return
+    if (this._virtualBassSystemVolume !== null && Math.abs(v - this._virtualBassSystemVolume) < 0.02) {
+      return
+    }
+    this._virtualBassSystemVolume = v
+    this.syncVirtualBass()
+  }
+
+  /**
+   * 把当前参数换算成 worklet 的 wet AudioParam 与 config 下发。
+   * 未挂载时只缓存参数（挂载成功后 syncVirtualBass 会补发）。
+   */
   private syncVirtualBass(): void {
-    if (!this.virtualBassLowpass || !this.virtualBassWetGain) return
-
-    // 更新分频点
-    this.virtualBassLowpass.frequency.value = this.virtualBassCrossover
-
-    if (this._virtualBassEnabled) {
-      // 更新波形整形曲线（驱动量基于 intensity）
-      const drive = this.virtualBassIntensity / 100
-      if (this.virtualBassShaper) {
-        this.virtualBassShaper.curve = this.makeSineShaperCurve(drive) as Float32Array<ArrayBuffer>
-      }
-      // 湿声（谐波）增益：控制在 0.35 以内，避免与干声直接相加后低频过冲
-      this.virtualBassWetGain.gain.value = 0.35 * drive
-    } else {
-      this.virtualBassWetGain.gain.value = 0
+    if (!this.virtualBassNode || !this._ctx) return
+    const drive = computeVirtualBassDrive(
+      this._virtualBassStrength,
+      this._virtualBassFollow ? this._virtualBassSystemVolume : 1,
+      this._virtualBassEnabled
+    )
+    // gamma/sigma 变化才发 config（触发权重重建），wet 变化只走 AudioParam 平滑
+    if (drive.gamma !== this._lastVbGamma || drive.sigma !== this._lastVbSigma) {
+      this.virtualBassNode.port.postMessage({
+        type: 'config',
+        config: { ...VB_FIXED_CONFIG, gamma: drive.gamma, sigma: drive.sigma }
+      })
+      this._lastVbGamma = drive.gamma
+      this._lastVbSigma = drive.sigma
+    }
+    const wetParam = this.virtualBassNode.parameters.get('wet')
+    if (wetParam) {
+      wetParam.setTargetAtTime(drive.wet, this._ctx.currentTime, 0.05)
     }
   }
 

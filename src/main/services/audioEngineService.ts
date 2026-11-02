@@ -571,13 +571,20 @@ export function registerAudioEngineHandlers(): void {
     return { success: true };
   });
 
-  // 设置 FFT 频谱回调（WASAPI 音频可视化）
+  // FFT 回调按引擎的引用计数：Rust 侧只有一个回调槽（clearFftCallback 是全局的），
+  // 渲染进程可能有多个订阅方（音频可视化 + 动态 EQ）。旧实现任一方 remove 都会把
+  // 回调整个清掉，另一方从此断流。改为 set +1 / remove -1，归零才真正清空。
+  const fftCallbackRefCounts = new Map<string, number>();
+
+  // 设置 FFT 频谱回调（WASAPI 音频可视化 / 动态 EQ）
   ipcMain.on('audio-engine:set-fft-callback', (event, engineId: string) => {
     const engine = engines.get(engineId);
     if (!engine || typeof engine.setFftCallback !== 'function') {
       console.warn('[AudioEngine] 引擎不支持 FFT 回调');
       return;
     }
+
+    fftCallbackRefCounts.set(engineId, (fftCallbackRefCounts.get(engineId) ?? 0) + 1);
 
     // 清理此 WebContents 之前的 FFT 回调，避免旧引用泄漏
     const wc = event.sender;
@@ -593,6 +600,7 @@ export function registerAudioEngineHandlers(): void {
     wc.once('destroyed', () => {
       if (engineToWebContents.get(engineId) === wc) {
         engineToWebContents.delete(engineId);
+        fftCallbackRefCounts.delete(engineId);
         clearFftCallback(engine);
       }
     });
@@ -606,10 +614,16 @@ export function registerAudioEngineHandlers(): void {
     });
   });
 
-  // 移除 FFT 频谱回调（停止音频可视化数据推送）
+  // 移除 FFT 频谱回调（引用计数 -1，归零才停止推送）
   ipcMain.on('audio-engine:remove-fft-callback', (_event, engineId: string) => {
     const engine = engines.get(engineId);
     if (!engine) return;
+    const count = (fftCallbackRefCounts.get(engineId) ?? 1) - 1;
+    if (count > 0) {
+      fftCallbackRefCounts.set(engineId, count);
+      return;
+    }
+    fftCallbackRefCounts.delete(engineId);
     clearFftCallback(engine);
     // 清理 WebContents 追踪
     const wc = engineToWebContents.get(engineId);
@@ -1135,6 +1149,46 @@ export function registerAudioEngineHandlers(): void {
     } catch (error) {
       console.error('[AudioEngine] 获取等响度启用状态失败:', error);
       return { success: false, error: String(error), enabled: false };
+    }
+  });
+
+  // === 低频增压（virtual bass）===
+
+  /**
+   * 设置低频增压参数（WASAPI 模式）。
+   * wet/gamma/sigma 由渲染端按 virtual-bass-presets 解析后下发，Rust 侧零曲线逻辑；
+   * enabled=false 时 wetGain 传 0，Rust 侧保持旁路。
+   */
+  ipcMain.handle('audio-engine:set-virtual-bass', async (_event, engineId: string, params: {
+    enabled: boolean
+    wetGain: number
+    gamma: number
+    sigma: number
+  }) => {
+    try {
+      const engine = getEngine(engineId);
+      if (typeof engine.setVirtualBass === 'function') {
+        engine.setVirtualBass(params.enabled, params.wetGain, params.gamma, params.sigma);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('[AudioEngine] 设置低频增压失败:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // === 系统音量（只读，供低频增压力度联动） ===
+
+  ipcMain.handle('system:get-volume', async () => {
+    try {
+      const native = loadNativeModule();
+      if (!native || typeof native.getSystemVolume !== 'function') {
+        return { success: false, error: 'getSystemVolume 不可用', volume: null };
+      }
+      const volume = native.getSystemVolume();
+      return { success: true, volume };
+    } catch (error) {
+      return { success: false, error: String(error), volume: null };
     }
   });
 

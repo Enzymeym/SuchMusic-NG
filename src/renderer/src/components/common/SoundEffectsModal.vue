@@ -10,12 +10,22 @@ import {
   NScrollbar,
   NSelect,
   NButton,
+  NInput,
+  NPopconfirm,
   NCollapse,
   NCollapseItem,
   useThemeVars,
   useMessage
 } from 'naive-ui'
 import { useAudioEngine } from '../../composables/useAudioEngine'
+import { useDynamicEq } from '../../composables/useDynamicEq'
+import { useSystemVolume } from '../../composables/useSystemVolume'
+import { DYNAMIC_EQ_SHAPE_LABELS, type DynamicEqShape } from '../../audio/dynamic-eq'
+import {
+  computeVirtualBassDrive,
+  getStrengthPreset
+} from '../../audio/virtual-bass-presets'
+import { isWasapiExclusiveMode } from '../../utils/audioOutputModeManager'
 import {
   computeEqLoudnessDb,
   LOUDNESS_COMP_MIN_DB,
@@ -23,7 +33,6 @@ import {
 } from '../../audio/web-audio-dsp'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { usePlayerStore } from '../../stores/playerStore'
-import { audioEngine as audioOutputEngine } from '../../audio/audio-engine'
 
 const themeVars = useThemeVars()
 const message = useMessage()
@@ -92,15 +101,76 @@ watch(
   }
 )
 
-const presetOptions = computed(() =>
-  audioEngine.presets.value.map((p: any) => ({ label: p.name, value: p.id }))
-)
+/**
+ * 预设列表（内置 + 自定义），供 EQ 卡片内的标签选择器使用。
+ * 选择器已从顶部区域下移到均衡曲线下方：预设本质就是一条 EQ 曲线，
+ * 与曲线放在一起才符合「选曲线 → 看形状 → 再微调」的操作顺序。
+ */
+const presetList = computed<any[]>(() => audioEngine.presets.value || [])
+
+/** 「保存为预设」行内编辑状态 */
+const savePresetOpen = ref(false)
+const presetNameDraft = ref('')
+const presetInputRef = ref<any>(null)
+
+/** 生成一个不重名的默认预设名（自定义 1 / 自定义 2 …） */
+const nextCustomPresetName = () => {
+  const used = presetList.value.filter((p) => !p.builtin).map((p) => p.name as string)
+  let n = used.length + 1
+  while (used.includes(`自定义 ${n}`)) n++
+  return `自定义 ${n}`
+}
+
+function openSavePreset() {
+  if (presetsLocked.value) {
+    message.warning('动态 EQ 开启时无法保存预设，请先关闭动态 EQ')
+    return
+  }
+  presetNameDraft.value = nextCustomPresetName()
+  savePresetOpen.value = true
+  nextTick(() => presetInputRef.value?.focus?.())
+}
+
+function closeSavePreset() {
+  savePresetOpen.value = false
+}
+
+/**
+ * 预设是否被锁定：动态 EQ 开启时不允许切换/保存预设。
+ * 动态 EQ 会在 EQ 增益上叠加实时修正，此时换预设会让曲线被两边同时改写，
+ * 用户看到的是「选了预设但曲线不是预设的样子」。
+ */
+const presetsLocked = computed<boolean>(() => dynamicEqEnabled.value)
+
+/** 把当前手动调节的曲线（含各频段增益之外的音效参数）存为自定义预设 */
+async function confirmSavePreset() {
+  if (presetsLocked.value) {
+    message.warning('动态 EQ 开启时无法保存预设，请先关闭动态 EQ')
+    return
+  }
+  const name = presetNameDraft.value.trim()
+  if (!name) {
+    message.warning('请先输入预设名称')
+    return
+  }
+  await audioEngine.saveCurrentAsPreset(name)
+  savePresetOpen.value = false
+  message.success(`已保存为预设「${name}」`)
+}
+
+/** 删除自定义预设（内置预设不可删） */
+function handleDeletePreset(presetId: string) {
+  const target = presetList.value.find((p) => p.id === presetId)
+  if (!target || target.builtin) return
+  audioEngine.deletePreset(presetId)
+  message.success(`已删除预设「${target.name}」`)
+}
 
 const isWebAudioOutput = computed(() => settingsStore.playback.audioOutputMode === 'webaudio')
 
 /**
  * 输出设备名。Web Audio 模式下明确显示为系统默认输出，
- * 避免与下方的预设下拉（默认「平坦」）混淆——用户曾误以为默认设备叫「平坦」。
+ * 避免与预设名（如「平坦」）混淆——用户曾误以为默认设备叫「平坦」。
  */
 const deviceName = computed(() => {
   if (isWebAudioOutput.value) return '系统默认输出（Web Audio）'
@@ -108,6 +178,14 @@ const deviceName = computed(() => {
 })
 
 const handlePresetChange = (presetId: string) => {
+  savePresetOpen.value = false
+  if (presetsLocked.value) {
+    message.warning('动态 EQ 开启时无法切换预设，请先关闭动态 EQ')
+    return
+  }
+  // 再次点击当前预设 = 把曲线还原成该预设（丢弃这次的手动调整）
+  const same = presetId === audioEngine.currentPresetId.value
+  if (same && !presetModified.value) return
   audioEngine.applyPreset(presetId)
   // 以新预设曲线为基准，强度复位
   captureBaseEqGains()
@@ -175,6 +253,8 @@ const handleGoToSound = () => {
 const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 const EQ_MIN_DB = -10
 const EQ_MAX_DB = 10
+/** 纵向可扩展上限：低音量补偿叠加后曲线可能超过 +10dB */
+const EQ_PLOT_MAX_DB = 24
 const GRAPH_H = 220
 const F_MIN = 20
 const F_MAX = 20000
@@ -182,6 +262,8 @@ const F_MAX = 20000
 const graphCanvas = ref<HTMLCanvasElement | null>(null)
 const graphWrap = ref<HTMLDivElement | null>(null)
 const draggingBand = ref(-1)
+/** 拖拽期间冻结的纵轴上限，避免拖动时刻度跳变 */
+let dragTopDb = EQ_MAX_DB
 const activeDrags = new Map<number, number>()
 
 const eqEnabled = computed<boolean>({
@@ -200,6 +282,21 @@ const eqGains = computed(() => audioEngine.eqBands.value.map((b: any) => b.preGa
  */
 const normalizedGains = () => EQ_FREQS.map((_, i) => eqGains.value[i] ?? 0)
 
+/** 当前预设自身的曲线（用于判断是否被手动改过 / 改过多少） */
+const presetOwnGains = computed<number[]>(() => {
+  const p = presetList.value.find((x) => x.id === audioEngine.currentPresetId.value)
+  if (!p?.eqBands) return EQ_FREQS.map(() => 0)
+  return EQ_FREQS.map((_, i) => clamp(p.eqBands[i]?.preGain ?? 0, EQ_MIN_DB, EQ_MAX_DB))
+})
+
+/**
+ * 曲线是否已偏离当前预设：拖动频点、调整强度都会让实际增益与预设值不一致，
+ * 此时标签栏下方提示「可存为新预设」，避免用户以为改动已经写进预设。
+ */
+const presetModified = computed(() =>
+  normalizedGains().some((g, i) => Math.abs(g - (presetOwnGains.value[i] ?? 0)) > 0.05)
+)
+
 const fmtFreq = (f: number) => audioEngine.getBandLabel(f)
 
 function getPlotMetrics() {
@@ -215,14 +312,34 @@ function getPlotMetrics() {
   const padB = 26
   const plotW = cssW - padL - padR
   const plotH = GRAPH_H - padT - padB
-  return { cssW, padL, padR, padT, padB, plotW, plotH, centerY: padT + plotH / 2 }
+  return { cssW, padL, padR, padT, padB, plotW, plotH }
 }
 
 const xFor = (f: number, m: ReturnType<typeof getPlotMetrics>) =>
   m.padL + ((Math.log10(f) - Math.log10(F_MIN)) / (Math.log10(F_MAX) - Math.log10(F_MIN))) * m.plotW
 
+/**
+ * 曲线纵向上限（dB）：补偿后的曲线可能超过 +10dB，此时自动抬升上限，
+ * 保证叠加曲线完整可见（参考线仍以 0dB 为基准，逐 5dB 重算刻度）。
+ * 拖拽期间冻结当前上限，避免拖动过程中刻度反复跳变。
+ */
+const liveTopDb = computed(() => {
+  if (!showCompCurve.value) return EQ_MAX_DB
+  const gains = normalizedGains()
+  let peak = EQ_MAX_DB
+  EQ_FREQS.forEach((f, i) => {
+    peak = Math.max(peak, clamp(gains[i] ?? 0, EQ_MIN_DB, EQ_MAX_DB) + followCompDbAt(f))
+  })
+  return Math.min(EQ_PLOT_MAX_DB, Math.ceil((peak + 0.6) / 5) * 5)
+})
+
+const graphTopDb = computed(() => (draggingBand.value >= 0 ? dragTopDb : liveTopDb.value))
+
 const yFor = (db: number, m: ReturnType<typeof getPlotMetrics>) =>
-  m.centerY - (db / EQ_MAX_DB) * (m.plotH / 2)
+  m.padT + ((graphTopDb.value - db) / (graphTopDb.value - EQ_MIN_DB)) * m.plotH
+
+const dbForY = (y: number, m: ReturnType<typeof getPlotMetrics>) =>
+  graphTopDb.value - ((y - m.padT) / m.plotH) * (graphTopDb.value - EQ_MIN_DB)
 
 function drawGraph() {
   const canvas = graphCanvas.value
@@ -244,11 +361,12 @@ function drawGraph() {
   const gridLight = 'rgba(128,128,128,0.10)'
   const textColor = themeVars.value.textColor3
 
-  // 横向网格 + Y 轴刻度
+  // 横向网格 + Y 轴刻度（上限随低音量补偿动态抬升）
+  const topDb = graphTopDb.value
   ctx.font = '10px system-ui, sans-serif'
   ctx.textAlign = 'right'
   ctx.textBaseline = 'middle'
-  for (let db = EQ_MIN_DB; db <= EQ_MAX_DB + 0.01; db += 5) {
+  for (let db = EQ_MIN_DB; db <= topDb + 0.01; db += 5) {
     const y = yFor(db, m)
     ctx.strokeStyle = db === 0 ? gridStrong : grid
     ctx.beginPath()
@@ -274,23 +392,48 @@ function drawGraph() {
   })
 
   const gains = normalizedGains()
-  const pts = EQ_FREQS.map((f, i) => ({ x: xFor(f, m), y: yFor(clamp(gains[i], EQ_MIN_DB, EQ_MAX_DB), m) }))
+  // 基准频点（用户拖动调节的就是这些点）
+  const eqPts = EQ_FREQS.map((f, i) => ({
+    x: xFor(f, m),
+    y: yFor(clamp(gains[i], EQ_MIN_DB, EQ_MAX_DB), m)
+  }))
+  // 叠加低音量补偿后的频响：低频（200Hz 低架）/ 高频（8kHz 高架）按当前音量缺口抬升
+  const compActive = showCompCurve.value
+  const pts = compActive
+    ? EQ_FREQS.map((f, i) => ({
+        x: xFor(f, m),
+        y: yFor(clamp(gains[i] + followCompDbAt(f), EQ_MIN_DB, topDb), m)
+      }))
+    : eqPts
   const bottomY = m.padT + m.plotH
 
-  // 曲线填充
-  ctx.beginPath()
-  ctx.moveTo(pts[0].x, pts[0].y)
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = pts[Math.max(0, i - 1)]
-    const p1 = pts[i]
-    const p2 = pts[i + 1]
-    const p3 = pts[Math.min(pts.length - 1, i + 2)]
-    const c1x = p1.x + (p2.x - p0.x) / 6
-    const c1y = p1.y + (p2.y - p0.y) / 6
-    const c2x = p2.x - (p3.x - p1.x) / 6
-    const c2y = p2.y - (p3.y - p1.y) / 6
-    ctx.bezierCurveTo(c1x, c1y, c2x, c2y, p2.x, p2.y)
+  /** 用 Catmull-Rom 转三次贝塞尔描出一条平滑曲线路径（不描边/填充） */
+  const traceCurve = (list: { x: number; y: number }[]) => {
+    ctx.beginPath()
+    ctx.moveTo(list[0].x, list[0].y)
+    for (let i = 0; i < list.length - 1; i++) {
+      const p0 = list[Math.max(0, i - 1)]
+      const p1 = list[i]
+      const p2 = list[i + 1]
+      const p3 = list[Math.min(list.length - 1, i + 2)]
+      const c1x = p1.x + (p2.x - p0.x) / 6
+      const c1y = p1.y + (p2.y - p0.y) / 6
+      const c2x = p2.x - (p3.x - p1.x) / 6
+      const c2y = p2.y - (p3.y - p1.y) / 6
+      ctx.bezierCurveTo(c1x, c1y, c2x, c2y, p2.x, p2.y)
+    }
   }
+
+  // 1) 补偿开启时，原 EQ 曲线只淡化颜色（实线），作为基准参考
+  if (compActive) {
+    traceCurve(eqPts)
+    ctx.strokeStyle = accentRgba(0.32)
+    ctx.lineWidth = 1.6
+    ctx.stroke()
+  }
+
+  // 2) 主曲线：当前实际生效的频响（未开补偿时即原曲线）
+  traceCurve(pts)
   ctx.strokeStyle = ACCENT.value
   ctx.lineWidth = 2.2
   ctx.stroke()
@@ -298,13 +441,13 @@ function drawGraph() {
   ctx.lineTo(pts[0].x, bottomY)
   ctx.closePath()
   const grad = ctx.createLinearGradient(0, m.padT, 0, bottomY)
-  grad.addColorStop(0, accentRgba(0.3))
+  grad.addColorStop(0, accentRgba(compActive ? 0.22 : 0.3))
   grad.addColorStop(1, accentRgba(0.02))
   ctx.fillStyle = grad
   ctx.fill()
 
-  // 频点手柄
-  pts.forEach((p, i) => {
+  // 频点手柄（始终落在 EQ 基准曲线上，拖动改变的是 EQ 增益）
+  eqPts.forEach((p, i) => {
     const active = i === draggingBand.value
     ctx.beginPath()
     ctx.arc(p.x, p.y, active ? 8 : 5.5, 0, Math.PI * 2)
@@ -374,6 +517,7 @@ function handleGraphDown(e: PointerEvent) {
     }
   })
   if (best === -1) return
+  dragTopDb = graphTopDb.value
   graphCanvas.value.setPointerCapture(e.pointerId)
   activeDrags.set(e.pointerId, best)
   draggingBand.value = best
@@ -395,11 +539,7 @@ function applyDrag(band: number, offsetY: number) {
   const canvas = graphCanvas.value
   if (!canvas) return
   const m = getPlotMetrics()
-  const db = clamp(
-    Math.round(((m.centerY - offsetY) / (m.plotH / 2)) * EQ_MAX_DB * 2) / 2,
-    EQ_MIN_DB,
-    EQ_MAX_DB
-  )
+  const db = clamp(Math.round(dbForY(offsetY, m) * 2) / 2, EQ_MIN_DB, EQ_MAX_DB)
   // 确保目标频段存在，否则 setEqBand 会因 eqBands 为空/不足而静默失败
   ensureEqBands(band)
   audioEngine.setEqBand(band, { preGain: db })
@@ -457,6 +597,56 @@ function applyEqStrength(v: number) {
 function handleEqStrengthChange(v: number) {
   applyEqStrength(v)
 }
+
+// ==================== 动态 EQ ====================
+// 实时根据音频频谱（FFT 分析推理）动态修正各频段增益，使声音贴合选定走势。
+// 状态与持久化在 useAudioEngine.dynamicEq，分析循环在 useDynamicEq runner。
+const dynamicEqRunner = useDynamicEq()
+
+const dynamicEqParams = computed(() => audioEngine.dynamicEq.value)
+
+const dynamicEqEnabled = computed<boolean>({
+  get: () => dynamicEqParams.value.enabled,
+  set: (v) => {
+    // 开启动态 EQ 时若均衡器关闭则自动开启（修正量叠加在 EQ 增益上，EQ 旁通则无效）
+    if (v && !eqEnabled.value) {
+      audioEngine.setEqEnabled(true)
+      message.info('已联动开启均衡器（动态 EQ 依赖均衡器生效）')
+    }
+    audioEngine.setDynamicEqParams({ enabled: v })
+    // 显式启停 runner（不依赖 watch 触发，避免 HMR / 时序导致循环没跑起来）
+    if (v) {
+      dynamicEqRunner.start()
+    } else {
+      dynamicEqRunner.stop()
+    }
+  }
+})
+
+/** 四种走势（互斥单选） */
+const dynamicEqShapeOptions: Array<{ value: DynamicEqShape; label: string }> = (
+  ['bassBoost', 'trebleBoost', 'vShape', 'invertedV'] as DynamicEqShape[]
+).map((value) => ({ value, label: DYNAMIC_EQ_SHAPE_LABELS[value] }))
+
+function handleDynamicEqShape(shape: DynamicEqShape) {
+  audioEngine.setDynamicEqParams({ shape })
+}
+
+function handleDynamicEqStrength(v: number) {
+  audioEngine.setDynamicEqParams({ strength: clamp(Math.round(v), 1, 5) })
+}
+
+function handleDynamicEqEfficiency(v: number) {
+  audioEngine.setDynamicEqParams({ efficiency: clamp(Math.round(v), 1, 5) })
+}
+
+/** 实时修正读数（低频 / 高频段均值，dB） */
+const dynamicEqReadout = computed(() => dynamicEqRunner.deltaSummary.value)
+const dynamicEqStatus = computed(() => {
+  if (!dynamicEqEnabled.value) return '已关闭'
+  const label = `${DYNAMIC_EQ_SHAPE_LABELS[dynamicEqParams.value.shape]} · ${dynamicEqParams.value.strength}档`
+  return dynamicEqRunner.running.value ? `${label} · 分析中` : label
+})
 
 // ==================== 等响度（EQ 响度补偿） ====================
 // 语义：调整 EQ 后保持整体响度与调整前一致。
@@ -529,10 +719,31 @@ const followReferenceDb = computed(() =>
   clamp(Math.round(audioEngine.loudness.value.referenceLoudness ?? 0), -30, 0)
 )
 
-/** 当前播放音量换算出的 dB（满音量 = 0dB） */
+/** 系统主音量（低频增压联动 / 低音量补偿共用） */
+const { available: sysVolAvailable, systemVolume } = useSystemVolume()
+
+/**
+ * 当前实际听到的有效响度 = 软件音量 × 系统音量。
+ * 系统音量作用于扬声器实际输出，只看软件音量会低估「低频听不见」的程度；
+ * WASAPI 独占模式绕过系统混音器，系统音量对输出无效，此时只按软件音量。
+ */
+const effectiveVolume = computed(() => {
+  const software = clamp(playerStore.volume ?? 1, 0, 1)
+  if (sysVolAvailable.value === false || isWasapiExclusiveMode()) return software
+  return clamp(software * systemVolume.value, 0, 1)
+})
+
+/** 有效响度换算出的 dB（满音量 = 0dB） */
 const currentVolumeDb = computed(() =>
-  20 * Math.log10(clamp(playerStore.volume || 0.0001, 0.0001, 1))
+  20 * Math.log10(clamp(effectiveVolume.value || 0.0001, 0.0001, 1))
 )
+
+/** 系统音量口径说明（用于文案，避免用户误以为只看软件音量） */
+const sysVolNote = computed(() => {
+  if (sysVolAvailable.value === false) return '系统音量不可读，按软件音量计算'
+  if (isWasapiExclusiveMode()) return '独占模式下系统音量不生效，按软件音量计算'
+  return `含系统音量 ${Math.round(systemVolume.value * 100)}%`
+})
 
 /** 音量缺口（dB）：比基准低多少，高于基准则为 0 */
 const followDeficit = computed(() =>
@@ -548,24 +759,146 @@ const followBoost = computed(() => {
   }
 })
 
+/**
+ * 补偿曲线的频响换算：与 DSP 完全一致 —— 200Hz lowshelf + 8kHz highshelf，
+ * shelf 斜率固定 S=1（Web Audio 的 lowshelf/highshelf 不使用 Q）。
+ */
+const FOLLOW_LOW_SHELF_HZ = 200
+const FOLLOW_HIGH_SHELF_HZ = 8000
+const RESPONSE_SAMPLE_RATE = 48000
+
+/** 单个 RBJ shelf 滤波器在频率 f 处的增益（dB） */
+function shelfResponseDb(f: number, type: 'low' | 'high', f0: number, gainDb: number): number {
+  if (!gainDb) return 0
+  const A = Math.pow(10, gainDb / 40)
+  const w0 = (2 * Math.PI * Math.min(f0, RESPONSE_SAMPLE_RATE / 2 - 1)) / RESPONSE_SAMPLE_RATE
+  const cosw = Math.cos(w0)
+  const alpha = (Math.sin(w0) / 2) * Math.SQRT2
+  const sa = 2 * Math.sqrt(A) * alpha
+  let b0: number, b1: number, b2: number, a0: number, a1: number, a2: number
+  if (type === 'low') {
+    b0 = A * (A + 1 - (A - 1) * cosw + sa)
+    b1 = 2 * A * (A - 1 - (A + 1) * cosw)
+    b2 = A * (A + 1 - (A - 1) * cosw - sa)
+    a0 = A + 1 + (A - 1) * cosw + sa
+    a1 = -2 * (A - 1 + (A + 1) * cosw)
+    a2 = A + 1 + (A - 1) * cosw - sa
+  } else {
+    b0 = A * (A + 1 + (A - 1) * cosw + sa)
+    b1 = -2 * A * (A - 1 + (A + 1) * cosw)
+    b2 = A * (A + 1 + (A - 1) * cosw - sa)
+    a0 = A + 1 - (A - 1) * cosw + sa
+    a1 = 2 * (A - 1 - (A + 1) * cosw)
+    a2 = A + 1 - (A - 1) * cosw - sa
+  }
+  const w = (2 * Math.PI * Math.min(f, RESPONSE_SAMPLE_RATE / 2 - 1)) / RESPONSE_SAMPLE_RATE
+  // z^-1 / z^-2 的实部与虚部
+  const z1r = Math.cos(w)
+  const z1i = -Math.sin(w)
+  const z2r = Math.cos(2 * w)
+  const z2i = -Math.sin(2 * w)
+  const numRe = b0 + b1 * z1r + b2 * z2r
+  const numIm = b1 * z1i + b2 * z2i
+  const denRe = a0 + a1 * z1r + a2 * z2r
+  const denIm = a1 * z1i + a2 * z2i
+  const numMag = Math.hypot(numRe, numIm)
+  const denMag = Math.hypot(denRe, denIm)
+  if (!numMag || !denMag) return 0
+  return 20 * Math.log10(numMag / denMag)
+}
+
+/** 低音量补偿在频率 f 处叠加的总增益（dB） */
+const followCompDbAt = (f: number) =>
+  shelfResponseDb(f, 'low', FOLLOW_LOW_SHELF_HZ, followBoost.value.low) +
+  shelfResponseDb(f, 'high', FOLLOW_HIGH_SHELF_HZ, followBoost.value.high)
+
+/** 曲线上是否叠加补偿曲线：关闭补偿 / EQ 旁通 / 提升量为 0 时都不单独显示 */
+const showCompCurve = computed(
+  () =>
+    followVolumeEnabled.value &&
+    eqEnabled.value &&
+    (followBoost.value.low > 0.05 || followBoost.value.high > 0.05)
+)
+
 const followStatus = computed(() =>
   followVolumeEnabled.value
     ? `低频 +${followBoost.value.low.toFixed(1)} / 高频 +${followBoost.value.high.toFixed(1)} dB`
     : '已关闭'
 )
 
+// 补偿开关 / 提升量 / EQ 旁通变化时重绘：补偿曲线随之出现或消失
+watch(
+  () =>
+    `${eqEnabled.value}|${showCompCurve.value}|${followBoost.value.low.toFixed(2)}|${followBoost.value.high.toFixed(2)}`,
+  redraw,
+  { flush: 'post' }
+)
+
 const followHint = computed(() => {
   if (!followVolumeEnabled.value) return '关闭后不做低音量补偿，音量较小时高低频听感会变弱。'
-  if (followDeficit.value < 0.5) return '当前音量不低于补偿基准，暂不提升高低频。'
-  return `当前音量 ${fmtDbCompact(currentVolumeDb.value)}，比基准低 ${followDeficit.value.toFixed(1)} dB，已提升低频 +${followBoost.value.low.toFixed(1)} dB / 高频 +${followBoost.value.high.toFixed(1)} dB。`
+  if (followDeficit.value < 0.5) {
+    return `当前有效响度 ${fmtDbCompact(currentVolumeDb.value)}（${sysVolNote.value}）不低于补偿基准，暂不提升高低频。`
+  }
+  return `当前有效响度 ${fmtDbCompact(currentVolumeDb.value)}（${sysVolNote.value}），比基准低 ${followDeficit.value.toFixed(1)} dB，已提升低频 +${followBoost.value.low.toFixed(1)} dB / 高频 +${followBoost.value.high.toFixed(1)} dB。`
 })
 
-/** 设定基准：把当前音量写入补偿阈值 */
+/** 设定基准：把当前有效响度（含系统音量）写入补偿阈值 */
 const handleSetFollowBaseline = () => {
   const ref = clamp(Math.round(currentVolumeDb.value), -30, 0)
   audioEngine.setLoudnessParams({ referenceLoudness: ref })
-  message.success(`已按当前音量设定补偿基准：${ref} dB`)
+  message.success(`已按当前有效响度（${sysVolNote.value}）设定补偿基准：${ref} dB`)
 }
+
+// ==================== 低频增压（小体积扬声器） ====================
+// 缺失基频谐波合成：小扬声器发不出的低频用其高次谐波「骗」出力量感。
+// 5 档强度 + 系统音量联动（音量越低力度越强），状态与持久化在
+// useAudioEngine.virtualBass，档位表与联动曲线在 virtual-bass-presets.ts。
+// 系统音量（systemVolume / sysVolAvailable）复用上方低音量补偿的轮询结果。
+
+const virtualBassParams = computed(() => audioEngine.virtualBass.value)
+
+const virtualBassEnabled = computed<boolean>({
+  get: () => virtualBassParams.value.enabled,
+  set: (v) => {
+    audioEngine.setVirtualBassParams({ enabled: v })
+  }
+})
+
+function handleVirtualBassStrength(v: number) {
+  audioEngine.setVirtualBassParams({ strength: clamp(Math.round(v), 1, 5) })
+}
+
+function handleVirtualBassFollow(v: boolean) {
+  audioEngine.setVirtualBassParams({ followSystemVolume: v })
+}
+
+const virtualBassStatus = computed(() => {
+  if (!virtualBassEnabled.value) return '已关闭'
+  const label = getStrengthPreset(virtualBassParams.value.strength).label
+  const follow =
+    virtualBassParams.value.followSystemVolume && sysVolAvailable.value !== false
+      ? ' · 音量联动'
+      : ''
+  return `${virtualBassParams.value.strength}档 ${label}${follow}`
+})
+
+/** 当前实际下发的湿路增益（含音量联动换算），供 UI 读数 */
+const virtualBassWet = computed(() =>
+  computeVirtualBassDrive(
+    virtualBassParams.value.strength,
+    virtualBassParams.value.followSystemVolume ? systemVolume.value : 1,
+    true
+  ).wet
+)
+
+const virtualBassHint = computed(() => {
+  if (!virtualBassEnabled.value) return '对耳机 / 大音箱意义不大，外放小扬声器收益最明显。'
+  if (!virtualBassParams.value.followSystemVolume) return '已固定为当前档位，不随系统音量变化。'
+  if (sysVolAvailable.value === false) {
+    return '系统音量不可读（非 Windows 或无默认设备），按固定档位工作。'
+  }
+  return `系统音量 ${Math.round(systemVolume.value * 100)}%：音量越低增压越强（等响补偿），满音量回落基准档。`
+})
 
 // ==================== 多频段压缩 MBC ====================
 const mbcEnabled = computed<boolean>({
@@ -689,7 +1022,6 @@ const limiterParams = computed(() => [
 
 // ==================== 声道平衡 ====================
 const balanceEnabled = ref(false)
-const balanceExpanded = ref(false)
 /** 平衡值：-100 全左 / 0 居中 / +100 全右（单一滑块） */
 const balance = ref(0)
 const balanceStatus = computed(() => {
@@ -720,46 +1052,6 @@ function applyBalance() {
 }
 watch([balanceEnabled, balance], applyBalance)
 
-// ==================== 音量记忆 ====================
-const volumeMemoryEnabled = ref(false)
-const VOLUME_MEMORY_KEY = 'volume-memory'
-
-/** 音量记忆：开启后记住当前音量，下次启动时恢复 */
-function saveVolumeMemory() {
-  if (!volumeMemoryEnabled.value) return
-  try {
-    localStorage.setItem(VOLUME_MEMORY_KEY, String(playerStore.volume))
-  } catch {
-    /* ignore */
-  }
-}
-
-/** 启动时若有记忆音量则恢复（仅当音量记忆已开启） */
-function restoreVolumeMemory() {
-  if (!volumeMemoryEnabled.value) return
-  try {
-    const raw = localStorage.getItem(VOLUME_MEMORY_KEY)
-    if (raw == null) return
-    const v = Number(raw)
-    if (Number.isFinite(v) && v >= 0 && v <= 1) {
-      playerStore.setVolume(v)
-      // 必须同步下发到音频引擎：只写 store 会让音量条显示恢复值、
-      // 实际响度仍是上一次的值（听起来就像「音量调节没生效」）
-      void audioOutputEngine.setVolume(v)
-    }
-  } catch {
-    /* ignore */
-  }
-}
-
-watch(volumeMemoryEnabled, (enabled) => {
-  if (enabled) saveVolumeMemory()
-})
-watch(
-  () => playerStore.volume,
-  () => saveVolumeMemory()
-)
-
 // ==================== 界面状态持久化 ====================
 const UI_STORAGE_KEY = 'sound-effects-ui'
 /** loadUiState 读出的基准曲线，供 onMounted 决定是否重新采集 */
@@ -778,7 +1070,10 @@ function loadUiState() {
       const r = typeof d.balanceR === 'number' ? d.balanceR : 0
       balance.value = clamp(((r - l) / 12) * 100, -100, 100)
     }
-    if (typeof d.volumeMemory === 'boolean') volumeMemoryEnabled.value = d.volumeMemory
+    if (typeof d.volumeMemory === 'boolean') {
+      // 音量记忆功能已移除：顺手清掉旧版本留下的记忆音量值
+      localStorage.removeItem('volume-memory')
+    }
     // EQ 强度与它对应的基准曲线必须成对恢复：
     // 实际增益已经（按强度缩放后）写进 engine 状态，这里只还原「显示用的倍率 + 基准」，
     // 不能再用基准重算一遍，否则重启后曲线会被二次缩放。
@@ -809,7 +1104,6 @@ function saveUiState() {
         JSON.stringify({
           balanceEnabled: balanceEnabled.value,
           balance: balance.value,
-          volumeMemory: volumeMemoryEnabled.value,
           eqStrength: eqStrength.value,
           baseEqGains: baseEqGains.value,
           mbcBands: mbcBands.value
@@ -820,7 +1114,7 @@ function saveUiState() {
     }
   }, 300)
 }
-watch([balanceEnabled, balance, volumeMemoryEnabled, eqStrength, baseEqGains, mbcBands], saveUiState, {
+watch([balanceEnabled, balance, eqStrength, baseEqGains, mbcBands], saveUiState, {
   deep: true
 })
 
@@ -828,6 +1122,24 @@ watch([balanceEnabled, balance, volumeMemoryEnabled, eqStrength, baseEqGains, mb
 const handleFooterSettings = () => {
   openPlaybackSettings()
 }
+
+// ==================== 功能卡片 Tab ====================
+// 曲线区（均衡器卡片）与 声道平衡 保持常驻，其余功能卡片改为 Tab 切换。
+// 卡片本身的样式不动，只是同一时刻只显示一个 section。
+const EFFECT_TABS = [
+  { key: 'eqStrength', label: 'EQ 强度' },
+  { key: 'dynamicEq', label: '动态 EQ' },
+  { key: 'loudness', label: '等响度' },
+  { key: 'lowVolume', label: '低音量补偿' },
+  { key: 'virtualBass', label: '低频增压' },
+  { key: 'mbc', label: '多频段压缩' },
+  { key: 'limiter', label: '限幅器' }
+] as const
+
+type EffectTabKey = (typeof EFFECT_TABS)[number]['key']
+
+/** 当前功能 Tab。默认停在第一个（EQ 强度） */
+const activeEffectTab = ref<EffectTabKey>('eqStrength')
 
 // ==================== 生命周期 ====================
 let resizeObserver: ResizeObserver | null = null
@@ -839,9 +1151,8 @@ onMounted(async () => {
   // 先恢复引擎状态，再套用界面侧持久化设置，保证「随音量补偿 / 声道平衡」等不被打架
   await audioEngine.initialize()
   loadUiState()
-  // 应用持久化的声道平衡 / 音量记忆（此前这两项只是本地状态，从未生效）
+  // 应用持久化的声道平衡（此前只是本地状态，从未生效）
   applyBalance()
-  restoreVolumeMemory()
   // 以当前曲线为 EQ 强度基准：只有没存过基准时才重新采集，
   // 否则会把「已按强度缩放过的实际增益」当成基准，再乘一次强度就二次缩放
   if (restoredBaseEqGains) {
@@ -855,6 +1166,8 @@ onMounted(async () => {
   }
   window.addEventListener('resize', handleResize)
   nextTick(() => requestAnimationFrame(drawGraph))
+  // 持久化状态里动态 EQ 是开启的：显式拉起分析循环（不依赖 watch 首次触发）
+  if (dynamicEqParams.value.enabled) dynamicEqRunner.start()
 })
 
 onUnmounted(() => {
@@ -895,7 +1208,7 @@ export default {
         </n-button>
       </header>
 
-      <!-- 当前预设区 -->
+      <!-- 当前输出设备（预设选择已下移到 EQ 卡片） -->
       <div class="se-preset">
         <div class="se-preset-info">
           <div class="se-preset-line">
@@ -903,20 +1216,9 @@ export default {
             <span class="se-preset-label">输出设备</span>
           </div>
           <span class="se-preset-device">{{ deviceName }}</span>
-          <div class="se-preset-line">
-            <i class="mgc_music_2_line se-preset-speaker"></i>
-            <span class="se-preset-label">音效预设</span>
-          </div>
-          <n-select
-            v-model:value="selectedPresetId"
-            :options="presetOptions"
-            size="small"
-            class="se-preset-select"
-            @update:value="handlePresetChange"
-          />
         </div>
 
-        <div class="se-preset-actions">
+        <div class="se-preset-actions" style="display: none;">
           <n-tooltip trigger="hover">
             <template #trigger>
               <n-button quaternary circle @click="handleCopyPreset">
@@ -949,8 +1251,8 @@ export default {
           <!-- EQ 参数均衡器曲线图（已合并原「原EQ / 预EQ」为单一参数均衡器） -->
           <section class="se-section">
             <header class="se-sec-head">
-              <span class="se-sec-title">EQ 参数均衡器</span>
-              <span class="se-sec-status">在曲线上拖动频点直接调节</span>
+              <span class="se-sec-title">均衡器</span>
+              <span class="se-sec-status">在曲线上拖动频点调节</span>
             </header>
             <div ref="graphWrap" class="se-graph-wrap">
               <canvas
@@ -964,10 +1266,112 @@ export default {
               ></canvas>
               <div v-if="!eqEnabled" class="se-graph-mask">均衡器已关闭</div>
             </div>
+            <div v-if="showCompCurve" class="se-graph-legend">
+              <span class="se-legend-item">
+                <i class="se-legend-line base"></i>
+                原曲线
+              </span>
+              <span class="se-legend-item">
+                <i class="se-legend-line comp"></i>
+                补偿后
+              </span>
+            </div>
+
+            <!-- 预设标签选择器：内置预设 + 自定义预设（动态 EQ 开启时整块锁定） -->
+            <div class="se-preset-picker" :class="{ locked: presetsLocked }">
+              <div class="se-preset-chips">
+                <div v-for="p in presetList" :key="p.id" class="se-pet-wrap">
+                  <button
+                    type="button"
+                    class="se-pet-chip"
+                    :class="{ active: p.id === selectedPresetId, custom: !p.builtin }"
+                    :disabled="presetsLocked"
+                    :title="
+                      presetsLocked
+                        ? '动态 EQ 开启时不可切换预设'
+                        : p.builtin
+                          ? p.name
+                          : `自定义预设：${p.name}`
+                    "
+                    @click="handlePresetChange(p.id)"
+                  >
+                    {{ p.name }}
+                  </button>
+                  <n-popconfirm
+                    v-if="!p.builtin"
+                    :show-icon="false"
+                    positive-text="删除"
+                    negative-text="取消"
+                    @positive-click="handleDeletePreset(p.id)"
+                  >
+                    <template #trigger>
+                      <button
+                        type="button"
+                        class="se-pet-del"
+                        :disabled="presetsLocked"
+                        title="删除该预设"
+                      >
+                        <i class="mgc_close_line"></i>
+                      </button>
+                    </template>
+                    删除预设「{{ p.name }}」？
+                  </n-popconfirm>
+                </div>
+
+                <button
+                  type="button"
+                  class="se-pet-chip se-pet-add"
+                  :class="{ active: savePresetOpen }"
+                  :disabled="presetsLocked"
+                  :title="presetsLocked ? '动态 EQ 开启时不可保存预设' : '把当前设置存为预设'"
+                  @click="savePresetOpen ? closeSavePreset() : openSavePreset()"
+                >
+                  <i :class="savePresetOpen ? 'mgc_close_line' : 'mgc_add_line'"></i>
+                  <span>{{ savePresetOpen ? '取消' : '存为预设' }}</span>
+                </button>
+              </div>
+
+              <div v-if="savePresetOpen && !presetsLocked" class="se-preset-save">
+                <n-input
+                  ref="presetInputRef"
+                  v-model:value="presetNameDraft"
+                  size="small"
+                  placeholder="预设名称，如「夜间低音」"
+                  :maxlength="20"
+                  @keyup.enter="confirmSavePreset"
+                />
+                <n-button size="small" type="primary" secondary @click="confirmSavePreset">
+                  保存
+                </n-button>
+              </div>
+              <p v-if="presetsLocked" class="se-hint se-preset-hint">
+                动态 EQ 开启中，预设已锁定；关闭动态 EQ 后可切换或保存预设。
+              </p>
+              <p v-else-if="presetModified" class="se-hint se-preset-hint">
+                当前曲线已手动调整，尚未保存到预设。
+              </p>
+            </div>
           </section>
 
+          <!-- 功能卡片 Tab 切换（曲线区 / 声道平衡 常驻，不参与切换） -->
+          <div class="se-effect-tabs" role="tablist">
+            <button
+              v-for="tab in EFFECT_TABS"
+              :key="tab.key"
+              type="button"
+              role="tab"
+              class="se-effect-tab"
+              :class="{ active: activeEffectTab === tab.key }"
+              :aria-selected="activeEffectTab === tab.key"
+              @click="activeEffectTab = tab.key"
+            >
+              <span>{{ tab.label }}</span>
+            </button>
+          </div>
+
+          <div class="se-effect-panels">
           <!-- EQ 强度 -->
-          <section class="se-section" :class="{ disabled: !eqEnabled }">
+          <section v-show="activeEffectTab === 'eqStrength'" class="se-section" :class="{ disabled: !eqEnabled }">
             <header class="se-sec-head">
               <span class="se-sec-title">EQ 强度</span>
               <span class="se-sec-status">{{ eqEnabled ? '已开启' : '已关闭' }}</span>
@@ -987,18 +1391,84 @@ export default {
               />
               <span class="se-slider-val">{{ eqStrength }}%</span>
             </div>
-            <p class="se-hint">在曲线上直接拖动频点，可单独调节每个频段。</p>
+          </section>
+
+          <!-- 动态 EQ -->
+          <section v-show="activeEffectTab === 'dynamicEq'" class="se-section">
+            <header class="se-sec-head">
+              <span class="se-sec-title">动态 EQ</span>
+              <span class="se-sec-status">{{ dynamicEqStatus }}</span>
+              <n-switch v-model:value="dynamicEqEnabled" size="small" />
+            </header>
+            <p class="se-desc">
+              开启后实时分析歌曲内容微调 EQ；使声音无时无刻保持最佳
+            </p>
+
+            <div class="se-dynamic-shapes">
+              <button
+                v-for="opt in dynamicEqShapeOptions"
+                :key="opt.value"
+                type="button"
+                class="se-shape-btn"
+                :class="{ active: dynamicEqParams.shape === opt.value }"
+                :disabled="!dynamicEqEnabled"
+                @click="handleDynamicEqShape(opt.value)"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+
+            <div class="se-slider-row">
+              <span class="se-slider-label">增强力度</span>
+              <n-slider
+                :value="dynamicEqParams.strength"
+                :min="1"
+                :max="5"
+                :step="1"
+                :tooltip="false"
+                :disabled="!dynamicEqEnabled"
+                :marks="{ 1: '1', 2: '2', 3: '3', 4: '4', 5: '5' }"
+                @update:value="handleDynamicEqStrength"
+              />
+              <span class="se-slider-val">{{ dynamicEqParams.strength }} 档</span>
+            </div>
+
+            <div class="se-slider-row">
+              <span class="se-slider-label">算法效率</span>
+              <n-tooltip trigger="hover" placement="top">
+                <template #trigger>
+                  <n-slider
+                    :value="dynamicEqParams.efficiency"
+                    :min="1"
+                    :max="5"
+                    :step="1"
+                    :tooltip="false"
+                    :disabled="!dynamicEqEnabled"
+                    :marks="{ 1: '1', 2: '2', 3: '3', 4: '4', 5: '5' }"
+                    @update:value="handleDynamicEqEfficiency"
+                  />
+                </template>
+                越高分析越频繁、响应越灵敏，CPU 占用略高
+              </n-tooltip>
+              <span class="se-slider-val">{{ dynamicEqParams.efficiency }} 档</span>
+            </div>
+
+            <div v-if="dynamicEqEnabled" class="se-loudness-readout">
+              <n-tag round :bordered="false" size="small" type="info">
+                当前修正：低频 {{ fmtDbCompact(dynamicEqReadout.low) }} / 高频 {{ fmtDbCompact(dynamicEqReadout.high) }}
+              </n-tag>
+            </div>
           </section>
 
           <!-- 等响度（EQ 响度补偿） -->
-          <section class="se-section">
+          <section v-show="activeEffectTab === 'loudness'" class="se-section">
             <header class="se-sec-head">
               <span class="se-sec-title">等响度</span>
               <span class="se-sec-status">{{ loudnessStatus }}</span>
               <n-switch v-model:value="loudnessEnabled" size="small" />
             </header>
             <p class="se-desc">
-              调整 EQ 后自动补偿整体增益，使响度与调整前保持一致（音色改变、音量不变）。
+              调整 EQ 后自动补偿整体增益，使响度与调整前保持一致。
             </p>
 
             <div class="se-slider-row">
@@ -1016,7 +1486,7 @@ export default {
             </div>
 
             <div v-if="loudnessEnabled" class="se-loudness-readout">
-              <n-tag :bordered="false" size="small" type="info">
+              <n-tag round :bordered="false" size="small" type="info">
                 <template #icon>
                   <n-icon size="14"><i class="mgc_volume_line"></i></n-icon>
                 </template>
@@ -1028,14 +1498,14 @@ export default {
           </section>
 
           <!-- 低音量高低频补偿（Fletcher-Munson 近似） -->
-          <section class="se-section">
+          <section v-show="activeEffectTab === 'lowVolume'" class="se-section">
             <header class="se-sec-head">
               <span class="se-sec-title">低音量补偿</span>
               <span class="se-sec-status">{{ followStatus }}</span>
               <n-switch v-model:value="followVolumeEnabled" size="small" />
             </header>
             <p class="se-desc">
-              音量越低，人耳对高低频越不敏感。按音量缺口自动提升两端，小音量下听感更饱满。
+              按实际响度缺口自动提升两端，小音量下听感更饱满。
             </p>
 
             <div class="se-slider-row">
@@ -1071,15 +1541,77 @@ export default {
                 <template #icon>
                   <n-icon size="16"><i class="mgc_target_line"></i></n-icon>
                 </template>
-                按当前音量设定基准
+                按当前响度设基准
               </n-button>
+              <n-tag v-if="followVolumeEnabled" :bordered="false" size="small" type="info">
+                <template #icon>
+                  <n-icon size="14"><i class="mgc_volume_line"></i></n-icon>
+                </template>
+                有效响度 {{ fmtDbCompact(currentVolumeDb) }} · {{ sysVolNote }}
+              </n-tag>
             </div>
 
             <p v-if="followVolumeEnabled" class="se-hint">{{ followHint }}</p>
           </section>
 
+          <!-- 低频增压（小体积扬声器缺失基频谐波合成） -->
+          <section v-show="activeEffectTab === 'virtualBass'" class="se-section">
+            <header class="se-sec-head">
+              <span class="se-sec-title">低频增压 <em>(Virtual Bass)</em></span>
+              <span class="se-sec-status">{{ virtualBassStatus }}</span>
+              <n-switch v-model:value="virtualBassEnabled" size="small" />
+            </header>
+            <p class="se-desc">
+              为笔记本 / 手机外放等小体积扬声器合成缺失的低频基频谐波，让低音更有力量感
+            </p>
+
+            <div class="se-slider-row">
+              <span class="se-slider-label">增压强度</span>
+              <n-slider
+                :value="virtualBassParams.strength"
+                :min="1"
+                :max="5"
+                :step="1"
+                :tooltip="false"
+                :disabled="!virtualBassEnabled"
+                :marks="{ 1: '1', 2: '2', 3: '3', 4: '4', 5: '5' }"
+                @update:value="handleVirtualBassStrength"
+              />
+              <span class="se-slider-val">{{ virtualBassParams.strength }} 档</span>
+            </div>
+
+            <div class="se-slider-row">
+              <span class="se-slider-label">跟随系统音量</span>
+              <n-switch
+                :value="virtualBassParams.followSystemVolume"
+                size="small"
+                :disabled="!virtualBassEnabled"
+                @update:value="handleVirtualBassFollow"
+              />
+              <span class="se-slider-val">
+                {{ virtualBassParams.followSystemVolume ? '智能' : '固定' }}
+              </span>
+            </div>
+
+            <div v-if="virtualBassEnabled" class="se-loudness-readout">
+              <n-tag :bordered="false" size="small" type="info">
+                <template #icon>
+                  <n-icon size="14"><i class="mgc_wave_puls_line"></i></n-icon>
+                </template>
+                <template v-if="virtualBassParams.followSystemVolume && sysVolAvailable !== false">
+                  系统音量 {{ Math.round(systemVolume * 100) }}% · 增压 ×{{
+                    (virtualBassWet / getStrengthPreset(virtualBassParams.strength).wetMax).toFixed(2)
+                  }}
+                </template>
+                <template v-else>当前增压 {{ Math.round(virtualBassWet * 100) }}%</template>
+              </n-tag>
+            </div>
+
+            <p v-if="virtualBassEnabled" class="se-hint">{{ virtualBassHint }}</p>
+          </section>
+
           <!-- 多频段压缩 MBC -->
-          <section class="se-section">
+          <section v-show="activeEffectTab === 'mbc'" class="se-section">
             <header class="se-sec-head">
               <span class="se-sec-title">多频段压缩 <em>(MBC)</em></span>
               <span class="se-sec-status">{{ mbcStatus }}</span>
@@ -1133,7 +1665,7 @@ export default {
           </section>
 
           <!-- 限幅器 -->
-          <section class="se-section">
+          <section v-show="activeEffectTab === 'limiter'" class="se-section">
             <header class="se-sec-head">
               <span class="se-sec-title">限幅器 <em>(Limiter)</em></span>
               <span class="se-sec-status">{{ limiterStatus }}</span>
@@ -1167,7 +1699,9 @@ export default {
             </n-collapse>
           </section>
 
-          <!-- 声道平衡 -->
+          </div>
+
+          <!-- 声道平衡：常驻、内容始终展开（不再折叠） -->
           <section class="se-section">
             <header class="se-sec-head">
               <span class="se-sec-title">声道平衡</span>
@@ -1175,42 +1709,23 @@ export default {
               <n-switch v-model:value="balanceEnabled" size="small" />
             </header>
 
-            <n-collapse
-              class="se-collapse"
-              :class="{ 'is-disabled': !balanceEnabled }"
-              :expanded-names="balanceExpanded ? ['balance'] : []"
-              @update:expanded-names="(names: any) => (balanceExpanded = (names || []).includes('balance'))"
-            >
-              <n-collapse-item title="平衡调节" name="balance">
-                <div class="se-params">
-                  <div class="se-param">
-                    <div class="se-param-head">
-                      <span class="se-slider-label">左</span>
-                      <span class="se-param-value">{{ balanceStatus }}</span>
-                      <span class="se-slider-label">右</span>
-                    </div>
-                    <n-slider
-                      :value="balance"
-                      :min="-100"
-                      :max="100"
-                      :step="1"
-                      :tooltip="false"
-                      @update:value="(v: any) => (balance = v)"
-                    />
-                  </div>
+            <div class="se-params" :class="{ 'is-disabled': !balanceEnabled }">
+              <div class="se-param">
+                <div class="se-param-head">
+                  <span class="se-slider-label">左</span>
+                  <span class="se-param-value">{{ balanceStatus }}</span>
+                  <span class="se-slider-label">右</span>
                 </div>
-              </n-collapse-item>
-            </n-collapse>
-          </section>
-
-          <!-- 音量记忆 -->
-          <section class="se-section">
-            <header class="se-sec-head">
-              <span class="se-sec-title">音量记忆</span>
-              <span class="se-sec-status">{{ volumeMemoryEnabled ? '已启用' : '已禁用' }}</span>
-              <n-switch v-model:value="volumeMemoryEnabled" size="small" />
-            </header>
-            <p class="se-desc">自动记忆/关闭 Such Music 时的系统音量。</p>
+                <n-slider
+                  :value="balance"
+                  :min="-100"
+                  :max="100"
+                  :step="1"
+                  :tooltip="false"
+                  @update:value="(v: any) => (balance = v)"
+                />
+              </div>
+            </div>
           </section>
         </div>
       </n-scrollbar>
@@ -1253,14 +1768,9 @@ export default {
     padding: 14px 18px 10px;
 
     .se-title {
-      margin: 0;
+      margin: 6px;
       font-size: 19px;
-      font-weight: 700;
-      letter-spacing: 0.4px;
-      background: linear-gradient(135deg, v-bind('themeVars.primaryColor'), v-bind('themeVars.primaryColorPressed'));
-      -webkit-background-clip: text;
-      background-clip: text;
-      -webkit-text-fill-color: transparent;
+      align-self: left;
     }
   }
 
@@ -1307,10 +1817,6 @@ export default {
           margin-bottom: 4px;
         }
       }
-
-      .se-preset-select {
-        width: 100%;
-      }
     }
 
     .se-preset-actions {
@@ -1333,6 +1839,7 @@ export default {
     padding: 16px 18px 20px;
   }
 
+  // ===== 卡片 =====
   .se-section {
     padding: 14px 16px;
     border-radius: 14px;
@@ -1393,6 +1900,61 @@ export default {
     }
   }
 
+  // 功能卡片 Tab 切换（卡片样式本身不动，只是同一时刻只显示一个）
+  .se-effect-tabs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px;
+    border-radius: 12px;
+    background: var(--n-card-color, rgba(128, 128, 128, 0.05));
+    border: 1px solid var(--n-border-color, rgba(128, 128, 128, 0.12));
+    overflow-x: auto;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
+  }
+
+  .se-effect-tab {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 11px;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--n-text-color-2);
+    font-size: 12.5px;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: all 0.15s ease;
+
+    &:hover {
+      color: var(--n-text-color);
+      background: rgba(128, 128, 128, 0.08);
+    }
+
+    &.active {
+      border-color: v-bind('accentRgba(0.34)');
+      background: v-bind('accentRgba(0.14)');
+      color: v-bind('ACCENT');
+      font-weight: 600;
+    }
+  }
+
+  // 「已开启」小圆点：卡片被收起后仍能看出哪些效果是开着的
+  .se-effect-tab-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: v-bind('ACCENT');
+    opacity: 0.8;
+  }
+
   // EQ Tab + 曲线图
   .se-eq-tabs {
     display: flex;
@@ -1430,11 +1992,207 @@ export default {
     }
   }
 
+  // 曲线图例（仅在叠加低音量补偿时出现）
+  .se-graph-legend {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 6px;
+    padding-left: 4px;
+    font-size: 11px;
+    color: var(--n-text-color-3);
+
+    .se-legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .se-legend-line {
+      display: inline-block;
+      width: 16px;
+      height: 0;
+      border-top-width: 2px;
+      border-top-style: solid;
+
+      &.base {
+        opacity: 0.45;
+        border-top-color: var(--n-primary-color);
+      }
+
+      &.comp {
+        border-top-color: var(--n-primary-color);
+      }
+    }
+  }
+
+  // 预设标签选择器（EQ 卡片内，曲线下方）
+  .se-preset-picker {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--n-divider-color, rgba(128, 128, 128, 0.16));
+
+    .se-preset-chips {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .se-pet-wrap {
+      position: relative;
+      display: inline-flex;
+    }
+
+    .se-pet-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      height: 26px;
+      padding: 0 12px;
+      border: 1px solid var(--n-border-color, rgba(128, 128, 128, 0.22));
+      border-radius: 999px;
+      background: transparent;
+      color: var(--n-text-color-2);
+      font-size: 12px;
+      line-height: 1;
+      cursor: pointer;
+      transition: all 0.15s ease;
+
+      &:hover {
+        border-color: v-bind('ACCENT');
+        color: var(--n-text-color);
+      }
+
+      &.active {
+        border-color: v-bind('ACCENT');
+        background: v-bind('accentRgba(0.14)');
+        color: v-bind('ACCENT');
+        font-weight: 600;
+      }
+
+      // 自定义预设：右侧给删除按钮留出位置
+      &.custom {
+        padding-right: 24px;
+      }
+
+      // 动态 EQ 开启时整块锁定
+      &:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+
+        &:hover {
+          border-color: var(--n-border-color, rgba(128, 128, 128, 0.22));
+          color: var(--n-text-color-2);
+        }
+
+        &.active {
+          border-color: v-bind('ACCENT');
+          color: v-bind('ACCENT');
+        }
+      }
+    }
+
+    .se-pet-del {
+      position: absolute;
+      right: 6px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: transparent;
+      color: var(--n-text-color-3);
+      font-size: 12px;
+      cursor: pointer;
+      opacity: 0.6;
+      transition: all 0.15s ease;
+
+      &:hover {
+        opacity: 1;
+        color: #f56c6c;
+        background: rgba(245, 108, 108, 0.12);
+      }
+
+      &:disabled {
+        cursor: not-allowed;
+
+        &:hover {
+          opacity: 0.6;
+          color: var(--n-text-color-3);
+          background: transparent;
+        }
+      }
+    }
+
+    .se-pet-add {
+      border-style: dashed;
+      color: var(--n-text-color-3);
+
+      i {
+        font-size: 13px;
+      }
+    }
+
+    .se-preset-save {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      max-width: 360px;
+    }
+
+    .se-preset-hint {
+      margin-top: 8px;
+    }
+  }
+
   // 模式切换
   .se-mode-toggle {
     display: flex;
     gap: 6px;
     margin-bottom: 12px;
+  }
+
+  // 动态 EQ 走势按钮组（互斥单选）
+  .se-dynamic-shapes {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+    margin: 10px 0 12px;
+
+    .se-shape-btn {
+      padding: 6px 4px;
+      border: 1px solid var(--n-border-color);
+      border-radius: 8px;
+      background: transparent;
+      color: var(--n-text-color-2);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+
+      &:hover:not(:disabled) {
+        border-color: v-bind('ACCENT');
+        color: var(--n-text-color);
+      }
+
+      &.active {
+        border-color: v-bind('ACCENT');
+        background: v-bind('accentRgba(0.12)');
+        color: v-bind('ACCENT');
+        font-weight: 600;
+      }
+
+      &:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+    }
   }
 
   // 滑块行
@@ -1475,12 +2233,18 @@ export default {
       opacity: 0.4;
       pointer-events: none;
     }
+  }
 
-    .se-params {
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      padding: 2px 4px 6px;
+  // 参数区（折叠区内与声道平衡常驻区共用）
+  .se-params {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 2px 4px 6px;
+
+    &.is-disabled {
+      opacity: 0.4;
+      pointer-events: none;
     }
   }
 
