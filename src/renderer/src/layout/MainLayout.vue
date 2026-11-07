@@ -241,6 +241,8 @@ html[data-theme='dark'] .header {
   box-sizing: border-box;
   overflow-y: auto;
   overflow-x: hidden;
+  /* 页面过渡时离场元素是 absolute，需要这里作为定位参照 */
+  position: relative;
 }
 
 /* 沉浸式页面容器：去除顶部内边距，内容直接顶到顶部，且去除最大宽度限制 */

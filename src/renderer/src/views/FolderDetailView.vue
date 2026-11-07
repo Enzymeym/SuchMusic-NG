@@ -64,7 +64,7 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useMessage } from 'naive-ui'
+import { NButton, NIcon, NSwitch, useMessage } from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import { useLocalMusicStore, type LocalSong } from '../stores/localMusicStore'
 import { usePlayerStore, type PlayerSong } from '../stores/playerStore'

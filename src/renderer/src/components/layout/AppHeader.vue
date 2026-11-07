@@ -29,6 +29,7 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { usePlayerStore } from '../../stores/playerStore'
 import { usePlaylistStore } from '../../stores/playlistStore'
 import { useLocalMusicStore } from '../../stores/localMusicStore'
+import { useSearchHistoryStore } from '../../stores/searchHistoryStore'
 import { getSearchIndex } from '../../utils/librarySearch'
 import { normalizeSearchText } from '../../../../shared/library/normalize'
 const router = useRouter()
@@ -37,6 +38,7 @@ const settingsStore = useSettingsStore()
 const playerStore = usePlayerStore()
 const playlistStore = usePlaylistStore()
 const localMusicStore = useLocalMusicStore()
+const searchHistoryStore = useSearchHistoryStore()
 const dialog = useDialog()
 const message = useMessage()
 const searchText = ref('')
@@ -382,6 +384,20 @@ const handleSearch = () => {
   }
 }
 
+// ===== 搜索历史 =====
+/** 下拉里最多展示的历史条数（完整列表仍保留在 store 中） */
+const MAX_VISIBLE_HISTORY = 8
+const visibleSearchHistory = computed(() => searchHistoryStore.items.slice(0, MAX_VISIBLE_HISTORY))
+
+const handleRemoveHistory = (keyword: string): void => {
+  searchHistoryStore.remove(keyword)
+}
+
+const handleClearHistory = (): void => {
+  searchHistoryStore.clear()
+  message.success('已清空搜索历史')
+}
+
 // 点击热搜词 / 搜索建议：填入关键词并跳转搜索页
 const handleKeywordClick = (word: string) => {
   searchText.value = word
@@ -597,6 +613,43 @@ const headerPaddingStyle = computed(() => {
           <n-scrollbar style="max-height: 400px">
             <!-- 热搜榜：聚焦且未输入时显示 -->
             <template v-if="!searchText.trim()">
+              <!-- 搜索历史 -->
+              <template v-if="visibleSearchHistory.length">
+                <div class="suggestion-header suggestion-header-row">
+                  <span>搜索历史</span>
+                  <button
+                    type="button"
+                    class="history-clear"
+                    title="清空搜索历史"
+                    @mousedown.prevent
+                    @click="handleClearHistory"
+                  >
+                    <n-icon size="13"><i class="mgc_delete_2_line"></i></n-icon>
+                    <span>清空</span>
+                  </button>
+                </div>
+                <div class="history-chips">
+                  <div
+                    v-for="item in visibleSearchHistory"
+                    :key="'history-' + item.keyword"
+                    class="history-chip"
+                    :title="item.keyword"
+                    @click="handleKeywordClick(item.keyword)"
+                  >
+                    <span class="history-chip-text">{{ item.keyword }}</span>
+                    <button
+                      type="button"
+                      class="history-chip-delete"
+                      title="删除该记录"
+                      @mousedown.prevent
+                      @click.stop="handleRemoveHistory(item.keyword)"
+                    >
+                      <n-icon size="12"><i class="mgc_close_line"></i></n-icon>
+                    </button>
+                  </div>
+                </div>
+              </template>
+
               <div class="suggestion-header">热搜榜</div>
               <div
                 v-for="(item, i) in hotSearches"
@@ -1159,6 +1212,105 @@ html[data-theme='dark']
 .search-suggestions {
   max-height: 400px;
   overflow-y: auto;
+}
+
+
+/* 搜索历史标题行：标题 + 清空按钮 */
+.suggestion-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-right: 8px;
+}
+
+.history-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--n-text-color-3);
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.history-clear:hover {
+  color: #d03050;
+  background-color: rgba(128, 128, 128, 0.14);
+}
+
+/* 历史条目：chip 布局，比图标行紧凑，不与下面的热搜榜抢高度 */
+.history-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px 12px;
+}
+
+.history-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 3px 3px 3px 11px;
+  border-radius: 999px;
+  background-color: rgba(128, 128, 128, 0.12);
+  color: var(--n-text-color);
+  font-size: 13px;
+  line-height: 1.6;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.history-chip:hover {
+  background-color: rgba(61, 136, 155, 0.18);
+  color: #3d889b;
+}
+
+html[data-theme='dark'] .history-chip:hover {
+  background-color: rgba(61, 136, 155, 0.3);
+  color: #9dd6e0;
+}
+
+.history-chip-text {
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 单条删除按钮：常显半透明（保证可发现），悬停 chip 或按钮本身时高亮 */
+.history-chip-delete {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  opacity: 0.5;
+  cursor: pointer;
+  transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.history-chip:hover .history-chip-delete {
+  opacity: 1;
+}
+
+.history-chip-delete:hover {
+  color: #d03050;
+  background-color: rgba(208, 48, 80, 0.16);
 }
 
 .no-suggestions {

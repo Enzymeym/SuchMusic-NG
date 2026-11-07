@@ -748,25 +748,37 @@ const api = {
     }
   },
 
-  // ========== 插件系统 ==========
+  // ========== 插件系统（v2） ==========
   plugins: {
-    /** 加载插件 */
-    load: (filePath: string) => ipcRenderer.invoke('plugin:load', filePath),
+    /** 已安装的插件列表 */
+    list: () => ipcRenderer.invoke('plugin:list'),
+    /** 选择插件文件（只弹文件选择框，不安装） */
+    selectFile: () => ipcRenderer.invoke('plugin:select-file'),
+    /** 仅解析插件头（安装前预览） */
+    inspect: (filePath: string) => ipcRenderer.invoke('plugin:inspect', filePath),
+    /** 安装 / 更新 v2 插件 */
+    install: (filePath: string) => ipcRenderer.invoke('plugin:install', filePath),
+    /** 统一导入：自动识别 v2 / 洛雪 / 澜音 */
+    importFile: (filePath: string) => ipcRenderer.invoke('plugin:import', filePath),
     /** 移除插件 */
     remove: (pluginId: string) => ipcRenderer.invoke('plugin:remove', pluginId),
-    /** 设置活跃插件 */
-    setActive: (pluginId: string | null) => ipcRenderer.invoke('plugin:set-active', pluginId),
-    /** 调用插件方法 */
-    call: (pluginId: string, methodName: string, ...args: any[]) =>
-      ipcRenderer.invoke('plugin:call', pluginId, methodName, ...args),
-    /** 检查插件更新 */
+    /** 启用 / 停用 */
+    setEnabled: (pluginId: string, enabled: boolean) =>
+      ipcRenderer.invoke('plugin:set-enabled', pluginId, enabled),
+    /** 重新加载（改完脚本后重跑） */
+    reload: (pluginId: string) => ipcRenderer.invoke('plugin:reload', pluginId),
+    /** 通过 @updateUrl 检查更新 */
     checkUpdate: (pluginId: string) => ipcRenderer.invoke('plugin:check-update', pluginId),
-    /** 获取已加载插件列表 */
-    list: () => ipcRenderer.invoke('plugin:list'),
-    /** 选择插件文件 */
-    selectFile: () => ipcRenderer.invoke('plugin:select-file'),
-    /** 选择目录 */
-    selectDirectory: () => ipcRenderer.invoke('plugin:select-directory'),
+    /** 读取声明式设置（schema + 当前值） */
+    getSettings: (pluginId: string) => ipcRenderer.invoke('plugin:get-settings', pluginId),
+    /** 写入一项设置 */
+    setSetting: (pluginId: string, key: string, value: any) =>
+      ipcRenderer.invoke('plugin:set-setting', pluginId, key, value),
+    /** 读取插件日志 */
+    getLogs: (pluginId: string, limit?: number) =>
+      ipcRenderer.invoke('plugin:logs', pluginId, limit),
+    /** 清空插件日志 */
+    clearLogs: (pluginId: string) => ipcRenderer.invoke('plugin:clear-logs', pluginId),
 
     // ========== 事件监听 ==========
     /** 监听插件通知 */
@@ -777,20 +789,12 @@ const api = {
         ipcRenderer.removeListener('plugin:notice', handler)
       }
     },
-    /** 监听插件日志 */
+    /** 监听插件日志（全局，供主进程 console 镜像） */
     onLog: (callback: (level: string, ...args: any[]) => void) => {
       const handler = (_event: any, level: string, ...args: any[]) => callback(level, ...args)
       ipcRenderer.on('plugin:log', handler)
       return () => {
         ipcRenderer.removeListener('plugin:log', handler)
-      }
-    },
-    /** 监听敏感操作确认请求 */
-    onConfirmRequest: (callback: (request: any) => void) => {
-      const handler = (_event: any, request: any) => callback(request)
-      ipcRenderer.on('plugin:request-confirm', handler)
-      return () => {
-        ipcRenderer.removeListener('plugin:request-confirm', handler)
       }
     },
     /** 监听批量敏感操作确认请求 */
@@ -801,9 +805,6 @@ const api = {
         ipcRenderer.removeListener('plugin:request-batch-confirm', handler)
       }
     },
-    /** 响应敏感操作确认 */
-    respondConfirm: (response: { requestId: string; confirmed: boolean; skipSession: boolean }) =>
-      ipcRenderer.invoke('plugin:confirm-response', response),
     /** 响应批量敏感操作确认 */
     respondBatchConfirm: (response: {
       requestId: string
@@ -811,24 +812,6 @@ const api = {
       rejectedOpIds?: string[]
       skipSession: boolean
     }) => ipcRenderer.invoke('plugin:batch-confirm-response', response),
-    /** 监听插件 emit 事件 */
-    onEmit: (callback: (data: { pluginId: string; eventName: string; args: any[] }) => void) => {
-      const handler = (_event: any, data: any) => callback(data)
-      ipcRenderer.on('plugin:emit', handler)
-      return () => {
-        ipcRenderer.removeListener('plugin:emit', handler)
-      }
-    },
-    /** 监听插件 props 变更（setProps 触发） */
-    onPropsChanged: (
-      callback: (data: { pluginId: string; props: Record<string, any> }) => void
-    ) => {
-      const handler = (_event: any, data: any) => callback(data)
-      ipcRenderer.on('plugin:props-changed', handler)
-      return () => {
-        ipcRenderer.removeListener('plugin:props-changed', handler)
-      }
-    },
 
     // ========== 歌单操作 ==========
     /** 监听歌单操作请求 */
@@ -864,7 +847,9 @@ const api = {
       pluginId: string,
       patch: { sources?: string[] | null; quality?: string | null }
     ) => ipcRenderer.invoke('source:set-preferences', pluginId, toCloneable(patch)),
-    /** 搜索（插件源） */
+    /** 可搜索来源目录（v2 插件的 musicSearch 源 + 澜音 provider） */
+    listSources: () => ipcRenderer.invoke('source:list-sources'),
+    /** 搜索（统一入口，按 key 路由到对应插件生态） */
     search: (req: any) => ipcRenderer.invoke('source:search', toCloneable(req)),
     /** 解析播放地址 */
     resolveUrl: (req: any) => ipcRenderer.invoke('source:resolve-url', toCloneable(req)),

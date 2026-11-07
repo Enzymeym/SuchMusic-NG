@@ -183,8 +183,11 @@ export class SourcePluginRegistry {
     }
 
     const kind = detectPluginKind(code)
+    if (kind === 'such-v2') {
+      throw new Error('这是 Such v2 插件，请在「设置 → 插件」中导入')
+    }
     if (kind === 'such') {
-      throw new Error('这是 Such 应用插件，请在「插件管理」中加载')
+      throw new Error('这是已停止支持的 v1 插件（window.source），请改用 v2 规范重写')
     }
     if (kind !== 'lx' && kind !== 'ceru') {
       throw new Error('无法识别的插件文件（既不是洛雪也不是澜音音源插件）')
@@ -252,8 +255,10 @@ export class SourcePluginRegistry {
     try {
       const code = readFileSync(filePath, 'utf-8')
       const kind = detectPluginKind(code)
+      if (kind === 'such-v2')
+        return { success: false, error: '这是 Such v2 插件，请在「设置 → 插件」中导入' }
       if (kind === 'such')
-        return { success: false, error: '这是 Such 应用插件，请在「插件管理」中加载' }
+        return { success: false, error: '这是已停止支持的 v1 插件（window.source）' }
       if (kind !== 'lx' && kind !== 'ceru') {
         return { success: false, error: '无法识别的插件文件' }
       }

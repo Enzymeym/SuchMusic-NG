@@ -16,8 +16,8 @@ import { createTray } from './tray'
 import { registerAudioEngineHandlers } from './services/audioEngineService'
 import { registerWasapiHandlers } from './services/wasapiService'
 import { registerUpdateHandlers } from './ipc/update'
-import { registerPluginHandlers } from './ipc/pluginManager'
-import { loadAllSavedPlugins } from './ipc/pluginManager'
+import { registerPluginV2Handlers } from './ipc/pluginV2'
+import { initPluginV2 } from './services/pluginV2'
 import { registerPluginSourceHandlers } from './ipc/pluginSource'
 import { loadAllSavedSourcePlugins } from './services/pluginSource'
 import { registerLyricHandlers } from './services/lyricService'
@@ -281,11 +281,12 @@ app.whenReady().then(() => {
     }, 30000)
   }
 
-  // 注册插件系统处理器（需在窗口创建后）
-  registerPluginHandlers(getMainWindow() || null)
+  // 注册 v2 插件系统处理器（需在窗口创建后：确认弹窗与歌单往返都要发给渲染层）
+  const v2Registry = initPluginV2()
+  registerPluginV2Handlers()
 
-  // 自动加载已保存的插件
-  loadAllSavedPlugins()
+  // 自动加载已保存的 v2 插件
+  void v2Registry.loadSaved()
 
   // 自动加载已保存的音源插件
   loadAllSavedSourcePlugins()

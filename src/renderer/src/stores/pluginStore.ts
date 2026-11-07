@@ -1,38 +1,31 @@
 /**
- * 插件管理 Store
- * 管理插件的加载、移除、调用和更新
+ * 插件管理 Store（v2）
+ *
+ * 只负责管理面：安装 / 启停 / 移除 / 设置 / 日志。数据面（解析播放地址、搜索）
+ * 走 `source:*`，由 `utils/pluginSource.ts` 与 `sourcePluginStore` 处理。
+ *
+ * 与洛雪/澜音的插件共用一个「设置模态框」：打开哪个插件的设置由
+ * `settingsTarget` 决定，`kind` 决定模态框渲染声明的表单还是音乐源开关。
  */
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { computed, ref } from 'vue'
 import { usePlaylistStore } from './playlistStore'
+import type { SettingField, V2PluginSummary } from '../../../shared/plugin/types'
 
-export interface PluginInfo {
-  id: string
-  name: string
-  version: string
-  author: string
-  description?: string
-  icon?: string
-  isUIWidget?: boolean
-  permissions?: string[]
-  uiSchema?: any
-  filePath: string
-  state: 'loaded' | 'running' | 'error' | 'unloaded'
-  isActive: boolean
+export type PluginKind = 'v2' | 'lx' | 'ceru'
+
+/** 设置模态框的目标 */
+export interface SettingsTarget {
+  pluginId: string
+  kind: PluginKind
 }
 
 export const usePluginStore = defineStore('plugin', () => {
   // ========== 状态 ==========
-  const plugins = ref<PluginInfo[]>([])
+  const plugins = ref<V2PluginSummary[]>([])
   const loading = ref(false)
   const notification = ref<{ type: string; message: string } | null>(null)
-  const pendingConfirm = ref<{
-    pluginId: string
-    pluginName: string
-    operation: string
-    detail: string
-    requestId: string
-  } | null>(null)
+  const settingsTarget = ref<SettingsTarget | null>(null)
 
   const pendingBatchConfirm = ref<{
     pluginId: string
@@ -42,214 +35,159 @@ export const usePluginStore = defineStore('plugin', () => {
   } | null>(null)
 
   // ========== 计算属性 ==========
-  const activePlugin = computed(() => plugins.value.find((p) => p.isActive) || null)
-  const loadedPlugins = computed(() => plugins.value.filter((p) => p.state === 'running'))
+  const runningPlugins = computed(() => plugins.value.filter((p) => p.state === 'running'))
 
-  // ========== 操作 ==========
+  // ========== 管理 ==========
 
-  /** 加载插件 */
-  async function loadPlugin(filePath: string): Promise<boolean> {
+  async function refresh(): Promise<void> {
+    try {
+      const res = await window.api.plugins.list()
+      if (res.success && res.plugins) plugins.value = res.plugins
+    } catch (err) {
+      console.error('[PluginStore] 刷新插件列表失败:', err)
+    }
+  }
+
+  /** 从文件导入（自动识别 v2 / 洛雪 / 澜音） */
+  async function importFromFile(filePath: string): Promise<{ ok: boolean; kind?: string }> {
     loading.value = true
     try {
-      const result = await window.api.plugins.load(filePath)
-      if (result.success && result.manifest) {
-        const pluginInfo: PluginInfo = {
-          id: result.manifest.id,
-          name: result.manifest.name,
-          version: result.manifest.version,
-          author: result.manifest.author,
-          description: result.manifest.description,
-          icon: result.manifest.icon,
-          isUIWidget: result.manifest.isUIWidget,
-          permissions: result.manifest.permissions || [],
-          uiSchema: result.manifest.uiSchema || null,
-          filePath,
-          state: (result.state as PluginInfo['state']) || 'running',
-          isActive: false
-        }
-        // 去重
-        const existingIndex = plugins.value.findIndex((p) => p.id === pluginInfo.id)
-        if (existingIndex >= 0) {
-          plugins.value[existingIndex] = pluginInfo
-        } else {
-          plugins.value.push(pluginInfo)
-        }
-        return true
+      const res = await window.api.plugins.importFile(filePath)
+      if (!res.success) {
+        notification.value = { type: 'error', message: res.error || '导入失败' }
+        return { ok: false }
       }
-      return false
+      if (res.kind === 'v2' && res.plugin) {
+        const idx = plugins.value.findIndex((p) => p.id === res.plugin!.id)
+        if (idx >= 0) plugins.value[idx] = res.plugin
+        else plugins.value.push(res.plugin)
+      }
+      return { ok: true, kind: res.kind }
     } catch (err: any) {
-      console.error('[PluginStore] 加载插件失败:', err)
-      return false
+      notification.value = { type: 'error', message: err?.message || '导入失败' }
+      return { ok: false }
     } finally {
       loading.value = false
     }
   }
 
-  /** 移除插件 */
-  async function removePlugin(pluginId: string): Promise<boolean> {
-    try {
-      const result = await window.api.plugins.remove(pluginId)
-      if (result.success) {
-        plugins.value = plugins.value.filter((p) => p.id !== pluginId)
-        return true
-      }
-      return false
-    } catch (err: any) {
-      console.error('[PluginStore] 移除插件失败:', err)
-      return false
-    }
+  /** 弹文件选择框并导入 */
+  async function selectAndImport(): Promise<{ ok: boolean; canceled?: boolean }> {
+    const picked = await window.api.plugins.selectFile()
+    if (!picked.success || !picked.filePath) return { ok: false, canceled: !!picked.canceled }
+    const res = await importFromFile(picked.filePath)
+    return { ok: res.ok }
   }
 
-  /** 设置活跃插件 */
-  async function setActivePlugin(pluginId: string | null): Promise<boolean> {
+  async function remove(pluginId: string): Promise<boolean> {
     try {
-      const result = await window.api.plugins.setActive(pluginId)
-      if (result.success) {
-        plugins.value.forEach((p) => {
-          p.isActive = p.id === pluginId
-        })
-        return true
+      const res = await window.api.plugins.remove(pluginId)
+      if (!res.success) {
+        notification.value = { type: 'error', message: res.error || '移除失败' }
+        return false
       }
-      return false
+      plugins.value = plugins.value.filter((p) => p.id !== pluginId)
+      if (settingsTarget.value?.pluginId === pluginId) settingsTarget.value = null
+      return true
     } catch (err: any) {
-      console.error('[PluginStore] 设置活跃插件失败:', err)
+      notification.value = { type: 'error', message: err?.message || '移除失败' }
       return false
     }
   }
 
-  /** 调用插件方法 */
-  async function callPluginMethod(pluginId: string, methodName: string, ...args: any[]): Promise<any> {
+  async function setEnabled(pluginId: string, enabled: boolean): Promise<boolean> {
     try {
-      const result = await window.api.plugins.call(pluginId, methodName, ...args)
-      if (result.success) {
-        return result.result
+      const res = await window.api.plugins.setEnabled(pluginId, enabled)
+      if (!res.success || !res.plugin) {
+        notification.value = { type: 'error', message: res.error || '操作失败' }
+        return false
       }
-      throw new Error(result.error || '调用失败')
+      const idx = plugins.value.findIndex((p) => p.id === pluginId)
+      if (idx >= 0) plugins.value[idx] = res.plugin
+      return true
     } catch (err: any) {
-      console.error(`[PluginStore] 调用插件方法 ${methodName} 失败:`, err)
-      throw err
+      notification.value = { type: 'error', message: err?.message || '操作失败' }
+      return false
     }
   }
 
-  /** 检查插件更新 */
-  async function checkPluginUpdate(pluginId: string): Promise<any> {
+  async function reload(pluginId: string): Promise<boolean> {
     try {
-      const result = await window.api.plugins.checkUpdate(pluginId)
-      return result.success ? result.result : null
+      const res = await window.api.plugins.reload(pluginId)
+      if (!res.success || !res.plugin) {
+        notification.value = { type: 'error', message: res.error || '重载失败' }
+        return false
+      }
+      const idx = plugins.value.findIndex((p) => p.id === pluginId)
+      if (idx >= 0) plugins.value[idx] = res.plugin
+      return true
     } catch (err: any) {
-      console.error('[PluginStore] 检查更新失败:', err)
-      return null
+      notification.value = { type: 'error', message: err?.message || '重载失败' }
+      return false
     }
   }
 
-  /** 刷新插件列表 */
-  async function refreshPluginList(): Promise<void> {
+  async function checkUpdate(pluginId: string): Promise<{
+    hasNew: boolean
+    version?: string
+    changelog?: string
+  }> {
     try {
-      const result = await window.api.plugins.list()
-      if (result.success && result.plugins) {
-        plugins.value = result.plugins.map((p: any) => ({
-          ...p,
-          isActive: plugins.value.find((ep) => ep.id === p.id)?.isActive || false
-        }))
+      const res = await window.api.plugins.checkUpdate(pluginId)
+      if (!res.success || !res.result) {
+        notification.value = { type: 'error', message: res.error || '检查更新失败' }
+        return { hasNew: false }
       }
+      return res.result
     } catch (err: any) {
-      console.error('[PluginStore] 刷新插件列表失败:', err)
+      notification.value = { type: 'error', message: err?.message || '检查更新失败' }
+      return { hasNew: false }
     }
   }
 
-  /** 选择插件文件并加载 */
-  async function selectAndLoadPlugin(): Promise<boolean> {
-    const result = await window.api.plugins.selectFile()
-    if (result.success && result.filePath) {
-      return loadPlugin(result.filePath)
-    }
-    return false
+  // ========== 设置模态框 ==========
+
+  function openSettings(pluginId: string, kind: PluginKind): void {
+    settingsTarget.value = { pluginId, kind }
   }
 
-  /** 规范化歌曲数据：支持传入文件路径字符串或完整的曲目对象 */
-  function normalizeTracks(tracks: any[]): any[] {
-    return tracks.map((track: any, index: number) => {
-      // 如果是纯字符串，视为文件路径
-      if (typeof track === 'string') {
-        const { title, artist } = parseFileName(track)
-        return {
-          id: `plg-${Date.now()}-${index}`,
-          title,
-          artist,
-          filePath: track
-        }
-      }
-      // 如果有 filePath 但缺少标题，从文件名解析
-      const hasPath = track.filePath || track.path || track.url
-      const title = track.title || track.name || (hasPath ? parseFileName(hasPath).title : '未知歌曲')
-      const artist = track.artist || (hasPath ? parseFileName(hasPath).artist : '未知歌手')
-      return {
-        id: track.id || `plg-${Date.now()}-${index}`,
-        title,
-        artist,
-        album: track.album,
-        cover: track.cover,
-        filePath: hasPath || '',
-        durationMs: track.durationMs || track.duration,
-        source: track.source,
-        sourceSongId: track.sourceSongId
-      }
-    })
+  function closeSettings(): void {
+    settingsTarget.value = null
   }
 
-  /** 从文件路径解析歌曲名和歌手 */
-  function parseFileName(filePath: string): { title: string; artist: string } {
-    // 提取文件名（去掉扩展名）
-    const fileName = filePath.replace(/^.*[/\\]/, '').replace(/\.[^.]+$/, '')
-    // 尝试 "歌手 - 歌曲名" 格式
-    const match = fileName.match(/^(.+?)\s*[-–—]\s*(.+)$/)
-    if (match) {
-      return { artist: match[1].trim(), title: match[2].trim() }
-    }
-    return { title: fileName, artist: '未知歌手' }
-  }
+  // ========== 事件 ==========
 
-  // ========== 初始化事件监听 ==========
-
-  // 事件监听只初始化一次，避免重复注册 IPC 处理器
   let listenersInitialized = false
 
   function initListeners(): void {
     if (listenersInitialized) return
     listenersInitialized = true
 
-    // 监听插件通知
     window.api.plugins.onNotice((data: any) => {
       if (data.type === 'loaded') {
         notification.value = {
           type: 'success',
-          message: `插件 "${data.pluginName}" v${data.version} 已加载`
+          message: `插件「${data.pluginName || data.pluginId}」v${data.version ?? ''} 已加载`
         }
-      } else if (data.type === 'removed') {
+        void refresh()
+      } else if (data.type === 'removed' || data.type === 'enabled' || data.type === 'disabled') {
+        void refresh()
+      } else if (data.type === 'notify') {
         notification.value = {
-          type: 'info',
-          message: `插件已移除`
+          type: data.notifyType || 'info',
+          message: data.message || ''
         }
-        plugins.value = plugins.value.filter((p) => p.id !== data.pluginId)
       } else if (data.type === 'error') {
-        notification.value = {
-          type: 'error',
-          message: data.message || '插件错误'
-        }
+        notification.value = { type: 'error', message: data.message || '插件错误' }
+        void refresh()
       }
     })
 
-    // 监听敏感操作确认请求
-    window.api.plugins.onConfirmRequest((request: any) => {
-      pendingConfirm.value = request
-    })
-
-    // 监听批量敏感操作确认请求
     window.api.plugins.onBatchConfirmRequest((request: any) => {
       pendingBatchConfirm.value = request
     })
 
-    // 监听歌单操作请求
+    // 插件发起的歌单操作 → 交给 playlistStore 执行
     window.api.plugins.onPlaylistOp(async (request: any) => {
       const playlistStore = usePlaylistStore()
       let result: any = null
@@ -313,19 +251,11 @@ export const usePluginStore = defineStore('plugin', () => {
     })
   }
 
-  /** 响应敏感操作确认 */
-  async function respondConfirm(confirmed: boolean, skipSession = false): Promise<void> {
-    if (!pendingConfirm.value) return
-    await window.api.plugins.respondConfirm({
-      requestId: pendingConfirm.value.requestId,
-      confirmed,
-      skipSession
-    })
-    pendingConfirm.value = null
-  }
-
-  /** 响应批量敏感操作确认 */
-  async function respondBatchConfirm(confirmed: boolean, rejectedOpIds: string[] = [], skipSession = false): Promise<void> {
+  async function respondBatchConfirm(
+    confirmed: boolean,
+    rejectedOpIds: string[] = [],
+    skipSession = false
+  ): Promise<void> {
     if (!pendingBatchConfirm.value) return
     await window.api.plugins.respondBatchConfirm({
       requestId: pendingBatchConfirm.value.requestId,
@@ -336,9 +266,45 @@ export const usePluginStore = defineStore('plugin', () => {
     pendingBatchConfirm.value = null
   }
 
-  /** 清除通知 */
   function clearNotification(): void {
     notification.value = null
+  }
+
+  // ========== 曲目归一化（插件可直接传文件路径或对象） ==========
+
+  function normalizeTracks(tracks: any[]): any[] {
+    return tracks.map((track: any, index: number) => {
+      if (typeof track === 'string') {
+        const { title, artist } = parseFileName(track)
+        return {
+          id: `plg-${Date.now()}-${index}`,
+          title,
+          artist,
+          filePath: track
+        }
+      }
+      const hasPath = track.filePath || track.path || track.url
+      const title = track.title || track.name || (hasPath ? parseFileName(hasPath).title : '未知歌曲')
+      const artist = track.artist || (hasPath ? parseFileName(hasPath).artist : '未知歌手')
+      return {
+        id: track.id || `plg-${Date.now()}-${index}`,
+        title,
+        artist,
+        album: track.album,
+        cover: track.cover,
+        filePath: hasPath || '',
+        durationMs: track.durationMs || track.duration,
+        source: track.source,
+        sourceSongId: track.sourceSongId
+      }
+    })
+  }
+
+  function parseFileName(filePath: string): { title: string; artist: string } {
+    const fileName = filePath.replace(/^.*[/\\]/, '').replace(/\.[^.]+$/, '')
+    const match = fileName.match(/^(.+?)\s*[-–—]\s*(.+)$/)
+    if (match) return { artist: match[1].trim(), title: match[2].trim() }
+    return { title: fileName, artist: '未知歌手' }
   }
 
   return {
@@ -346,22 +312,27 @@ export const usePluginStore = defineStore('plugin', () => {
     plugins,
     loading,
     notification,
-    pendingConfirm,
+    settingsTarget,
     pendingBatchConfirm,
     // 计算
-    activePlugin,
-    loadedPlugins,
-    // 方法
-    loadPlugin,
-    removePlugin,
-    setActivePlugin,
-    callPluginMethod,
-    checkPluginUpdate,
-    refreshPluginList,
-    selectAndLoadPlugin,
+    runningPlugins,
+    // 管理
+    refresh,
+    importFromFile,
+    selectAndImport,
+    remove,
+    setEnabled,
+    reload,
+    checkUpdate,
+    // 设置模态框
+    openSettings,
+    closeSettings,
+    // 事件
     initListeners,
-    respondConfirm,
     respondBatchConfirm,
     clearNotification
   }
 })
+
+/** 设置表单的类型别名，供组件复用到 store 外部 */
+export type { SettingField }

@@ -264,43 +264,83 @@ declare global {
         ) => void
       }
       plugins: {
-        load: (
-          filePath: string
-        ) => Promise<{ success: boolean; manifest?: any; state?: string; error?: string }>
-        remove: (pluginId: string) => Promise<{ success: boolean; error?: string }>
-        setActive: (pluginId: string | null) => Promise<{ success: boolean; error?: string }>
-        call: (
-          pluginId: string,
-          methodName: string,
-          ...args: any[]
-        ) => Promise<{ success: boolean; result?: any; error?: string }>
-        checkUpdate: (
-          pluginId: string
-        ) => Promise<{ success: boolean; result?: any; error?: string }>
-        list: () => Promise<{ success: boolean; plugins?: any[] }>
+        /** 已安装的 v2 插件 */
+        list: () => Promise<{
+          success: boolean
+          plugins?: import('../shared/plugin/types').V2PluginSummary[]
+          error?: string
+        }>
         selectFile: () => Promise<{ success: boolean; filePath?: string; canceled?: boolean }>
-        selectDirectory: () => Promise<{ success: boolean; filePath?: string; canceled?: boolean }>
+        /** 仅解析插件头（安装前预览） */
+        inspect: (filePath: string) => Promise<{
+          success: boolean
+          header?: import('../shared/plugin/types').SuchPluginHeader
+          hostId?: string
+          warnings?: string[]
+          error?: string
+        }>
+        install: (filePath: string) => Promise<{
+          success: boolean
+          plugin?: import('../shared/plugin/types').V2PluginSummary
+          error?: string
+        }>
+        /** 统一导入：自动识别 v2 / 洛雪 / 澜音 */
+        importFile: (filePath: string) => Promise<{
+          success: boolean
+          kind?: 'v2' | 'lx' | 'ceru'
+          plugin?: import('../shared/plugin/types').V2PluginSummary
+          info?: any
+          error?: string
+        }>
+        remove: (pluginId: string) => Promise<{ success: boolean; error?: string }>
+        setEnabled: (
+          pluginId: string,
+          enabled: boolean
+        ) => Promise<{
+          success: boolean
+          plugin?: import('../shared/plugin/types').V2PluginSummary
+          error?: string
+        }>
+        reload: (pluginId: string) => Promise<{
+          success: boolean
+          plugin?: import('../shared/plugin/types').V2PluginSummary
+          error?: string
+        }>
+        checkUpdate: (pluginId: string) => Promise<{
+          success: boolean
+          result?: { hasNew: boolean; version?: string; url?: string; changelog?: string }
+          error?: string
+        }>
+        getSettings: (pluginId: string) => Promise<{
+          success: boolean
+          schema?: import('../shared/plugin/types').SettingField[]
+          values?: Record<string, any>
+          error?: string
+        }>
+        setSetting: (
+          pluginId: string,
+          key: string,
+          value: any
+        ) => Promise<{ success: boolean; values?: Record<string, any>; error?: string }>
+        getLogs: (
+          pluginId: string,
+          limit?: number
+        ) => Promise<{
+          success: boolean
+          entries?: import('../shared/plugin/types').PluginLogEntry[]
+          error?: string
+        }>
+        clearLogs: (pluginId: string) => Promise<{ success: boolean; error?: string }>
+
         onNotice: (callback: (data: any) => void) => () => void
         onLog: (callback: (level: string, ...args: any[]) => void) => () => void
-        onConfirmRequest: (callback: (request: any) => void) => () => void
         onBatchConfirmRequest: (callback: (request: any) => void) => () => void
-        respondConfirm: (response: {
-          requestId: string
-          confirmed: boolean
-          skipSession: boolean
-        }) => Promise<void>
         respondBatchConfirm: (response: {
           requestId: string
           confirmed: boolean
           rejectedOpIds?: string[]
           skipSession: boolean
         }) => Promise<void>
-        onEmit: (
-          callback: (data: { pluginId: string; eventName: string; args: any[] }) => void
-        ) => () => void
-        onPropsChanged: (
-          callback: (data: { pluginId: string; props: Record<string, any> }) => void
-        ) => () => void
         onPlaylistOp: (callback: (request: any) => void) => () => void
         respondPlaylistOp: (response: {
           requestId: string
@@ -333,9 +373,22 @@ declare global {
           pluginId: string,
           patch: { sources?: string[] | null; quality?: string | null }
         ) => Promise<{ success: boolean; settings?: any; info?: any; error?: string }>
+        /** 可搜索来源目录（v2 插件的 musicSearch 源 + 澜音 provider） */
+        listSources: () => Promise<{
+          success: boolean
+          sources?: import('../shared/plugin/types').SearchSource[]
+          error?: string
+        }>
         search: (
           req: any
-        ) => Promise<{ success: boolean; items?: any[]; nextCursor?: string; error?: string }>
+        ) => Promise<{
+          success: boolean
+          items?: any[]
+          nextCursor?: string
+          hasMore?: boolean
+          totalEstimate?: number
+          error?: string
+        }>
         resolveUrl: (req: any) => Promise<{
           success: boolean
           result?: any
