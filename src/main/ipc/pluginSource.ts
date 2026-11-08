@@ -6,6 +6,7 @@
 import { ipcMain, dialog } from 'electron'
 import { getMainWindow } from '../windows/mainWindow'
 import { sourceRegistry } from '../services/pluginSource'
+import { pluginRouter } from '../services/pluginRouter'
 import { toSerializable } from '../services/pluginSource/serialize'
 import { searchQQSong } from '../services/lyricService'
 import type {
@@ -13,7 +14,6 @@ import type {
   PlaylistListRequest,
   QualityId,
   ResolveRequest,
-  SearchRequest,
   SourcePreferences,
   SourceTrack
 } from '../services/pluginSource/types'
@@ -113,36 +113,62 @@ export function registerPluginSourceHandlers(): void {
     }
   )
 
-  // ========== 搜索 ==========
-  ipcMain.handle('source:search', async (_event, req: SearchRequest) => {
+  // ========== 可搜索来源目录（v2 插件 + 澜音 provider） ==========
+  ipcMain.handle('source:list-sources', async () => {
     try {
-      const res = await sourceRegistry.search({
-        pluginId: req.pluginId,
-        providerId: req.providerId,
-        query: req.query,
-        limit: req.limit ?? 30,
-        cursor: req.cursor
-      })
-      return {
-        success: true,
-        items: toSerializable(res.items),
-        nextCursor: res.nextCursor
-      }
+      return { success: true, sources: pluginRouter.listSearchSources() }
     } catch (err: any) {
-      return { success: false, error: err.message, items: [] }
+      return { success: false, error: err.message, sources: [] }
     }
   })
+
+  // ========== 搜索（统一入口，按 key 路由到 v2 / 澜音） ==========
+  ipcMain.handle(
+    'source:search',
+    async (
+      _event,
+      req: {
+        key?: string
+        pluginId?: string
+        providerId?: string
+        query: string
+        limit?: number
+        cursor?: string
+      }
+    ) => {
+      try {
+        const res = await pluginRouter.search({
+          key: req.key,
+          pluginId: req.pluginId,
+          providerId: req.providerId,
+          query: req.query,
+          limit: req.limit ?? 30,
+          cursor: req.cursor
+        })
+        return {
+          success: true,
+          items: toSerializable(res.items),
+          nextCursor: res.nextCursor,
+          hasMore: res.hasMore,
+          totalEstimate: res.totalEstimate
+        }
+      } catch (err: any) {
+        return { success: false, error: err.message, items: [], hasMore: false }
+      }
+    }
+  )
 
   // ========== 解析播放地址 ==========
   ipcMain.handle('source:resolve-url', async (_event, req: ResolveRequest) => {
     try {
-      const result = await sourceRegistry.resolveUrl({
+      const result = await pluginRouter.resolveUrl({
         pluginId: req.pluginId,
         providerId: req.providerId,
         sourceKey: req.sourceKey,
         id: req.id,
         ref: req.ref,
-        quality: (req.quality || '320k') as QualityId
+        quality: (req.quality || '320k') as QualityId,
+        qualityOverride: req.qualityOverride
       })
       // 插件返回值可能来自 vm 沙箱（Proxy / 类实例），必须收敛为纯数据再回传
       return { success: true, result: toSerializable(result) }
@@ -156,7 +182,7 @@ export function registerPluginSourceHandlers(): void {
   // ========== 歌词 ==========
   ipcMain.handle('source:lyric', async (_event, req: LyricRequest) => {
     try {
-      const result = await sourceRegistry.lyric(req)
+      const result = await pluginRouter.lyric(req)
       return { success: true, result: toSerializable(result) }
     } catch (err: any) {
       return { success: false, error: err.message }
@@ -166,7 +192,7 @@ export function registerPluginSourceHandlers(): void {
   // ========== 封面 ==========
   ipcMain.handle('source:pic', async (_event, req: LyricRequest) => {
     try {
-      const result = await sourceRegistry.pic(req)
+      const result = await pluginRouter.pic(req)
       return { success: true, result: toSerializable(result) }
     } catch (err: any) {
       return { success: false, error: err.message }

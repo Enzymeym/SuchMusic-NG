@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, watch, nextTick, ref, defineAsyncComponent } from 'vue'
 import type { LyricLine as CoreLyricLine } from '@applemusic-like-lyrics/core'
-import { LyricsView, parseLyrics } from 'suth-lyric-kit'
+import { LyricsView } from 'suth-lyric-kit'
+import type { ParsedLyrics, LyricLine as SimpleLyricLine } from 'suth-lyric-kit'
 const AMLLLyricPlayer = defineAsyncComponent(() => import('../AMLL/LyricPlayer.vue'))
 import type { LyricPlayerRef } from '../AMLL/LyricPlayer.vue'
 import { parseLyricsToCore } from '../../../utils/lyric/lyricParser'
@@ -53,44 +54,51 @@ const props = defineProps({
   }
 })
 
-const suthLyrics = computed(() => {
-  if (props.mode === 'suth') {
-    if (typeof props.lyrics === 'string') {
-      const parsed = parseLyrics(props.lyrics)
-      if (props.translatedLyrics && parsed.lines.length > 0) {
-        try {
-          const translatedParsed = parseLyrics(props.translatedLyrics)
-          const maxLen = Math.min(parsed.lines.length, translatedParsed.lines.length)
-          for (let i = 0; i < maxLen; i++) {
-            const translatedText = translatedParsed.lines[i]!.text
-            if (translatedText) {
-              parsed.lines[i] = { ...parsed.lines[i], translation: translatedText }
-            }
-          }
-        } catch {
-          // ignore
-        }
-      }
-      return parsed
-    }
-    if (typeof props.lyrics === 'object' && !Array.isArray(props.lyrics)) {
-      return props.lyrics as any
-    }
-  }
-  return null
-})
-
-const appleLyrics = computed<CoreLyricLine[]>(() => {
-  if (props.mode === 'apple') {
-    if (Array.isArray(props.lyrics)) {
-      return props.lyrics
-    }
-    if (typeof props.lyrics === 'string') {
-      const translatedContent = props.translatedLyrics || playerStore.currentSong?.translatedLyrics || ''
-      return parseLyricsToCore(props.lyrics, translatedContent, playerStore.currentSong?.title)
-    }
+/**
+ * 统一解析结果（CoreLyricLine，毫秒时间戳）
+ *
+ * AMLL 与简洁列表两种渲染都必须基于这一份数据：歌词实际来源是 LRC / YRC（网易云逐字）
+ * / TTML / QRC，只有 `parseLyricsToCore` 能全部识别，且会顺带过滤署名行、合并翻译。
+ * 曾经简洁列表直接用 suth-lyric-kit 的 `parseLyrics`（只认 `[mm:ss.xx]` 标准 LRC），
+ * 关闭 AMLL 后 YRC/TTML/QRC 一个时间戳都匹配不上，整屏歌词变成原始 JSON/时间戳片段，
+ * 表现为「关掉 AMLL 就没有歌词」。
+ */
+const coreLyrics = computed<CoreLyricLine[]>(() => {
+  if (Array.isArray(props.lyrics)) return props.lyrics as CoreLyricLine[]
+  if (typeof props.lyrics === 'string' && props.lyrics.trim()) {
+    const translatedContent =
+      props.translatedLyrics || playerStore.currentSong?.translatedLyrics || ''
+    return parseLyricsToCore(props.lyrics, translatedContent, playerStore.currentSong?.title)
   }
   return []
+})
+
+const appleLyrics = computed<CoreLyricLine[]>(() =>
+  props.mode === 'apple' ? coreLyrics.value : []
+)
+
+/**
+ * CoreLyricLine（毫秒）→ 简洁列表的 LyricLine（秒）
+ * 无论原始格式是 LRC/YRC/TTML/QRC，行文本都从词序列拼出，保证内容与 AMLL 一致；
+ * 翻译已在解析阶段按时间戳合并到每行，这里直接透传。
+ */
+function toSimpleLyricLine(line: CoreLyricLine): SimpleLyricLine {
+  return {
+    time: line.startTime / 1000,
+    text: (line.words ?? []).map((w) => w.word).join(''),
+    translation: line.translatedLyric || undefined
+  }
+}
+
+const suthLyrics = computed<ParsedLyrics | null>(() => {
+  if (props.mode !== 'suth') return null
+  // 调用方直接传入已解析对象时原样使用（兼容传入 ParsedLyrics 的场景）
+  if (props.lyrics && typeof props.lyrics === 'object' && !Array.isArray(props.lyrics)) {
+    return props.lyrics as ParsedLyrics
+  }
+  const lines = coreLyrics.value
+  if (!lines.length) return null
+  return { lines: lines.map(toSimpleLyricLine) }
 })
 
 const currentTimeMs = computed(() => Math.round(props.currentTime * 1000))
@@ -192,7 +200,8 @@ watch([hidePassedLines, appleLyrics], ([enabled]) => {
         :current-time="currentTime"
         :font-size="fontSize"
         :line-gap="lineGap"
-        :active-line-color="activeLineColor"
+        :active-color="activeLineColor"
+        :playing="playerStore.isPlaying && windowActive"
       />
       <AMLLLyricPlayer
         v-else

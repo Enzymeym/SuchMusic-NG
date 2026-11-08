@@ -87,7 +87,9 @@ if (import.meta.hot) {
     webAudioOutputEngine.stop()
     webAudioOutputEngine.dispose()
     // 同时通过 IPC 紧急停止主进程中的原生音频引擎（WASAPI 等）
-    emergencyStopNativeAudio()
+    // 注意：HMR 不会重建 preload 上下文，其缓存的 engineId 必须继续有效，
+    // 因此这里**只停止、不销毁**引擎（destroy: false）。
+    emergencyStopNativeAudio(false)
   })
 }
 
@@ -96,18 +98,20 @@ if (import.meta.hot) {
 window.addEventListener('beforeunload', () => {
   webAudioOutputEngine.stop()
   webAudioOutputEngine.dispose()
-  emergencyStopNativeAudio()
+  // 页面即将重建，可以安全销毁本窗口的引擎，避免主进程残留孤儿引擎
+  emergencyStopNativeAudio(true)
 })
 
 /**
  * 紧急停止主进程中的原生音频引擎（Fire-and-forget）
  * 使用 ipcRenderer.send 确保不依赖异步响应，消息发出即成功
+ * @param destroy 是否同时销毁引擎实例（页面卸载为 true，HMR 为 false）
  */
-function emergencyStopNativeAudio(): void {
+function emergencyStopNativeAudio(destroy: boolean): void {
   try {
     const { ipcRenderer } = window.electron || (window as any).electron || {}
     if (ipcRenderer) {
-      ipcRenderer.send('audio-engine:emergency-stop-all')
+      ipcRenderer.send('audio-engine:emergency-stop-all', { destroy })
     }
   } catch {
     // 静默失败，页面即将卸载

@@ -2,6 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { NCard, NSwitch, NSlider, NSelect, NButton, NButtonGroup, NAlert, NInputNumber } from 'naive-ui'
 import { useSettingsStore } from '../../../stores/settingsStore'
+import { useAudioEngine } from '../../../composables/useAudioEngine'
 import SettingsMorphaeumSection from './SettingsMorphaeumSection.vue'
 import {
   AudioOutputModeManager,
@@ -27,6 +28,22 @@ const volumeBoostPercent = computed({
 
 /// 输出模式管理器实例
 const outputManager = new AudioOutputModeManager()
+
+/// 音效引擎（全局单例）：切换输出模式后要把当前音效设置重放到新后端
+const soundEngine = useAudioEngine()
+
+/**
+ * 切换后端后重新下发音效设置。
+ * 新后端（新建的 WASAPI 引擎 / 未接线的 Web Audio DSP 链）里没有任何参数，
+ * 不重放就会出现「音效面板显示已开启，实际没效果」。
+ */
+async function reapplySoundEffects() {
+  try {
+    await soundEngine.reapplyCurrentState()
+  } catch (err) {
+    console.warn('[Settings] 重新应用音效设置失败:', err)
+  }
+}
 
 /// 可用音频设备列表
 const audioDevices = ref<AudioDevice[]>([])
@@ -114,13 +131,23 @@ async function refreshDevices() {
   try {
     const devices = await outputManager.enumerateDevices()
     audioDevices.value = devices
-    // 同步默认设备信息到 store：此前只在切换模式时写入，
-    // 导致 store 中设备名为空、UI 显示与默认设备不一致
-    if (!settingsStore.playback.audioOutputDeviceId) {
-      const def = devices.find((d) => d.isDefault) || devices[0]
-      if (def) {
-        settingsStore.playback.audioOutputDeviceId = def.id
-        settingsStore.playback.audioOutputDeviceName = def.name
+
+    // 校验设置中记录的设备是否仍然存在：
+    // - 为空（首次启动 / 从 Web Audio 切过来）→ 自动选中系统默认设备
+    // - 已失效（外置声卡或 HDMI 被拔出、设备被禁用）→ 同样回退到默认设备
+    // 否则后续切换模式会把失效 ID 传给原生层，导致初始化失败、切不过去。
+    const storedId = settingsStore.playback.audioOutputDeviceId
+    const stored = storedId ? devices.find((d) => d.id === storedId) : undefined
+    if (stored) {
+      settingsStore.playback.audioOutputDeviceName = stored.name
+    } else if (devices.length > 0) {
+      const fallback = devices.find((d) => d.isDefault) || devices[0]
+      if (fallback) {
+        if (storedId) {
+          console.warn('[Settings] 记录的输出设备已不存在，自动切换到:', fallback.name)
+        }
+        settingsStore.playback.audioOutputDeviceId = fallback.id
+        settingsStore.playback.audioOutputDeviceName = fallback.name
       }
     }
     modeSwitchError.value = '' // 刷新设备时清除错误
@@ -146,6 +173,7 @@ async function applyOutputMode(mode: AudioOutputMode, deviceId?: string) {
       if (result.success) {
         settingsStore.playback.audioOutputMode = 'webaudio'
         modeSwitchError.value = ''
+        await reapplySoundEffects()
       }
     } catch (err) {
       modeSwitchError.value = cleanRustError(String(err))
@@ -155,33 +183,43 @@ async function applyOutputMode(mode: AudioOutputMode, deviceId?: string) {
     return
   }
 
-  // WASAPI 模式需要先确认可用
+  // WASAPI 模式需要先确认可用；若探测失败过，再强制重新检测一次，
+  // 避免因启动早期原生模块尚未就绪导致按钮点了没反应
   if (!wasapiAvailable.value) {
-    return
+    await probeWasapi(true)
+    if (!wasapiAvailable.value) {
+      modeSwitchError.value = wasapiUnavailableReason.value || 'WASAPI 不可用'
+      return
+    }
   }
 
   modeSwitching.value = true
   try {
+    // 切换前确保设备列表已加载，并在未选择 / 设备失效时自动选中默认设备，
+    // 避免把空 ID 或已拔出的设备 ID 交给原生层导致切换失败
+    if (audioDevices.value.length === 0) {
+      await refreshDevices()
+    }
+    const resolved = await outputManager.resolveDeviceId(
+      deviceId || settingsStore.playback.audioOutputDeviceId
+    )
+
     const result = await outputManager.switchMode(mode, {
       sampleRate: 44100,
       channels: 2,
-      deviceId: deviceId || settingsStore.playback.audioOutputDeviceId || undefined
+      deviceId: resolved.deviceId
     })
 
     if (result.success) {
-      settingsStore.playback.audioOutputMode = mode
-      modeSwitchError.value = ''
-      // 同步引擎使用的实际设备信息到 store
-      const engDevices = await outputManager.enumerateDevices()
-      const actualDevice = engDevices.find(
-        (d) => d.id === settingsStore.playback.audioOutputDeviceId
-      )
-      if (!actualDevice && engDevices.length > 0) {
-        // 未指定设备时，引擎使用了默认设备，同步其名称
-        const defaultDev = engDevices.find((d) => d.isDefault) || engDevices[0]
-        settingsStore.playback.audioOutputDeviceId = defaultDev.id
-        settingsStore.playback.audioOutputDeviceName = defaultDev.name
+      // 独占模式可能被底层回退为共享模式，以引擎实际生效的模式为准
+      settingsStore.playback.audioOutputMode = result.mode ?? mode
+      if (result.deviceId) {
+        settingsStore.playback.audioOutputDeviceId = result.deviceId
+        settingsStore.playback.audioOutputDeviceName =
+          result.deviceName || resolved.deviceName || settingsStore.playback.audioOutputDeviceName
       }
+      modeSwitchError.value = ''
+      await reapplySoundEffects()
     } else {
       console.warn('[Settings] 模式切换失败:', result.error)
       // 不将 wasapiAvailable 置为 false — 枚举成功就说明 WASAPI 可用
@@ -189,12 +227,14 @@ async function applyOutputMode(mode: AudioOutputMode, deviceId?: string) {
       modeSwitchError.value = result.error || '未知'
       // 回退到 Web Audio
       settingsStore.playback.audioOutputMode = 'webaudio'
+      await reapplySoundEffects()
     }
   } catch (err) {
     const msg = cleanRustError(String(err))
     console.warn('[Settings] 模式切换异常:', msg)
     modeSwitchError.value = msg
     settingsStore.playback.audioOutputMode = 'webaudio'
+    await reapplySoundEffects()
   } finally {
     modeSwitching.value = false
   }

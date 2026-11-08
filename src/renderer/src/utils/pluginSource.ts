@@ -7,8 +7,16 @@
 import type { PlayerSong } from '../stores/playerStore'
 import type { PlaylistTrack } from '../stores/playlistStore'
 
-/** 归一化音质标识（与主进程 QualityId 对齐） */
-export type SourceQuality = '128k' | '320k' | 'flac' | 'flac24bit' | 'hires'
+/** 归一化音质标识（与主进程 QualityId 对齐，包含杜比全景声 / 母带等高档位） */
+export type SourceQuality =
+  | '128k'
+  | '320k'
+  | 'flac'
+  | 'flac24bit'
+  | 'hires'
+  | 'atmos'
+  | 'atmos_plus'
+  | 'master'
 
 /** 播放地址解析结果（与主进程 ResolveResult 对齐） */
 export interface PluginResolveResult {
@@ -54,7 +62,10 @@ export function toSourceQuality(level?: string): SourceQuality {
       return 'flac'
     case 'flac24bit':
     case 'hires':
-      return (level as SourceQuality) ?? 'flac'
+    case 'atmos':
+    case 'atmos_plus':
+    case 'master':
+      return level as SourceQuality
     case '192k':
     case '320k':
       return '320k'

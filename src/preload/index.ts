@@ -33,15 +33,7 @@ interface MediaControlStatus {
 
 // 系统媒体控制命令类型
 type MediaControlCommand =
-  | 'play'
-  | 'pause'
-  | 'toggle'
-  | 'next'
-  | 'prev'
-  | 'stop'
-  | 'seek'
-  | 'seekRelative'
-  | 'setVolume'
+  'play' | 'pause' | 'toggle' | 'next' | 'prev' | 'stop' | 'seek' | 'seekRelative' | 'setVolume'
 
 // EQ 频段设置接口
 interface EqBandSettings {
@@ -93,7 +85,44 @@ interface VersionInfo {
 class AudioEngineManager {
   private currentEngineId: string | null = null
 
+  /** 正在进行的创建请求（并发调用共享同一个 Promise，避免创建出多个引擎） */
+  private creating: Promise<{ success: boolean; engineId?: string; error?: string }> | null = null
+
+  /**
+   * 自动创建引擎时使用的默认配置
+   * 与 useAudioEngine.initialize() 保持一致：EQ / 压缩器关闭（CPU 开销大），
+   * 限制器保留防削波。
+   */
+  private static readonly DEFAULT_CONFIG: AudioEngineConfig = {
+    sampleRate: 44100,
+    bufferSize: 512,
+    channels: 2,
+    enableEq: false,
+    enableCompressor: false,
+    enableLimiter: true,
+    enableLoudness: false
+  }
+
   async create(
+    config?: AudioEngineConfig
+  ): Promise<{ success: boolean; engineId?: string; error?: string }> {
+    // 已创建则复用，避免重复创建导致主进程留下孤儿引擎
+    if (this.currentEngineId) {
+      return { success: true, engineId: this.currentEngineId }
+    }
+    // 并发创建（如两个音效面板同时初始化）共享同一个请求
+    if (this.creating) return this.creating
+
+    const pending = this.doCreate(config)
+    this.creating = pending
+    try {
+      return await pending
+    } finally {
+      this.creating = null
+    }
+  }
+
+  private async doCreate(
     config?: AudioEngineConfig
   ): Promise<{ success: boolean; engineId?: string; error?: string }> {
     const result = await ipcRenderer.invoke('audio-engine:create', config)
@@ -117,11 +146,21 @@ class AudioEngineManager {
     return result.success
   }
 
-  private ensureEngineId(): string {
-    if (!this.currentEngineId) {
-      throw new Error('音频引擎未初始化，请先调用 create()')
-    }
-    return this.currentEngineId
+  /**
+   * 获取可用的引擎 ID，未初始化时自动创建。
+   *
+   * 历史实现直接抛错「音频引擎未初始化，请先调用 create()」：应用启动时
+   * PlayerBar 恢复上次歌曲的 load 往往早于音效面板的 initialize（或引擎被
+   * destroy 过），于是首次播放必然弹出该错误。播放类接口本身都是异步的，
+   * 这里改为按需创建即可自愈，创建失败时再抛出真实原因。
+   */
+  private async ensureEngineId(): Promise<string> {
+    if (this.currentEngineId) return this.currentEngineId
+
+    const result = await this.create(AudioEngineManager.DEFAULT_CONFIG)
+    if (result.success && result.engineId) return result.engineId
+
+    throw new Error(`音频引擎初始化失败: ${result.error || '未知错误'}`)
   }
 
   // === 播放控制 ===
@@ -129,49 +168,49 @@ class AudioEngineManager {
   async load(
     filePath: string
   ): Promise<{ success: boolean; trackInfo?: TrackInfo; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:load', this.ensureEngineId(), filePath)
+    return ipcRenderer.invoke('audio-engine:load', await this.ensureEngineId(), filePath)
   }
 
   async play(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:play', this.ensureEngineId())
+    return ipcRenderer.invoke('audio-engine:play', await this.ensureEngineId())
   }
 
   async pause(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:pause', this.ensureEngineId())
+    return ipcRenderer.invoke('audio-engine:pause', await this.ensureEngineId())
   }
 
   async stop(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:stop', this.ensureEngineId())
+    return ipcRenderer.invoke('audio-engine:stop', await this.ensureEngineId())
   }
 
   async seek(positionMs: number): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:seek', this.ensureEngineId(), positionMs)
+    return ipcRenderer.invoke('audio-engine:seek', await this.ensureEngineId(), positionMs)
   }
 
   async seekAndPlay(positionMs: number): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:seek-and-play', this.ensureEngineId(), positionMs)
+    return ipcRenderer.invoke('audio-engine:seek-and-play', await this.ensureEngineId(), positionMs)
   }
 
   async setVolume(volume: number): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-volume', this.ensureEngineId(), volume)
+    return ipcRenderer.invoke('audio-engine:set-volume', await this.ensureEngineId(), volume)
   }
 
   async getVolume(): Promise<number> {
-    const result = await ipcRenderer.invoke('audio-engine:get-volume', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-volume', await this.ensureEngineId())
     return result.volume ?? 1.0
   }
 
   async setLoopMode(mode: LoopMode): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-loop-mode', this.ensureEngineId(), mode)
+    return ipcRenderer.invoke('audio-engine:set-loop-mode', await this.ensureEngineId(), mode)
   }
 
   async getLoopMode(): Promise<LoopMode> {
-    const result = await ipcRenderer.invoke('audio-engine:get-loop-mode', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-loop-mode', await this.ensureEngineId())
     return result.mode ?? 'none'
   }
 
   async getPosition(): Promise<number> {
-    const result = await ipcRenderer.invoke('audio-engine:get-position', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-position', await this.ensureEngineId())
     return result.position ?? 0
   }
 
@@ -184,23 +223,23 @@ class AudioEngineManager {
   }
 
   async isPlaying(): Promise<boolean> {
-    const result = await ipcRenderer.invoke('audio-engine:is-playing', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:is-playing', await this.ensureEngineId())
     return result.isPlaying ?? false
   }
 
   async getState(): Promise<EngineState> {
-    const result = await ipcRenderer.invoke('audio-engine:get-state', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-state', await this.ensureEngineId())
     return result.state ?? 'idle'
   }
 
   // === EQ 控制 ===
 
   async setEqEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-eq-enabled', this.ensureEngineId(), enabled)
+    return ipcRenderer.invoke('audio-engine:set-eq-enabled', await this.ensureEngineId(), enabled)
   }
 
   async isEqEnabled(): Promise<boolean> {
-    const result = await ipcRenderer.invoke('audio-engine:is-eq-enabled', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:is-eq-enabled', await this.ensureEngineId())
     return result.enabled ?? true
   }
 
@@ -210,7 +249,7 @@ class AudioEngineManager {
   ): Promise<{ success: boolean; error?: string }> {
     return ipcRenderer.invoke(
       'audio-engine:set-eq-band',
-      this.ensureEngineId(),
+      await this.ensureEngineId(),
       bandIndex,
       settings
     )
@@ -219,48 +258,48 @@ class AudioEngineManager {
   async getEqBand(bandIndex: number): Promise<EqBandSettings | null> {
     const result = await ipcRenderer.invoke(
       'audio-engine:get-eq-band',
-      this.ensureEngineId(),
+      await this.ensureEngineId(),
       bandIndex
     )
     return result.band ?? null
   }
 
   async getEqBands(): Promise<EqBandSettings[]> {
-    const result = await ipcRenderer.invoke('audio-engine:get-eq-bands', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-eq-bands', await this.ensureEngineId())
     return result.bands ?? []
   }
 
   async setEqGains(gains: number[]): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-eq-gains', this.ensureEngineId(), gains)
+    return ipcRenderer.invoke('audio-engine:set-eq-gains', await this.ensureEngineId(), gains)
   }
 
   // === 压缩器控制 ===
 
   async setCompressorEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-compressor-enabled', this.ensureEngineId(), enabled)
+    return ipcRenderer.invoke('audio-engine:set-compressor-enabled', await this.ensureEngineId(), enabled)
   }
 
   async isCompressorEnabled(): Promise<boolean> {
     const result = await ipcRenderer.invoke(
       'audio-engine:is-compressor-enabled',
-      this.ensureEngineId()
+      await this.ensureEngineId()
     )
     return result.enabled ?? true
   }
 
   async setCompressor(params: CompressorParams): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-compressor', this.ensureEngineId(), params)
+    return ipcRenderer.invoke('audio-engine:set-compressor', await this.ensureEngineId(), params)
   }
 
   async getCompressor(): Promise<CompressorParams> {
-    const result = await ipcRenderer.invoke('audio-engine:get-compressor', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-compressor', await this.ensureEngineId())
     return result.params ?? { thresholdDb: -24, ratio: 4, attackMs: 10, releaseMs: 100, kneeDb: 6 }
   }
 
   async getCompressorGainReduction(): Promise<number> {
     const result = await ipcRenderer.invoke(
       'audio-engine:get-compressor-gain-reduction',
-      this.ensureEngineId()
+      await this.ensureEngineId()
     )
     return result.gainReduction ?? 0
   }
@@ -268,30 +307,30 @@ class AudioEngineManager {
   // === 限制器控制 ===
 
   async setLimiterEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-limiter-enabled', this.ensureEngineId(), enabled)
+    return ipcRenderer.invoke('audio-engine:set-limiter-enabled', await this.ensureEngineId(), enabled)
   }
 
   async isLimiterEnabled(): Promise<boolean> {
     const result = await ipcRenderer.invoke(
       'audio-engine:is-limiter-enabled',
-      this.ensureEngineId()
+      await this.ensureEngineId()
     )
     return result.enabled ?? true
   }
 
   async setLimiter(params: LimiterParams): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-limiter', this.ensureEngineId(), params)
+    return ipcRenderer.invoke('audio-engine:set-limiter', await this.ensureEngineId(), params)
   }
 
   async getLimiter(): Promise<LimiterParams> {
-    const result = await ipcRenderer.invoke('audio-engine:get-limiter', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-limiter', await this.ensureEngineId())
     return result.params ?? { ceilingDb: -0.3, releaseMs: 50 }
   }
 
   async getLimiterGainReduction(): Promise<number> {
     const result = await ipcRenderer.invoke(
       'audio-engine:get-limiter-gain-reduction',
-      this.ensureEngineId()
+      await this.ensureEngineId()
     )
     return result.gainReduction ?? 0
   }
@@ -299,11 +338,11 @@ class AudioEngineManager {
   // === 等响度控制 ===
 
   async setLoudness(params: LoudnessParams): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-loudness', this.ensureEngineId(), params)
+    return ipcRenderer.invoke('audio-engine:set-loudness', await this.ensureEngineId(), params)
   }
 
   async getLoudness(): Promise<LoudnessParams> {
-    const result = await ipcRenderer.invoke('audio-engine:get-loudness', this.ensureEngineId())
+    const result = await ipcRenderer.invoke('audio-engine:get-loudness', await this.ensureEngineId())
     return (
       result.params ?? {
         enabled: false,
@@ -315,15 +354,30 @@ class AudioEngineManager {
   }
 
   async setLoudnessEnabled(enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:set-loudness-enabled', this.ensureEngineId(), enabled)
+    return ipcRenderer.invoke('audio-engine:set-loudness-enabled', await this.ensureEngineId(), enabled)
   }
 
   async isLoudnessEnabled(): Promise<boolean> {
     const result = await ipcRenderer.invoke(
       'audio-engine:is-loudness-enabled',
-      this.ensureEngineId()
+      await this.ensureEngineId()
     )
     return result.enabled ?? false
+  }
+
+  // === 低频增压（virtual bass）===
+
+  async setVirtualBass(params: {
+    enabled: boolean
+    wetGain: number
+    gamma: number
+    sigma: number
+  }): Promise<{ success: boolean; error?: string }> {
+    return ipcRenderer.invoke(
+      'audio-engine:set-virtual-bass',
+      await this.ensureEngineId(),
+      params
+    )
   }
 
   // === 生命周期 ===
@@ -342,7 +396,7 @@ class AudioEngineManager {
   }
 
   async reset(): Promise<{ success: boolean; error?: string }> {
-    return ipcRenderer.invoke('audio-engine:reset', this.ensureEngineId())
+    return ipcRenderer.invoke('audio-engine:reset', await this.ensureEngineId())
   }
 
   static async getVersion(): Promise<VersionInfo> {
@@ -376,12 +430,93 @@ function toCloneable<T>(value: T, seen = new WeakSet<object>()): T {
   return out as T
 }
 
+/** 在回调函数上挂 channel → 包装函数 的映射，供 on/off 精确移除监听器 */
+const IPC_WRAPPER_REGISTRY = '__audioEngineIpcWrappers'
+
+function getIpcRegistry(
+  callback: (...args: any[]) => void
+): Map<string, (...args: any[]) => void> {
+  const holder = callback as unknown as Record<string, Map<string, (...args: any[]) => void>>
+  if (!holder[IPC_WRAPPER_REGISTRY]) {
+    holder[IPC_WRAPPER_REGISTRY] = new Map()
+  }
+  return holder[IPC_WRAPPER_REGISTRY]
+}
+
+/** audioEngine 允许订阅的通道白名单 */
+const AUDIO_ENGINE_CHANNELS = [
+  'audio-engine:ended',
+  'audio-engine:error',
+  'audio-engine:progress',
+  'audio-engine:stateChange'
+]
+
+function audioEngineOn(channel: string, callback: (...args: any[]) => void): void {
+  if (!AUDIO_ENGINE_CHANNELS.includes(channel)) return
+  // 包装函数按 channel 缓存在 callback 上，否则 off() 用原 callback 永远删不掉监听器
+  // （ipcRenderer.removeListener 按函数引用匹配），会导致每次重挂载累积一个监听。
+  const registry = getIpcRegistry(callback)
+  const prev = registry.get(channel)
+  if (prev) ipcRenderer.removeListener(channel, prev)
+  const wrapper = (_event: any, ...args: any[]) => callback(...args)
+  registry.set(channel, wrapper)
+  ipcRenderer.on(channel, wrapper)
+}
+
+function audioEngineOff(channel: string, callback: (...args: any[]) => void): void {
+  const registry = getIpcRegistry(callback)
+  const wrapper = registry.get(channel)
+  if (wrapper) {
+    ipcRenderer.removeListener(channel, wrapper)
+    registry.delete(channel)
+    return
+  }
+  // 兼容直接传入真实监听器（非 audioEngineOn 注册）的调用
+  ipcRenderer.removeListener(channel, callback)
+}
+
+/** 订阅播放进度推送，返回取消订阅函数 */
+function subscribeProgress(
+  callback: (payload: { engineId: string; position: number }) => void
+): () => void {
+  audioEngineOn('audio-engine:progress', callback as (...args: any[]) => void)
+  return () => audioEngineOff('audio-engine:progress', callback as (...args: any[]) => void)
+}
+
 const api = {
   rustAudio: audioEngineManager,
 
   /** 内存监控：获取主进程内存统计报告 */
   memory: {
     getReport: () => ipcRenderer.invoke('memory:get-report')
+  },
+
+  /**
+   * 本地曲库。数据源是主进程 SQLite，渲染层只做展示与搜索。
+   * 订阅方法统一返回 unsubscribe 闭包，避免组件重挂载时监听器累积。
+   */
+  library: {
+    bootstrap: () => ipcRenderer.invoke('library:bootstrap'),
+    scan: (roots?: string[]) => ipcRenderer.invoke('library:scan', roots),
+    cancelScan: () => ipcRenderer.invoke('library:scan-cancel'),
+    folderTracks: (folderId: number, options?: Record<string, unknown>) =>
+      ipcRenderer.invoke('library:folder-tracks', folderId, toCloneable(options)),
+    folderChildren: (parentPath: string) =>
+      ipcRenderer.invoke('library:folder-children', parentPath),
+    updateFolder: (folderId: number, patch: Record<string, unknown>) =>
+      ipcRenderer.invoke('library:folder-update', folderId, toCloneable(patch)),
+    reloadTracks: (filePaths: string[]) => ipcRenderer.invoke('library:reload-tracks', filePaths),
+    reveal: (filePath: string) => ipcRenderer.invoke('library:reveal', filePath),
+    onScanProgress: (callback: (progress: unknown) => void): (() => void) => {
+      const wrapper = (_event: unknown, payload: unknown): void => callback(payload)
+      ipcRenderer.on('library:scan-progress', wrapper)
+      return () => ipcRenderer.removeListener('library:scan-progress', wrapper)
+    },
+    onScanDone: (callback: (event: unknown) => void): (() => void) => {
+      const wrapper = (_event: unknown, payload: unknown): void => callback(payload)
+      ipcRenderer.on('library:scan-done', wrapper)
+      return () => ipcRenderer.removeListener('library:scan-done', wrapper)
+    }
   },
 
   audioEngine: {
@@ -427,24 +562,24 @@ const api = {
     setLoudnessEnabled: (enabled: boolean) => audioEngineManager.setLoudnessEnabled(enabled),
     isLoudnessEnabled: () => audioEngineManager.isLoudnessEnabled(),
 
+    setVirtualBass: (params: {
+      enabled: boolean
+      wetGain: number
+      gamma: number
+      sigma: number
+    }) => audioEngineManager.setVirtualBass(params),
+
+    /** 读取 Windows 系统主音量（0~1，只读）；不支持/失败时 volume 为 null */
+    getSystemVolume: () => ipcRenderer.invoke('system:get-volume'),
+
     reset: () => audioEngineManager.reset(),
 
     readAudioFile: (filePath: string) => audioEngineManager.readAudioFile(filePath),
 
-    on: (channel: string, callback: (...args: any[]) => void) => {
-      const validChannels = [
-        'audio-engine:ended',
-        'audio-engine:error',
-        'audio-engine:progress',
-        'audio-engine:stateChange'
-      ]
-      if (validChannels.includes(channel)) {
-        ipcRenderer.on(channel, (_event, ...args) => callback(...args))
-      }
-    },
-    off: (channel: string, callback: (...args: any[]) => void) => {
-      ipcRenderer.removeListener(channel, callback)
-    },
+    on: audioEngineOn,
+    off: audioEngineOff,
+    /** 订阅播放进度推送（主进程 250ms 一次），返回取消订阅函数 */
+    onProgress: subscribeProgress,
 
     getGainReductions: () =>
       Promise.resolve({
@@ -512,7 +647,15 @@ const api = {
     logout: (userId?: string) => ipcRenderer.invoke('netease:logout', userId),
     playlistDetail: (id: number) => ipcRenderer.invoke('netease:playlist-detail', id),
     playlistTracks: (id: number) => ipcRenderer.invoke('netease:playlist-tracks', id),
-    userPlaylists: () => ipcRenderer.invoke('netease:user-playlists')
+    userPlaylists: () => ipcRenderer.invoke('netease:user-playlists'),
+    dailySongs: () => ipcRenderer.invoke('netease:daily-songs'),
+    recommendPlaylists: (limit = 12) => ipcRenderer.invoke('netease:recommend-playlists', limit),
+    artistDetail: (id: number) => ipcRenderer.invoke('netease:artist-detail', id),
+    artistSongs: (id: number, offset = 0, limit = 200) =>
+      ipcRenderer.invoke('netease:artist-songs', id, offset, limit),
+    artistAlbums: (id: number, offset = 0, limit = 100) =>
+      ipcRenderer.invoke('netease:artist-albums', id, offset, limit),
+    albumTracks: (id: number) => ipcRenderer.invoke('netease:album-tracks', id)
   },
 
   // 在线音频缓存（缓存目录管理 / 统计 / 清理）
@@ -527,7 +670,8 @@ const api = {
     update: (status: MediaControlStatus) => ipcRenderer.send('media-control:update', status),
     getStatus: () => ipcRenderer.invoke('media-control:get-status'),
     onCommand: (cb) => {
-      const handler = (_event: any, payload: { command: MediaControlCommand; value?: number }) => cb(payload)
+      const handler = (_event: any, payload: { command: MediaControlCommand; value?: number }) =>
+        cb(payload)
       // 保存包装后的 handler 引用，供 offCommand 精确移除对应监听器
       ;(cb as any)._mediaControlHandler = handler
       ipcRenderer.on('media-control:command', handler)
@@ -604,25 +748,37 @@ const api = {
     }
   },
 
-  // ========== 插件系统 ==========
+  // ========== 插件系统（v2） ==========
   plugins: {
-    /** 加载插件 */
-    load: (filePath: string) => ipcRenderer.invoke('plugin:load', filePath),
+    /** 已安装的插件列表 */
+    list: () => ipcRenderer.invoke('plugin:list'),
+    /** 选择插件文件（只弹文件选择框，不安装） */
+    selectFile: () => ipcRenderer.invoke('plugin:select-file'),
+    /** 仅解析插件头（安装前预览） */
+    inspect: (filePath: string) => ipcRenderer.invoke('plugin:inspect', filePath),
+    /** 安装 / 更新 v2 插件 */
+    install: (filePath: string) => ipcRenderer.invoke('plugin:install', filePath),
+    /** 统一导入：自动识别 v2 / 洛雪 / 澜音 */
+    importFile: (filePath: string) => ipcRenderer.invoke('plugin:import', filePath),
     /** 移除插件 */
     remove: (pluginId: string) => ipcRenderer.invoke('plugin:remove', pluginId),
-    /** 设置活跃插件 */
-    setActive: (pluginId: string | null) => ipcRenderer.invoke('plugin:set-active', pluginId),
-    /** 调用插件方法 */
-    call: (pluginId: string, methodName: string, ...args: any[]) =>
-      ipcRenderer.invoke('plugin:call', pluginId, methodName, ...args),
-    /** 检查插件更新 */
+    /** 启用 / 停用 */
+    setEnabled: (pluginId: string, enabled: boolean) =>
+      ipcRenderer.invoke('plugin:set-enabled', pluginId, enabled),
+    /** 重新加载（改完脚本后重跑） */
+    reload: (pluginId: string) => ipcRenderer.invoke('plugin:reload', pluginId),
+    /** 通过 @updateUrl 检查更新 */
     checkUpdate: (pluginId: string) => ipcRenderer.invoke('plugin:check-update', pluginId),
-    /** 获取已加载插件列表 */
-    list: () => ipcRenderer.invoke('plugin:list'),
-    /** 选择插件文件 */
-    selectFile: () => ipcRenderer.invoke('plugin:select-file'),
-    /** 选择目录 */
-    selectDirectory: () => ipcRenderer.invoke('plugin:select-directory'),
+    /** 读取声明式设置（schema + 当前值） */
+    getSettings: (pluginId: string) => ipcRenderer.invoke('plugin:get-settings', pluginId),
+    /** 写入一项设置 */
+    setSetting: (pluginId: string, key: string, value: any) =>
+      ipcRenderer.invoke('plugin:set-setting', pluginId, key, value),
+    /** 读取插件日志 */
+    getLogs: (pluginId: string, limit?: number) =>
+      ipcRenderer.invoke('plugin:logs', pluginId, limit),
+    /** 清空插件日志 */
+    clearLogs: (pluginId: string) => ipcRenderer.invoke('plugin:clear-logs', pluginId),
 
     // ========== 事件监听 ==========
     /** 监听插件通知 */
@@ -633,20 +789,12 @@ const api = {
         ipcRenderer.removeListener('plugin:notice', handler)
       }
     },
-    /** 监听插件日志 */
+    /** 监听插件日志（全局，供主进程 console 镜像） */
     onLog: (callback: (level: string, ...args: any[]) => void) => {
       const handler = (_event: any, level: string, ...args: any[]) => callback(level, ...args)
       ipcRenderer.on('plugin:log', handler)
       return () => {
         ipcRenderer.removeListener('plugin:log', handler)
-      }
-    },
-    /** 监听敏感操作确认请求 */
-    onConfirmRequest: (callback: (request: any) => void) => {
-      const handler = (_event: any, request: any) => callback(request)
-      ipcRenderer.on('plugin:request-confirm', handler)
-      return () => {
-        ipcRenderer.removeListener('plugin:request-confirm', handler)
       }
     },
     /** 监听批量敏感操作确认请求 */
@@ -657,9 +805,6 @@ const api = {
         ipcRenderer.removeListener('plugin:request-batch-confirm', handler)
       }
     },
-    /** 响应敏感操作确认 */
-    respondConfirm: (response: { requestId: string; confirmed: boolean; skipSession: boolean }) =>
-      ipcRenderer.invoke('plugin:confirm-response', response),
     /** 响应批量敏感操作确认 */
     respondBatchConfirm: (response: {
       requestId: string
@@ -667,24 +812,6 @@ const api = {
       rejectedOpIds?: string[]
       skipSession: boolean
     }) => ipcRenderer.invoke('plugin:batch-confirm-response', response),
-    /** 监听插件 emit 事件 */
-    onEmit: (callback: (data: { pluginId: string; eventName: string; args: any[] }) => void) => {
-      const handler = (_event: any, data: any) => callback(data)
-      ipcRenderer.on('plugin:emit', handler)
-      return () => {
-        ipcRenderer.removeListener('plugin:emit', handler)
-      }
-    },
-    /** 监听插件 props 变更（setProps 触发） */
-    onPropsChanged: (
-      callback: (data: { pluginId: string; props: Record<string, any> }) => void
-    ) => {
-      const handler = (_event: any, data: any) => callback(data)
-      ipcRenderer.on('plugin:props-changed', handler)
-      return () => {
-        ipcRenderer.removeListener('plugin:props-changed', handler)
-      }
-    },
 
     // ========== 歌单操作 ==========
     /** 监听歌单操作请求 */
@@ -716,9 +843,13 @@ const api = {
     setEnabled: (pluginId: string, enabled: boolean) =>
       ipcRenderer.invoke('source:set-enabled', pluginId, enabled),
     /** 单插件偏好：启用的音乐源 / 首选音质 */
-    setPreferences: (pluginId: string, patch: { sources?: string[] | null; quality?: string | null }) =>
-      ipcRenderer.invoke('source:set-preferences', pluginId, toCloneable(patch)),
-    /** 搜索（插件源） */
+    setPreferences: (
+      pluginId: string,
+      patch: { sources?: string[] | null; quality?: string | null }
+    ) => ipcRenderer.invoke('source:set-preferences', pluginId, toCloneable(patch)),
+    /** 可搜索来源目录（v2 插件的 musicSearch 源 + 澜音 provider） */
+    listSources: () => ipcRenderer.invoke('source:list-sources'),
+    /** 搜索（统一入口，按 key 路由到对应插件生态） */
     search: (req: any) => ipcRenderer.invoke('source:search', toCloneable(req)),
     /** 解析播放地址 */
     resolveUrl: (req: any) => ipcRenderer.invoke('source:resolve-url', toCloneable(req)),

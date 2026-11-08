@@ -200,6 +200,11 @@ export class TransitionController {
   onProgress(positionMs: number): void {
     if (!this.active || this.executed) return
 
+    // 引擎已有一次交叉淡化在飞行中：本轮过渡已经执行，控制器状态可能已被上一轮
+    // 收尾/复位（executed 已清）。此时绝不能再预解码或排程新的过渡——
+    // 再排一次会把新的 sourceB 叠加到正在淡变的两路音源上，既串曲又直接爆音。
+    if (audioEngine.isCrossfading) return
+
     // 过渡计划尚未就绪：预解码时间预算守卫——距最晚触发点不足 TRIGGER_GUARD_MS
     // 时主动放弃预解码（本曲走常规硬切），避免解码/分析卡住时过渡无限等待
     if (!this.plan) {
@@ -306,6 +311,8 @@ export class TransitionController {
     if (!this.active || this.pendingSong || this.nextUnavailable || this.preparing) {
       return
     }
+    // 交叉淡化进行中：nextBuffer 正被在飞的过渡占用，预解码会把它覆盖掉
+    if (audioEngine.isCrossfading) return
 
     const next = this.player.getNextSong()
     if (!next) {
@@ -548,6 +555,16 @@ export class TransitionController {
   /** 执行过渡（统一为双源交叉淡化：两首歌同时淡入和淡出） */
   private executeTransition(currentPositionMs: number): void {
     if (this.executed || !this.pendingSong || !this.plan) return
+
+    // 引擎已在交叉淡化中：说明过渡已经排程/执行过（控制器状态可能刚被复位）。
+    // 此时既不能重复 beginCrossfade（会叠出一路新音源 → 爆音），
+    // 也不能走 rollback（rollback 会清掉 pendingSong，导致完成回调无处落地，
+    // player.isTransitioning 永久卡在 true，handleSongEnd 之后一直早退）。
+    if (audioEngine.isCrossfading) {
+      this.executed = true
+      return
+    }
+
     this.executed = true
     this.player.setTransitioning(true)
 
@@ -609,7 +626,14 @@ export class TransitionController {
 
   /** 交叉淡化完成：sourceB 已接管播放，更新 store 并开启新循环 */
   private finishTransition(): void {
-    if (!this.executed || !this.pendingSong) return
+    if (!this.executed || !this.pendingSong) {
+      // 控制器状态已被 abort/rollback 清掉，但引擎确实完成了一次交叉淡化
+      // （例如过渡途中被打断后又自行收尾）。这里必须把 isTransitioning 复位：
+      // 否则 store 永久停在"过渡中"，handleSongEnd 首行即早退，播完不再切歌，
+      // 表现为 UI 显示播放中而音频静默。
+      if (!audioEngine.isCrossfading) this.player.setTransitioning(false)
+      return
+    }
     const next = this.pendingSong
     const nextIndex = this.pendingIndex
 

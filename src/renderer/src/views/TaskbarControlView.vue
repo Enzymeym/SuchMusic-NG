@@ -582,6 +582,13 @@ onUnmounted(() => {
 .progress-wrap.visible {
   opacity: 1;
   pointer-events: auto;
+  /* 悬停时控制按钮浮出，进度区让出按钮宽度（3×26 + 2×6 + 8 间距） */
+  padding-right: 98px;
+}
+
+.content.align-left .progress-wrap.visible {
+  padding-right: 0;
+  padding-left: 98px;
 }
 
 .time {
@@ -615,13 +622,25 @@ onUnmounted(() => {
 }
 
 .controls {
+  /* 绝对定位：不参与 flex 布局，否则这组「仅悬停可见」的按钮会长期占住约 94px
+     宽度，使歌词区域到不了窗口右边缘（表现为右侧一片空白、歌词被提前截断）。
+     悬停时按钮浮在右侧留白之上，此时歌词已淡出，不会互相遮挡。 */
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-left: 4px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.25s ease;
+}
+
+/* 居左对齐时内容翻转，按钮浮在左侧 */
+.content.align-left .controls {
+  right: auto;
+  left: 0;
 }
 
 .controls.visible {

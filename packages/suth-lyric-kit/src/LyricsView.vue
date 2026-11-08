@@ -12,6 +12,8 @@ const props = withDefaults(
     enableBlur?: boolean
     enableSpring?: boolean
     activeColor?: string
+    /** 是否正在播放。为 false 时停止平滑时钟的逐帧插值（暂停仍 60fps 空转很耗 CPU） */
+    playing?: boolean
   }>(),
   {
     fontSize: 26,
@@ -19,7 +21,8 @@ const props = withDefaults(
     letterSpacing: 0,
     enableBlur: true,
     enableSpring: true,
-    activeColor: '#ffffff'
+    activeColor: '#ffffff',
+    playing: true
   }
 )
 
@@ -30,7 +33,7 @@ const emit = defineEmits<{
 // Smooth time system
 const smoothTime = ref(props.currentTime)
 let lastSysTime = 0
-let timeRafId = 0
+let timeRafId: number | null = null
 
 const updateSmoothTime = () => {
   const now = performance.now()
@@ -47,13 +50,48 @@ const updateSmoothTime = () => {
   timeRafId = requestAnimationFrame(updateSmoothTime)
 }
 
-onMounted(() => {
+/** 启动平滑时钟（幂等）。仅播放中且窗口可见时运行。 */
+const startSmoothTimeLoop = () => {
+  if (timeRafId !== null) return
+  if (!props.playing || (typeof document !== 'undefined' && document.hidden)) return
   lastSysTime = performance.now()
   timeRafId = requestAnimationFrame(updateSmoothTime)
+}
+
+/** 停止平滑时钟并吸附到当前时间，避免暂停后残留插值漂移 */
+const stopSmoothTimeLoop = () => {
+  if (timeRafId !== null) {
+    cancelAnimationFrame(timeRafId)
+    timeRafId = null
+  }
+  smoothTime.value = props.currentTime
+}
+
+const syncSmoothTimeLoop = () => {
+  if (props.playing && !(typeof document !== 'undefined' && document.hidden)) {
+    startSmoothTimeLoop()
+  } else {
+    stopSmoothTimeLoop()
+  }
+}
+
+const handleVisibilityChange = () => {
+  syncSmoothTimeLoop()
+}
+
+watch(() => props.playing, syncSmoothTimeLoop)
+
+onMounted(() => {
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  syncSmoothTimeLoop()
 })
 
 onUnmounted(() => {
-  cancelAnimationFrame(timeRafId)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  if (timeRafId !== null) {
+    cancelAnimationFrame(timeRafId)
+    timeRafId = null
+  }
 })
 
 // Sync base time

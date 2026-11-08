@@ -48,6 +48,9 @@ const EXPECTED = [
     file: 'music_tag_reader.node',
     label: '标签读取',
     exports: ['readTags'],
+    // 批量接口是性能优化（曲库扫描一次读一批），旧二进制没有它只影响扫描速度，
+    // 不影响正确性 —— 因此只能作为「可选导出」，不能进 exports 让 --strict 直接失败。
+    optionalExports: ['readMany'],
     exportMode: 'all'
   },
   {
@@ -99,7 +102,17 @@ for (const spec of EXPECTED) {
     continue
   }
 
-  ok.push({ spec, note: `导出正常 [${keys.join(', ')}]` })
+  const optionalAbsent = (spec.optionalExports ?? []).filter(
+    (key) => typeof mod?.[key] === 'undefined'
+  )
+  const optionalNote =
+    (spec.optionalExports ?? []).length === 0
+      ? ''
+      : optionalAbsent.length > 0
+        ? `；缺少可选导出 [${optionalAbsent.join(', ')}]（批量读标签将回退逐文件）`
+        : '；批量接口可用'
+
+  ok.push({ spec, note: `导出正常 [${keys.join(', ')}]${optionalNote}` })
 }
 
 const lines = []

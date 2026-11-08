@@ -166,8 +166,10 @@ const refreshAudioDevices = async (): Promise<void> => {
         isDefault: d.isDefault ?? false
       }))
 
-      // 若未选择设备，自动选中系统默认设备（或首个可用设备）
-      if (!localAudioDeviceId.value) {
+      // 自动选择输出设备：未选择或之前记录的设备已失效（外置声卡/HDMI 被拔出）
+      // 时回退到系统默认设备，避免向导写入无效设备 ID 导致后续无法切换模式
+      const currentValid = audioDevices.value.some((d) => d.id === localAudioDeviceId.value)
+      if (!currentValid) {
         const defaultDevice = audioDevices.value.find((d) => d.isDefault) || audioDevices.value[0]
         if (defaultDevice) {
           localAudioDeviceId.value = defaultDevice.id

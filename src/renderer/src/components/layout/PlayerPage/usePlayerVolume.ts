@@ -1,6 +1,7 @@
 import { ref, computed } from 'vue'
 import { usePlayerStore } from '../../../stores/playerStore'
 import { audioEngine } from '../../../audio/audio-engine'
+import { createTrailingThrottle } from '../../../utils/trailingThrottle'
 
 /**
  * 音量控制相关的组合式函数
@@ -13,35 +14,24 @@ export function usePlayerVolume() {
   const showVolumePopover = ref(false)
 
   /**
-   * 节流函数
-   * @param func 要执行的函数
-   * @param delay 节流延迟时间（毫秒）
-   * @returns 节流后的函数
+   * 下发到音频引擎的音量（30ms 节流 + 尾调用）。
+   *
+   * 只节流引擎调用，不动 store：store 是滑块的受控数据源，
+   * 一旦连 store 一起节流，被丢弃的那次输入会让滑块回弹到旧值（「调不动」）。
    */
-  const throttle = (func: Function, delay: number) => {
-    let lastCall = 0
-    return (...args: any[]) => {
-      const now = Date.now()
-      if (now - lastCall >= delay) {
-        lastCall = now
-        return func(...args)
-      }
-    }
-  }
+  const applyVolumeToEngine = createTrailingThrottle((v: number) => {
+    audioEngine.setVolume(v)
+  }, 30)
 
   /**
-   * 节流处理的音量更新函数
+   * 更新音量（0-100）
    * @param volume 音量值（0-100）
    */
-  const updateVolume = throttle((volume: number) => {
-    const v = volume / 100
-    // 先更新本地状态，避免UI卡顿
+  const updateVolume = (volume: number): void => {
+    const v = Math.min(1, Math.max(0, volume / 100))
     player.setVolume(v)
-    // 使用requestAnimationFrame优化Web Audio API调用
-    requestAnimationFrame(() => {
-      audioEngine.setVolume(v)
-    })
-  }, 30) // 减少节流间隔到30ms，提高响应速度
+    applyVolumeToEngine(v)
+  }
 
   /**
    * 音量百分比
@@ -63,14 +53,21 @@ export function usePlayerVolume() {
 
   /**
    * 切换静音状态
+   *
+   * 记住静音前的音量：取消静音时恢复到该值，而不是固定 80%
+   * （原先固定 0.8，用户在 30% 静音后取消会突然变响）。
    */
+  const lastNonZeroVolume = ref(0.8)
+
   const toggleMute = () => {
     if (player.volume > 0) {
+      lastNonZeroVolume.value = player.volume
       player.setVolume(0)
       audioEngine.setVolume(0)
     } else {
-      player.setVolume(0.8) // 默认恢复到 80%
-      audioEngine.setVolume(0.8)
+      const restore = lastNonZeroVolume.value > 0 ? lastNonZeroVolume.value : 0.8
+      player.setVolume(restore)
+      audioEngine.setVolume(restore)
     }
   }
 

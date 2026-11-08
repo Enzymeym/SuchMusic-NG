@@ -12,6 +12,8 @@ allowBuilds:
   '@applemusic-like-lyrics/vue': true
   '@parcel/watcher': true
   '@swc/core': true
+  # 曲库数据库驱动：prebuildify + N-API，安装期只挑平台预编译产物
+  better-sqlite3: true
   electron: true
   electron-winstaller: true
   esbuild: true

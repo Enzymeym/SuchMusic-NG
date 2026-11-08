@@ -143,8 +143,10 @@ window.source = {
       cookie: this._cookie ? '已设置 (长度: ' + this._cookie.length + ')' : '未设置',
       playlists: this._userPlaylists.length + ' 个歌单',
       loginStatus: this._isLoggedIn
-        ? ('已登录: ' + (this._nickname || '网易云用户'))
-        : (this._qrKey ? '等待扫码中...' : '未登录'),
+        ? '已登录: ' + (this._nickname || '网易云用户')
+        : this._qrKey
+          ? '等待扫码中...'
+          : '未登录',
       qrImage: this._qrImageBase64 || '',
       selectedPlaylistId: this._selectedPlaylistId
     }
@@ -154,7 +156,7 @@ window.source = {
   _fetchWithCookie: async function (url) {
     var options = {}
     if (this._cookie) {
-      options = { headers: { 'Cookie': this._cookie } }
+      options = { headers: { Cookie: this._cookie } }
     }
     var resp = await suchmusic.fetch(url, options)
     if (!resp.ok) {
@@ -169,7 +171,17 @@ window.source = {
     // 按 ;; 分割，只保留含 = 且非属性名的片段
     var parts = rawCookie.split(';')
     var cleaned = []
-    var attrKeywords = ['max-age', 'path', 'domain', 'expires', 'secure', 'httponly', 'samesite', 'priority', 'partitioned']
+    var attrKeywords = [
+      'max-age',
+      'path',
+      'domain',
+      'expires',
+      'secure',
+      'httponly',
+      'samesite',
+      'priority',
+      'partitioned'
+    ]
     for (var i = 0; i < parts.length; i++) {
       var p = parts[i].trim()
       if (!p) continue
@@ -232,24 +244,27 @@ window.source = {
       var keyUrl = self._apiBase + '/login/qr/key?' + self._tsParam()
       var keyResp = await self._fetchWithCookie(keyUrl)
       if (!keyResp || keyResp.code !== 200 || !keyResp.data || !keyResp.data.unikey) {
-        throw new Error('获取二维码 key 失败: ' + (keyResp && keyResp.message || '未知错误'))
+        throw new Error('获取二维码 key 失败: ' + ((keyResp && keyResp.message) || '未知错误'))
       }
       self._qrKey = keyResp.data.unikey
       self._log('已获取二维码 key: ' + self._qrKey)
 
       // 2. 生成二维码
       self._log('正在生成二维码...')
-      var qrUrl = self._apiBase + '/login/qr/create?key=' + self._qrKey + '&qrimg=true&' + self._tsParam()
+      var qrUrl =
+        self._apiBase + '/login/qr/create?key=' + self._qrKey + '&qrimg=true&' + self._tsParam()
       var qrResp = await self._fetchWithCookie(qrUrl)
       if (!qrResp || qrResp.code !== 200 || !qrResp.data) {
-        throw new Error('生成二维码失败: ' + (qrResp && qrResp.message || '未知错误'))
+        throw new Error('生成二维码失败: ' + ((qrResp && qrResp.message) || '未知错误'))
       }
 
       var qrData = qrResp.data
       // API 返回的 qrimg 是原始 base64，需补充 data URI 前缀
       var rawBase64 = qrData.qrimg || ''
       self._qrImageBase64 = rawBase64
-        ? (rawBase64.indexOf('data:') === 0 ? rawBase64 : 'data:image/png;base64,' + rawBase64)
+        ? rawBase64.indexOf('data:') === 0
+          ? rawBase64
+          : 'data:image/png;base64,' + rawBase64
         : ''
       self._setStatus('请使用网易云音乐 APP 扫码登录')
       self.setProps({
@@ -260,7 +275,6 @@ window.source = {
 
       // 3. 开始轮询检测扫码状态
       self._pollQrStatus(self._qrKey)
-
     } catch (err) {
       var errMsg = err.message || '生成二维码失败'
       self._log('错误: ' + errMsg)
@@ -277,7 +291,7 @@ window.source = {
 
     self._pollTimer = setInterval(async function () {
       try {
-        var checkUrl = self._apiBase + '/login/qr/check?key=' + key + '&' + self._tsParam()
+        var checkUrl = self._apiBase + '/login/qr/check?key=' + key + '&noCookie=true&' + self._tsParam()
         var checkResp = await self._fetchWithCookie(checkUrl)
 
         if (!checkResp) {
@@ -339,7 +353,8 @@ window.source = {
         // 502: 需要 noCookie=true 重试
         if (code === 502) {
           self._log('检测到 502，尝试添加 noCookie 参数重试...')
-          var retryUrl = self._apiBase + '/login/qr/check?key=' + key + '&noCookie=true&' + self._tsParam()
+          var retryUrl =
+            self._apiBase + '/login/qr/check?key=' + key + '&noCookie=true&' + self._tsParam()
           var retryResp = await self._fetchWithCookie(retryUrl)
           if (!retryResp) return
 
@@ -368,7 +383,6 @@ window.source = {
           }
           return
         }
-
       } catch (err) {
         self._log('轮询检测出错: ' + (err.message || '未知错误'))
         // 不中断轮询，继续等待
@@ -385,14 +399,18 @@ window.source = {
       var statusResp = await self._fetchWithCookie(statusUrl)
 
       // 调试：输出原始响应结构关键词
-      self._log('status 响应顶层 keys: ' + (statusResp ? Object.keys(statusResp).join(', ') : 'null'))
+      self._log(
+        'status 响应顶层 keys: ' + (statusResp ? Object.keys(statusResp).join(', ') : 'null')
+      )
 
       if (statusResp && statusResp.data) {
         var data = statusResp.data
         self._log('status data keys: ' + Object.keys(data).join(', '))
         var profile = data.profile || data
         var account = data.account || {}
-        self._userId = String(profile.userId || profile.id || account.id || data.userId || data.id || '')
+        self._userId = String(
+          profile.userId || profile.id || account.id || data.userId || data.id || ''
+        )
         self._nickname = profile.nickname || account.userName || data.nickname || '网易云用户'
       } else if (statusResp && statusResp.profile) {
         self._userId = String(statusResp.profile.userId || '')
@@ -413,7 +431,6 @@ window.source = {
       // 获取用户歌单 （Cookie 优先识别用户，uid 为可选参数）
       self._log('正在获取用户歌单...')
       await self.fetchUserPlaylists()
-
     } catch (err) {
       self._log('获取用户信息出错: ' + (err.message || '未知错误'))
       self._nickname = '网易云用户'
@@ -457,10 +474,10 @@ window.source = {
         var resp = await self._fetchWithCookie(url)
 
         if (!resp || resp.code !== 200) {
-          throw new Error('获取歌单失败: ' + (resp && resp.message || '未知错误'))
+          throw new Error('获取歌单失败: ' + ((resp && resp.message) || '未知错误'))
         }
 
-        var playlists = (resp.playlist && Array.isArray(resp.playlist)) ? resp.playlist : []
+        var playlists = resp.playlist && Array.isArray(resp.playlist) ? resp.playlist : []
         if (playlists.length === 0) {
           hasMore = false
         } else {
@@ -479,7 +496,7 @@ window.source = {
       var options = []
       for (var i = 0; i < allPlaylists.length; i++) {
         var pl = allPlaylists[i]
-        var trackInfo = pl.trackCount ? (' (' + pl.trackCount + ' 首)') : ''
+        var trackInfo = pl.trackCount ? ' (' + pl.trackCount + ' 首)' : ''
         options.push({
           label: pl.name + trackInfo,
           value: String(pl.id)
@@ -490,7 +507,6 @@ window.source = {
       self._setStatus('已加载 ' + allPlaylists.length + ' 个歌单，请选择')
 
       return { code: true, count: allPlaylists.length }
-
     } catch (err) {
       var errMsg = err.message || '获取歌单失败'
       self._log('错误: ' + errMsg)
@@ -550,7 +566,7 @@ window.source = {
       var detailUrl = self._apiBase + '/playlist/detail?id=' + playlistId
       var detail = await self._fetchWithCookie(detailUrl)
       if (!detail || detail.code !== 200) {
-        throw new Error('获取歌单详情失败: ' + (detail && detail.message || '未知错误'))
+        throw new Error('获取歌单详情失败: ' + ((detail && detail.message) || '未知错误'))
       }
 
       var playlist = detail.playlist
@@ -591,9 +607,11 @@ window.source = {
 
       self._log('歌单创建成功！ID: ' + newPlaylist.id)
       self._setStatus('导入完成: ' + playlistName)
-      window.notify('歌单 "' + playlistName + '" 导入成功！共 ' + trackEntries.length + ' 首歌曲', 'success')
+      window.notify(
+        '歌单 "' + playlistName + '" 导入成功！共 ' + trackEntries.length + ' 首歌曲',
+        'success'
+      )
       return { code: true, playlistId: newPlaylist.id, trackCount: trackEntries.length }
-
     } catch (err) {
       var errMsg = err.message || '导入失败'
       self._log('错误: ' + errMsg)
@@ -617,7 +635,14 @@ window.source = {
       var pageNum = Math.floor(offset / limit) + 1
       self._log('获取歌曲列表: 第 ' + pageNum + '/' + maxPages + ' 页...')
 
-      var url = self._apiBase + '/playlist/track/all?id=' + playlistId + '&offset=' + offset + '&limit=' + limit
+      var url =
+        self._apiBase +
+        '/playlist/track/all?id=' +
+        playlistId +
+        '&offset=' +
+        offset +
+        '&limit=' +
+        limit
       var resp = await self._fetchWithCookie(url)
 
       var tracks = []
@@ -664,7 +689,9 @@ window.source = {
       var batchIds = ids.slice(b, b + batchSize)
       var batchNum = Math.floor(b / batchSize) + 1
       var totalBatches = Math.ceil(ids.length / batchSize)
-      self._log('获取歌曲链接: 第 ' + batchNum + '/' + totalBatches + ' 批 (' + batchIds.length + ' 首)...')
+      self._log(
+        '获取歌曲链接: 第 ' + batchNum + '/' + totalBatches + ' 批 (' + batchIds.length + ' 首)...'
+      )
 
       var url = self._apiBase + '/song/url/v1?id=' + batchIds.join(',') + '&level=lossless'
       var resp = await self._fetchWithCookie(url)
@@ -691,7 +718,10 @@ window.source = {
 
   // ==================== 清理文件名中的非法字符 ====================
   _sanitizeFilename: function (name) {
-    return name.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim()
+    return name
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim()
   },
 
   // ==================== 批量下载歌曲 ====================
@@ -721,7 +751,11 @@ window.source = {
 
       var artistName = '未知歌手'
       if (t.ar && t.ar.length > 0) {
-        artistName = t.ar.map(function (a) { return a.name }).join(',')
+        artistName = t.ar
+          .map(function (a) {
+            return a.name
+          })
+          .join(',')
       }
       var title = t.name || '未知歌曲'
       var ext = urlInfo.type || 'flac'
@@ -744,7 +778,15 @@ window.source = {
       })
     }
 
-    self._log('下载统计: 需下载 ' + toDownload.length + ' 首, 已存在 ' + alreadyExistCount + ' 首, 无链接 ' + noUrlCount + ' 首')
+    self._log(
+      '下载统计: 需下载 ' +
+        toDownload.length +
+        ' 首, 已存在 ' +
+        alreadyExistCount +
+        ' 首, 无链接 ' +
+        noUrlCount +
+        ' 首'
+    )
 
     if (toDownload.length === 0) {
       return localPathMap
@@ -759,20 +801,25 @@ window.source = {
       var batchNum = Math.floor(b / batchSize) + 1
       var totalBatches = Math.ceil(toDownload.length / batchSize)
 
-      self._log('下载歌曲: 第 ' + batchNum + '/' + totalBatches + ' 批 (' + batch.length + ' 首)...')
+      self._log(
+        '下载歌曲: 第 ' + batchNum + '/' + totalBatches + ' 批 (' + batch.length + ' 首)...'
+      )
 
       var results = await Promise.allSettled(
         batch.map(function (item) {
-          return suchmusic.downloadFile(item.url, item.localPath).then(function (result) {
-            if (result && result.success) {
-              localPathMap[item.songId] = item.localPath
-              return { success: true, fileName: item.fileName }
-            } else {
-              return { success: false, fileName: item.fileName, error: '下载返回失败' }
-            }
-          }).catch(function (err) {
-            return { success: false, fileName: item.fileName, error: err.message || '下载异常' }
-          })
+          return suchmusic
+            .downloadFile(item.url, item.localPath)
+            .then(function (result) {
+              if (result && result.success) {
+                localPathMap[item.songId] = item.localPath
+                return { success: true, fileName: item.fileName }
+              } else {
+                return { success: false, fileName: item.fileName, error: '下载返回失败' }
+              }
+            })
+            .catch(function (err) {
+              return { success: false, fileName: item.fileName, error: err.message || '下载异常' }
+            })
         })
       )
 
@@ -783,13 +830,23 @@ window.source = {
           self._log('已下载: ' + r.value.fileName)
         } else {
           failedCount++
-          var errInfo = (r.status === 'fulfilled' && r.value) ? r.value : r.reason
-          self._log('下载失败: ' + (errInfo.fileName || '未知文件') + ' - ' + (errInfo.error || '未知错误'))
+          var errInfo = r.status === 'fulfilled' && r.value ? r.value : r.reason
+          self._log(
+            '下载失败: ' + (errInfo.fileName || '未知文件') + ' - ' + (errInfo.error || '未知错误')
+          )
         }
       }
     }
 
-    self._log('下载完成: 成功 ' + downloadedCount + ' 首, 失败 ' + failedCount + ' 首, 已存在 ' + alreadyExistCount + ' 首')
+    self._log(
+      '下载完成: 成功 ' +
+        downloadedCount +
+        ' 首, 失败 ' +
+        failedCount +
+        ' 首, 已存在 ' +
+        alreadyExistCount +
+        ' 首'
+    )
     return localPathMap
   },
 
@@ -803,7 +860,11 @@ window.source = {
 
       var artistName = '未知歌手'
       if (t.ar && t.ar.length > 0) {
-        artistName = t.ar.map(function (a) { return a.name }).join('/')
+        artistName = t.ar
+          .map(function (a) {
+            return a.name
+          })
+          .join('/')
       }
 
       var albumName = ''
@@ -824,7 +885,7 @@ window.source = {
         album: albumName,
         cover: coverUrl,
         filePath: localPath || urlInfo.url || '',
-        durationMs: (t.dt || 0),
+        durationMs: t.dt || 0,
         source: 'netease',
         sourceSongId: String(songId)
       }

@@ -1,5 +1,11 @@
 <template>
-  <div v-if="album && album.songs.length > 0" ref="detailRef" class="album-detail modern full" :class="{ collapsed: isCollapsed }" @scroll="handleScroll">
+  <div
+    v-if="album && album.songs.length > 0"
+    ref="detailRef"
+    class="album-detail modern full"
+    :class="{ collapsed: isCollapsed }"
+    @scroll="handleScroll"
+  >
     <div class="header-section">
       <div class="header-content">
         <!-- 封面 -->
@@ -81,7 +87,7 @@ const handleScroll = () => {
 // 专辑封面：查找第一首有封面的歌曲
 const albumCover = computed(() => {
   if (!album.value) return defaultCover
-  const firstWithCover = album.value.songs.find(s => s.cover)
+  const firstWithCover = album.value.songs.find((s) => s.cover)
   return firstWithCover?.cover || album.value.cover || defaultCover
 })
 
@@ -303,28 +309,32 @@ onMounted(() => {
 
 /* ================= Collapsed Header ================= */
 .header-section {
-  transition: min-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              padding 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    min-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    padding 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .cover-wrapper {
-  transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              margin-right 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              border-radius 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    width 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    margin-right 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    border-radius 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .album-title {
-  transition: font-size 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              margin-bottom 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    font-size 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    margin-bottom 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .actions-row,
 .artist-row {
-  transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-              max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              margin 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+    max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    margin 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .album-detail.collapsed .header-section {

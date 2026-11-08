@@ -7,6 +7,7 @@ import { app, ipcMain } from 'electron'
 import { join } from 'path'
 import { promises as fs, existsSync } from 'fs'
 import { getNeteaseCoverUrl } from './lyricService'
+import { parseVipInfo, rebindAccountIdentity } from './neteaseAccount'
 
 /** 网易云 API 基础地址 */
 const API_BASE = 'https://api.enzymeym.top'
@@ -167,7 +168,10 @@ async function fetchSongDetailMap(
     const resp = await fetch(`${API_BASE}/song/detail?ids=${ids.join(',')}`)
     if (!resp.ok) return map
     const data = await resp.json()
-    for (const s of (data.songs ?? []) as { id: number; al?: { name?: string; picUrl?: string } }[]) {
+    for (const s of (data.songs ?? []) as {
+      id: number
+      al?: { name?: string; picUrl?: string }
+    }[]) {
       map.set(s.id, s)
     }
   } catch (e) {
@@ -323,7 +327,9 @@ async function getSearchSuggest(keywords: string): Promise<string[]> {
     }
     const data: WySuggestResponse = await resp.json()
     if (data.code !== 200) {
-      console.error(`[neteaseService] API error code ${data.code} fetching suggest for "${keywords}"`)
+      console.error(
+        `[neteaseService] API error code ${data.code} fetching suggest for "${keywords}"`
+      )
       return []
     }
     const seen = new Set<string>()
@@ -429,6 +435,7 @@ async function getPlaylistTracks(id: number): Promise<NeteaseSong[]> {
  * 未登录时返回空数组
  */
 async function getUserPlaylists(): Promise<NeteasePlaylistSummary[]> {
+  await ensureAccountsLoaded()
   const account = activeAccount()
   if (!account?.userId) return []
   try {
@@ -450,6 +457,337 @@ async function getUserPlaylists(): Promise<NeteasePlaylistSummary[]> {
   }
 }
 
+// ==================== 歌手 / 专辑（搜索页点击歌手名进入详情） ====================
+
+/** 歌手详情（归一化，可直接喂给歌手详情页） */
+export interface NeteaseArtistDetail {
+  id: number
+  name: string
+  /** 方图封面（优先 artist/album 接口的 picUrl，其次 detail 的 cover） */
+  cover: string
+  /** 简介（网易云多数歌手为空字符串） */
+  briefDesc: string
+  /** 作品总数（歌曲 + 纯音乐等） */
+  musicSize: number
+  albumSize: number
+  followed: boolean
+}
+
+/** 歌手专辑（归一化） */
+export interface NeteaseArtistAlbum {
+  id: number
+  name: string
+  cover: string
+  /** 专辑曲目数 */
+  size: number
+  /** 发行时间（毫秒时间戳） */
+  publishTime: number
+}
+
+interface WyArtistDetailResponse {
+  code: number
+  data?: {
+    artist?: {
+      id?: number
+      name?: string
+      cover?: string
+      avatar?: string
+      briefDesc?: string
+      musicSize?: number
+      albumSize?: number
+      followed?: boolean
+    }
+  }
+}
+
+interface WyArtistSongsResponse {
+  code: number
+  more?: boolean
+  songs?: WyRawSong[]
+}
+
+interface WyArtistAlbumsResponse {
+  code: number
+  more?: boolean
+  // 部分版本的接口在该字段里额外返回 artist，这里按需读取
+  artist?: { name?: string; picUrl?: string; img1v1Url?: string }
+  hotAlbums?: {
+    id?: number
+    name?: string
+    picUrl?: string
+    blurPicUrl?: string
+    size?: number
+    publishTime?: number
+  }[]
+}
+
+interface WyAlbumResponse {
+  code: number
+  album?: { name?: string; picUrl?: string }
+  songs?: WyRawSong[]
+}
+
+/**
+ * 网易云图片地址统一升级为 https
+ * 接口偶发返回 http（如 /artist/detail 的 cover），Electron 下会被当作不安全内容
+ */
+function toSecureUrl(url?: string): string {
+  if (!url) return ''
+  return url.startsWith('http://') ? `https://${url.slice('http://'.length)}` : url
+}
+
+/** 歌手详情页单次拉取的歌曲数量（接口上限 200） */
+const ARTIST_SONG_PAGE_SIZE = 200
+/** 歌手详情页单次拉取的专辑数量 */
+const ARTIST_ALBUM_PAGE_SIZE = 100
+
+/**
+ * 获取歌手详情
+ * @param id 网易云歌手 ID
+ */
+async function getArtistDetail(id: number): Promise<NeteaseArtistDetail | null> {
+  if (!Number.isFinite(id) || id <= 0) return null
+  try {
+    const resp = await netFetch(`${API_BASE}/artist/detail?id=${id}`, activeAccount()?.cookie)
+    if (!resp.ok) {
+      console.error(`[neteaseService] HTTP ${resp.status} fetching artist detail ${id}`)
+      return null
+    }
+    const data: WyArtistDetailResponse = await resp.json()
+    if (data.code !== 200 || !data.data?.artist) {
+      console.error(`[neteaseService] API error code ${data.code} fetching artist detail ${id}`)
+      return null
+    }
+    const a = data.data.artist
+    return {
+      id: Number(a.id) || id,
+      name: a.name || '',
+      cover: toSecureUrl(a.cover || a.avatar),
+      briefDesc: (a.briefDesc || '').trim(),
+      musicSize: a.musicSize ?? 0,
+      albumSize: a.albumSize ?? 0,
+      followed: !!a.followed
+    }
+  } catch (e) {
+    console.error(`[neteaseService] Failed to fetch artist detail ${id}:`, e)
+    return null
+  }
+}
+
+/**
+ * 获取歌手歌曲（分页，接口单页上限约 200）
+ * @param id 网易云歌手 ID
+ * @param offset 偏移量
+ * @param limit 每页数量
+ */
+async function getArtistSongs(
+  id: number,
+  offset = 0,
+  limit = ARTIST_SONG_PAGE_SIZE
+): Promise<{ songs: NeteaseSong[]; hasMore: boolean }> {
+  if (!Number.isFinite(id) || id <= 0) return { songs: [], hasMore: false }
+  try {
+    const url =
+      `${API_BASE}/artist/songs?id=${id}` +
+      `&limit=${Math.min(limit, ARTIST_SONG_PAGE_SIZE)}&offset=${offset}`
+    const resp = await netFetch(url, activeAccount()?.cookie)
+    if (!resp.ok) {
+      console.error(`[neteaseService] HTTP ${resp.status} fetching artist songs ${id}`)
+      return { songs: [], hasMore: false }
+    }
+    const data: WyArtistSongsResponse = await resp.json()
+    if (data.code !== 200) {
+      console.error(`[neteaseService] API error code ${data.code} fetching artist songs ${id}`)
+      return { songs: [], hasMore: false }
+    }
+    const songs = (data.songs || []).map(normalizeSong)
+    return { songs, hasMore: !!data.more }
+  } catch (e) {
+    console.error(`[neteaseService] Failed to fetch artist songs ${id}:`, e)
+    return { songs: [], hasMore: false }
+  }
+}
+
+/**
+ * 获取歌手专辑（分页）
+ * @param id 网易云歌手 ID
+ * @param offset 偏移量
+ * @param limit 每页数量
+ */
+async function getArtistAlbums(
+  id: number,
+  offset = 0,
+  limit = ARTIST_ALBUM_PAGE_SIZE
+): Promise<{ albums: NeteaseArtistAlbum[]; hasMore: boolean }> {
+  if (!Number.isFinite(id) || id <= 0) return { albums: [], hasMore: false }
+  try {
+    const url =
+      `${API_BASE}/artist/album?id=${id}` +
+      `&limit=${Math.min(limit, ARTIST_ALBUM_PAGE_SIZE)}&offset=${offset}`
+    const resp = await netFetch(url, activeAccount()?.cookie)
+    if (!resp.ok) {
+      console.error(`[neteaseService] HTTP ${resp.status} fetching artist albums ${id}`)
+      return { albums: [], hasMore: false }
+    }
+    const data: WyArtistAlbumsResponse = await resp.json()
+    if (data.code !== 200) {
+      console.error(`[neteaseService] API error code ${data.code} fetching artist albums ${id}`)
+      return { albums: [], hasMore: false }
+    }
+    const albums = (data.hotAlbums || [])
+      .map((a) => ({
+        id: Number(a.id) || 0,
+        name: a.name || '未知专辑',
+        cover: toSecureUrl(a.picUrl || a.blurPicUrl),
+        size: a.size ?? 0,
+        publishTime: a.publishTime ?? 0
+      }))
+      .filter((a) => a.id > 0)
+    return { albums, hasMore: !!data.more }
+  } catch (e) {
+    console.error(`[neteaseService] Failed to fetch artist albums ${id}:`, e)
+    return { albums: [], hasMore: false }
+  }
+}
+
+/**
+ * 获取专辑全部曲目（歌手详情页点击专辑时按需拉取）
+ * @param id 网易云专辑 ID
+ */
+async function getAlbumTracks(id: number): Promise<NeteaseSong[]> {
+  if (!Number.isFinite(id) || id <= 0) return []
+  try {
+    const resp = await netFetch(`${API_BASE}/album?id=${id}`, activeAccount()?.cookie)
+    if (!resp.ok) {
+      console.error(`[neteaseService] HTTP ${resp.status} fetching album ${id}`)
+      return []
+    }
+    const data: WyAlbumResponse = await resp.json()
+    if (data.code !== 200) {
+      console.error(`[neteaseService] API error code ${data.code} fetching album ${id}`)
+      return []
+    }
+    const picUrl = toSecureUrl(data.album?.picUrl)
+    return (data.songs || []).map((raw) => {
+      const song = normalizeSong(raw)
+      // 专辑内的歌曲统一用专辑封面，避免个别曲目缺封面
+      if (!song.al.picUrl && picUrl) song.al.picUrl = picUrl
+      return song
+    })
+  } catch (e) {
+    console.error(`[neteaseService] Failed to fetch album ${id}:`, e)
+    return []
+  }
+}
+
+// ==================== 首页推荐（每日推荐 / 推荐歌单） ====================
+
+/** 每日推荐接口响应（/recommend/songs，歌曲字段与歌单接口一致：ar / al / dt） */
+interface WyDailySongsResponse {
+  code: number
+  data?: {
+    dailySongs?: WyRawSong[]
+  }
+}
+
+/** 推荐歌单原始结构（/recommend/resource 与 /personalized 共用） */
+interface WyRawRecommendPlaylist {
+  id?: number
+  name?: string
+  picUrl?: string
+  coverImgUrl?: string
+  trackCount?: number
+  copywriter?: string
+}
+
+/** 每日推荐歌单接口响应（/recommend/resource，需登录） */
+interface WyRecommendResourceResponse {
+  code: number
+  recommend?: WyRawRecommendPlaylist[]
+}
+
+/** 推荐歌单接口响应（/personalized，无需登录） */
+interface WyPersonalizedResponse {
+  code: number
+  result?: WyRawRecommendPlaylist[]
+}
+
+/**
+ * 拉取网易云「每日推荐」歌曲
+ *
+ * 该接口未登录时也会按公共口味返回一批（服务端匿名推荐），
+ * 登录后则按账号口味生成，因此不做登录校验，仅在请求时附带 Cookie。
+ * @returns 归一化后的歌曲列表，失败时返回空数组
+ */
+async function getDailySongs(): Promise<NeteaseSong[]> {
+  try {
+    const resp = await netFetch(`${API_BASE}/recommend/songs`, activeAccount()?.cookie)
+    if (!resp.ok) {
+      console.error(`[neteaseService] HTTP ${resp.status} fetching daily songs`)
+      return []
+    }
+    const data: WyDailySongsResponse = await resp.json()
+    if (data.code !== 200) {
+      console.error(`[neteaseService] API error code ${data.code} fetching daily songs`)
+      return []
+    }
+    return (data.data?.dailySongs || []).map(normalizeSong)
+  } catch (e) {
+    console.error('[neteaseService] Failed to fetch daily songs:', e)
+    return []
+  }
+}
+
+/** 将推荐歌单原始结构映射为摘要（兼容 picUrl / coverImgUrl 两种封面字段） */
+function toRecommendSummary(raw: WyRawRecommendPlaylist): NeteasePlaylistSummary {
+  return {
+    id: Number(raw.id) || 0,
+    name: raw.name || '未命名歌单',
+    cover: raw.picUrl || raw.coverImgUrl || '',
+    trackCount: raw.trackCount ?? 0,
+    description: raw.copywriter || ''
+  }
+}
+
+/**
+ * 拉取首页「专属歌单」（推荐歌单）
+ *
+ * 已登录优先用 /recommend/resource（按账号口味生成的每日推荐歌单），
+ * 未登录 / 失败时退回 /personalized（公共个性化推荐），保证首页不空。
+ * @param limit 期望返回数量上限
+ */
+async function getRecommendPlaylists(limit = 12): Promise<NeteasePlaylistSummary[]> {
+  await ensureAccountsLoaded()
+  const account = activeAccount()
+
+  const collect = async (
+    url: string,
+    cookie?: string,
+    key?: 'recommend' | 'result'
+  ): Promise<NeteasePlaylistSummary[]> => {
+    const resp = await netFetch(url, cookie)
+    if (!resp.ok) {
+      console.error(`[neteaseService] HTTP ${resp.status} fetching recommend playlists`)
+      return []
+    }
+    const data: WyRecommendResourceResponse & WyPersonalizedResponse = await resp.json()
+    if (data.code !== 200) return []
+    const list = (key === 'recommend' ? data.recommend : data.result) || []
+    return list.map(toRecommendSummary).filter((p) => p.id > 0)
+  }
+
+  try {
+    if (account?.cookie) {
+      const mine = await collect(`${API_BASE}/recommend/resource`, account.cookie, 'recommend')
+      if (mine.length > 0) return mine.slice(0, limit)
+    }
+    return await collect(`${API_BASE}/personalized?limit=${limit}`, undefined, 'result')
+  } catch (e) {
+    console.error('[neteaseService] Failed to fetch recommend playlists:', e)
+    return []
+  }
+}
+
 // ==================== 登录状态与多账号管理 ====================
 
 /** 网易云登录用户信息（渲染层展示用，含 VIP 与等级） */
@@ -457,9 +795,9 @@ export interface NeteaseLoginProfile {
   nickname: string
   userId: string
   avatarUrl?: string
-  /** VIP 类型：0=无 VIP，>0 为黑胶 VIP（11=黑胶VIP，100=黑胶VIP旧版） */
+  /** VIP 类型（位标志）：0=无，1=仅音乐包，10/100/110=黑胶（11=黑胶+音乐包） */
   vipType?: number
-  /** 黑胶 VIP 等级（来自 /vip/info 的 redVipLevel） */
+  /** 黑胶 VIP 等级（来自 /vip/info 的 associator.vipLevel） */
   vipLevel?: number
   /** 账号等级（来自 /user/detail 的 level） */
   level?: number
@@ -478,7 +816,12 @@ interface NeteaseAccount {
   vipLevel?: number
   level?: number
   signature?: string
+  /** 上次拉取 /user/detail + /vip/info 的时间戳（用于定期刷新等级与会员状态） */
+  detailRefreshedAt?: number
 }
+
+/** 账号详情（等级 / 会员）的缓存有效期：超过后重新拉取，避免会员过期仍显示 VIP */
+const DETAIL_TTL_MS = 10 * 60 * 1000
 
 /** 当前活跃账号：优先按 activeUserId 匹配，无匹配时回退到最近保存的账号 */
 function activeAccount(): NeteaseAccount | undefined {
@@ -511,10 +854,34 @@ function isRetriableNetworkError(error: unknown): boolean {
   return error.name === 'TypeError' || error.name === 'AbortError' || error.name === 'TimeoutError'
 }
 
+/** 判断是否为可重试的 HTTP 状态：网关抖动（502/503/504）与限流（429） */
+function isRetriableStatus(status: number): boolean {
+  return status === 429 || status === 502 || status === 503 || status === 504
+}
+
+/** 简易延时（重试退避用） */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * 给 URL 追加一次性参数，绕开网关按 URL 的缓存
+ *
+ * api.enzymeym.top 前置 EdgeOne，响应带 `Cache-Control: max-age=120`，
+ * 且**错误响应同样会进缓存**（实测同一 URL 第二次起 `EO-Cache-Status: HIT`）。
+ * 因此「重试同一个 URL」等于原地打转：拿到的还是那份被缓存的 502。
+ */
+function withCacheBust(url: string): string {
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}_r=${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+}
+
 /**
  * 带浏览器头（及可选 Cookie）的网易云 API 请求
- * 通过代理/TUN 访问时连接可能较慢，undici 默认 10s 连接超时偶发触发，
- * 因此对网络层错误做有限次重试（GET 请求幂等，重试安全）
+ * 通过代理/TUN 访问时连接可能较慢，undici 默认 10s 连接超时偶发触发；
+ * 网关（openresty / EdgeOne）在回源超时或上游网易云抖动时也会直接回 502。
+ * 这两类都属于瞬时失败，因此做有限次重试（全部调用点均为 GET，幂等，重试安全）。
+ * 每次重试都换一个全新 URL，避免撞上网关缓存下来的错误响应。
  */
 async function netFetch(url: string, cookie?: string): Promise<Response> {
   const headers: Record<string, string> = { ...BROWSER_HEADERS }
@@ -522,18 +889,29 @@ async function netFetch(url: string, cookie?: string): Promise<Response> {
 
   let lastError: unknown
   for (let attempt = 0; attempt < NET_FETCH_ATTEMPTS; attempt++) {
+    const isLast = attempt === NET_FETCH_ATTEMPTS - 1
+    const target = attempt === 0 ? url : withCacheBust(url)
     try {
-      return await fetch(url, { headers })
+      const resp = await fetch(target, { headers })
+      if (!isRetriableStatus(resp.status) || isLast) return resp
+      // 响应体不读，交给 GC/undici 回收；下一次重试会换新 URL 重新发起请求
+      console.warn(
+        `[neteaseService] 网关返回 HTTP ${resp.status}，正在重试 (${attempt + 1}/${NET_FETCH_ATTEMPTS - 1})`
+      )
+      // 502 多半是回源超时，退避要比连接错误更宽裕，否则只是再撞一次繁忙的上游
+      await delay(1200 * (attempt + 1))
     } catch (error) {
       lastError = error
-      if (!isRetriableNetworkError(error) || attempt === NET_FETCH_ATTEMPTS - 1) break
+      if (!isRetriableNetworkError(error) || isLast) break
       console.warn(
         `[neteaseService] 请求失败，正在重试 (${attempt + 1}/${NET_FETCH_ATTEMPTS - 1}): ${url}`
       )
-      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)))
+      await delay(400 * (attempt + 1))
     }
   }
-  throw lastError
+  if (lastError) throw lastError
+  // 理论上不可达：循环要么 return，要么在 catch 分支 break 时已记录 lastError
+  throw new Error('请求失败: 未知错误')
 }
 
 /** 将账号转为渲染层可见的 profile */
@@ -553,23 +931,32 @@ function toProfile(a: NeteaseAccount): NeteaseLoginProfile {
 function cleanCookie(rawCookie: string): string {
   if (!rawCookie) return ''
   const attrKeywords = [
-    'max-age', 'path', 'domain', 'expires', 'secure',
-    'httponly', 'samesite', 'priority', 'partitioned'
+    'max-age',
+    'path',
+    'domain',
+    'expires',
+    'secure',
+    'httponly',
+    'samesite',
+    'priority',
+    'partitioned'
   ]
   const parts = rawCookie.split(';')
-  const cleaned: string[] = []
+  // 同一 key 重复出现（网关把多条 Set-Cookie 拼在一起时很常见）只保留最后一个，
+  // 否则请求会带上多个同名 Cookie，服务端取到哪个不确定 —— 表现为「串号 / 登录态时好时坏」
+  const byKey = new Map<string, string>()
   for (const part of parts) {
     const p = part.trim()
     if (!p) continue
     const eqIdx = p.indexOf('=')
     if (eqIdx > 0) {
-      const key = p.substring(0, eqIdx).trim().toLowerCase()
-      if (!attrKeywords.includes(key)) {
-        cleaned.push(p)
+      const rawKey = p.substring(0, eqIdx).trim()
+      if (!attrKeywords.includes(rawKey.toLowerCase())) {
+        byKey.set(rawKey, p)
       }
     }
   }
-  return cleaned.join('; ')
+  return [...byKey.values()].join('; ')
 }
 
 /** 持久化账号列表 */
@@ -587,16 +974,18 @@ async function persistAccounts(): Promise<void> {
 
 /** 从 /login/status 响应解析用户信息 */
 function parseLoginStatus(data: unknown): NeteaseLoginProfile | null {
-  const profile = (data as {
-    profile?: {
-      nickname?: string
-      userId?: number | string
-      id?: number | string
-      avatarUrl?: string
-      vipType?: number
-      signature?: string
+  const profile = (
+    data as {
+      profile?: {
+        nickname?: string
+        userId?: number | string
+        id?: number | string
+        avatarUrl?: string
+        vipType?: number
+        signature?: string
+      }
     }
-  })?.profile
+  )?.profile
   if (!profile) return null
   return {
     nickname: profile.nickname || '网易云用户',
@@ -622,7 +1011,10 @@ async function fetchStatusWithCookie(
       console.warn(`[neteaseService] /login/status HTTP ${resp.status}`)
       return { loggedIn: false }
     }
-    const data = (await resp.json()) as { code?: number; data?: { code?: number; profile?: unknown } }
+    const data = (await resp.json()) as {
+      code?: number
+      data?: { code?: number; profile?: unknown }
+    }
     // 实测该 API 的 /login/status 顶层无 code 字段，code 位于 data.code（如 { data: { code: 200, profile } }）
     const code = data.data?.code ?? data.code
     // code 301 表示 Cookie 失效（未登录）
@@ -652,30 +1044,47 @@ async function enrichAccountDetail(account: NeteaseAccount): Promise<void> {
     )
     if (detailResp.ok) {
       const detail = (await detailResp.json()) as {
+        code?: number
         level?: number
-        profile?: { vipType?: number; signature?: string }
+        profile?: { userId?: number | string; vipType?: number; signature?: string }
       }
-      if (typeof detail.level === 'number') account.level = detail.level
-      if (typeof detail.profile?.vipType === 'number') account.vipType = detail.profile.vipType
-      if (detail.profile?.signature) account.signature = detail.profile.signature
+      // /user/detail 按 uid 查询，只要 uid 与本地账号不一致就会把别人的资料写进来
+      const detailUserId = detail.profile?.userId != null ? String(detail.profile.userId) : ''
+      if (detailUserId && detailUserId !== account.userId) {
+        console.warn(
+          `[neteaseService] /user/detail 返回的账号(${detailUserId})与本地账号(${account.userId})不一致，已忽略`
+        )
+      } else if (!detail.code || detail.code === 200) {
+        if (typeof detail.level === 'number') account.level = detail.level
+        if (typeof detail.profile?.vipType === 'number') account.vipType = detail.profile.vipType
+        if (detail.profile?.signature) account.signature = detail.profile.signature
+      }
     }
   } catch (e) {
     console.warn('[neteaseService] 获取账号等级失败:', e)
   }
   try {
-    // 2. 黑胶 VIP 等级
+    // 2. 黑胶 / 音乐包会员状态
     const vipResp = await netFetch(`${API_BASE}/vip/info`, account.cookie)
     if (vipResp.ok) {
-      const vip = (await vipResp.json()) as { data?: { redVipLevel?: number } }
-      const redVipLevel = vip.data?.redVipLevel
-      if (typeof redVipLevel === 'number') {
-        account.vipLevel = redVipLevel
-        if (!account.vipType) account.vipType = 11
+      const summary = parseVipInfo(await vipResp.json())
+      // summary 为 null 表示响应不可用，此时保留原值，不要误清成「非会员」
+      if (summary) {
+        account.vipType = summary.vipType
+        account.vipLevel = summary.vipLevel
       }
     }
   } catch (e) {
     console.warn('[neteaseService] 获取 VIP 信息失败:', e)
   }
+  account.detailRefreshedAt = Date.now()
+}
+
+/** 账号详情是否需要刷新（等级/会员缺失或缓存过期） */
+function needsDetailRefresh(account: NeteaseAccount): boolean {
+  if (account.level === undefined || account.vipLevel === undefined) return true
+  if (!account.detailRefreshedAt) return true
+  return Date.now() - account.detailRefreshedAt > DETAIL_TTL_MS
 }
 
 /** 从本地加载账号列表；兼容迁移旧版单账号 Cookie 文件 */
@@ -685,7 +1094,10 @@ async function loadAccounts(): Promise<void> {
     if (existsSync(filePath)) {
       const raw = await fs.readFile(filePath, 'utf-8')
       const data = JSON.parse(raw) as { accounts?: NeteaseAccount[]; activeUserId?: string }
-      neteaseAccounts = (data.accounts || []).filter((a) => a.cookie && a.userId)
+      // 顺带清洗历史 Cookie（去属性段、同名键去重），避免重复键让服务端取到旧值
+      neteaseAccounts = (data.accounts || [])
+        .map((a) => ({ ...a, cookie: cleanCookie(a.cookie || '') }))
+        .filter((a) => a.cookie && a.userId)
       activeUserId = data.activeUserId || neteaseAccounts[0]?.userId || ''
       if (neteaseAccounts.length) {
         console.log(`[neteaseService] 已从本地恢复 ${neteaseAccounts.length} 个网易云账号`)
@@ -698,13 +1110,14 @@ async function loadAccounts(): Promise<void> {
       const raw = await fs.readFile(legacyCookieFilePath(), 'utf-8')
       const legacy = JSON.parse(raw) as { cookie?: string; savedAt?: number }
       if (legacy.cookie) {
-        const status = await fetchStatusWithCookie(legacy.cookie)
+        const legacyCookie = cleanCookie(legacy.cookie)
+        const status = await fetchStatusWithCookie(legacyCookie)
         if (status.loggedIn && status.profile) {
           const account: NeteaseAccount = {
             userId: status.profile.userId,
             nickname: status.profile.nickname,
             avatarUrl: status.profile.avatarUrl,
-            cookie: legacy.cookie,
+            cookie: legacyCookie,
             savedAt: legacy.savedAt || Date.now(),
             vipType: status.profile.vipType,
             signature: status.profile.signature
@@ -727,6 +1140,45 @@ async function loadAccounts(): Promise<void> {
 }
 
 /**
+ * 账号列表的加载任务（只启动一次）
+ *
+ * 启动时 loadAccounts 是异步的，渲染层一挂载就会请求登录状态；若不等待，
+ * 会读到空列表而显示成「未登录 + 扫码」，随后才变成已登录 —— 表现为登录信息前后矛盾。
+ * 所有依赖账号列表的 IPC 入口都先 await 这个任务。
+ */
+let accountsLoadTask: Promise<void> | null = null
+
+function ensureAccountsLoaded(): Promise<void> {
+  accountsLoadTask ??= loadAccounts()
+  return accountsLoadTask
+}
+
+/**
+ * 以 Cookie 为准纠正账号身份，并清空属于旧身份的缓存
+ * @returns 是否发生了纠正
+ */
+function rebindAccountToCookieProfile(
+  account: NeteaseAccount,
+  realUserId: string
+): { account: NeteaseAccount; rebind: boolean } {
+  const result = rebindAccountIdentity(neteaseAccounts, account, realUserId, activeUserId)
+  if (!result.rebind) return { account, rebind: false }
+
+  neteaseAccounts = result.accounts
+  activeUserId = result.activeUserId
+  // 等级 / 会员 / 签名都是按旧 userId 查到的，不属于新身份，必须丢弃后重取
+  result.account.level = undefined
+  result.account.vipLevel = undefined
+  result.account.signature = undefined
+  result.account.vipType = undefined
+  result.account.detailRefreshedAt = undefined
+  console.warn(
+    `[neteaseService] 本地账号标识与 Cookie 不一致（${account.userId} → ${realUserId}），已按 Cookie 归属纠正`
+  )
+  return { account: result.account, rebind: true }
+}
+
+/**
  * 获取当前登录状态（含账号列表与活跃账号）
  */
 async function getLoginStatus(): Promise<{
@@ -735,36 +1187,43 @@ async function getLoginStatus(): Promise<{
   accounts: NeteaseLoginProfile[]
   activeUserId: string
 }> {
-  const account = activeAccount()
-  if (!account) return { loggedIn: false, accounts: [], activeUserId: '' }
+  await ensureAccountsLoaded()
+  const active = activeAccount()
+  if (!active) return { loggedIn: false, accounts: [], activeUserId: '' }
 
-  const status = await fetchStatusWithCookie(account.cookie)
+  const status = await fetchStatusWithCookie(active.cookie)
   if (!status.loggedIn) {
     // 仅当 Cookie 明确失效时移除该账号；网络异常等临时失败不删除
     if (status.invalid) {
-      neteaseAccounts = neteaseAccounts.filter((a) => a.userId !== account.userId)
-      if (activeUserId === account.userId) {
+      neteaseAccounts = neteaseAccounts.filter((a) => a.userId !== active.userId)
+      if (activeUserId === active.userId) {
         activeUserId = neteaseAccounts[0]?.userId || ''
       }
       await persistAccounts()
       return getLoginStatus()
     }
+    // 临时失败：仍把已知账号回传给渲染层，避免「明明已登录却跳回扫码登录」
     return {
       loggedIn: false,
-      profile: toProfile(account),
+      profile: toProfile(active),
       accounts: neteaseAccounts.map(toProfile),
       activeUserId
     }
   }
 
-  // 更新昵称 / 头像 / VIP 类型（可能已变更）
-  account.nickname = status.profile!.nickname
-  account.avatarUrl = status.profile!.avatarUrl
-  account.vipType = status.profile!.vipType
-  account.signature = status.profile!.signature
+  const profile = status.profile!
+  // profile 里的 userId 才是 Cookie 真正所属的账号，与本地记录不一致时必须纠正
+  const rebound = rebindAccountToCookieProfile(active, profile.userId)
+  const account = rebound.account
 
-  // 等级 / VIP 等级缺失时补充
-  if (account.level === undefined || account.vipLevel === undefined) {
+  // 更新昵称 / 头像 / VIP 类型（可能已变更）
+  account.nickname = profile.nickname
+  account.avatarUrl = profile.avatarUrl
+  if (profile.vipType !== undefined) account.vipType = profile.vipType
+  account.signature = profile.signature
+
+  // 等级 / 会员信息缺失或过期时补充（身份纠正后这些缓存已被清空，必然重新拉取）
+  if (rebound.rebind || needsDetailRefresh(account)) {
     await enrichAccountDetail(account)
     await persistAccounts()
   }
@@ -774,6 +1233,52 @@ async function getLoginStatus(): Promise<{
     profile: toProfile(account),
     accounts: neteaseAccounts.map(toProfile),
     activeUserId
+  }
+}
+
+/**
+ * 启动时逐个校正已存账号的身份
+ *
+ * 历史版本会把「Cookie 归属于 A」的记录挂在「B 的 userId」下，之后所有按 userId
+ * 查询的接口（等级、歌单）都会取到 B 的数据，而昵称头像来自 A。这里在启动阶段
+ * 以 Cookie 为准统一纠正一次；只在身份不一致时改写，不做删除，网络失败静默跳过。
+ */
+async function verifyAccountsIdentity(): Promise<void> {
+  const targets = neteaseAccounts.slice(0, 5)
+  let changed = false
+  for (const account of targets) {
+    // 列表可能已被上一次纠正过程改写，重新定位当前对象
+    const current = neteaseAccounts.find((a) => a === account || a.cookie === account.cookie)
+    if (!current) continue
+    try {
+      const status = await fetchStatusWithCookie(current.cookie)
+      if (!status.loggedIn || !status.profile) continue
+      if (status.profile.userId === current.userId) continue
+      const result = rebindAccountIdentity(
+        neteaseAccounts,
+        current,
+        status.profile.userId,
+        activeUserId
+      )
+      if (!result.rebind) continue
+      neteaseAccounts = result.accounts
+      activeUserId = result.activeUserId
+      result.account.nickname = status.profile.nickname
+      result.account.avatarUrl = status.profile.avatarUrl
+      result.account.vipType = status.profile.vipType
+      result.account.signature = status.profile.signature
+      result.account.level = undefined
+      result.account.vipLevel = undefined
+      result.account.detailRefreshedAt = undefined
+      changed = true
+      console.warn(`[neteaseService] 已纠正账号身份：${current.userId} → ${status.profile.userId}`)
+    } catch (e) {
+      console.warn('[neteaseService] 校正账号身份失败:', e)
+    }
+  }
+  if (changed) {
+    await persistAccounts()
+    console.log('[neteaseService] 账号身份校正完成')
   }
 }
 
@@ -803,35 +1308,116 @@ async function getLoginQr(): Promise<{ unikey: string; qrimg: string }> {
   return { unikey, qrimg }
 }
 
+/** 检测接口的软失败码：上游瞬时不可用，调用方应继续轮询而非中断登录 */
+const QR_CHECK_SOFT_FAIL = -1
+
+/**
+ * 检测接口的额外重试轮数（netFetch 内部已对 5xx/429 换了新 URL 重试 3 次）
+ *
+ * 只留 1 轮：单次 IPC 的总耗时必须压在 10s 内。扫码轮询是串行调度的，
+ * 一次 tick 拖到 30s 会让「扫码成功」迟迟读不到、二维码先过期，比偶发失败更糟。
+ */
+const QR_CHECK_RETRY = 1
+
+/**
+ * 读取 JSON 响应体，空响应体或非 JSON（网关错误页）都返回 null 而非抛错
+ */
+async function readJsonBody(resp: Response): Promise<Record<string, unknown> | null> {
+  try {
+    const text = await resp.text()
+    if (!text || !text.trim()) return null
+    const parsed = JSON.parse(text)
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+/** 检测接口响应（code 已归一化到顶层，兼容嵌在 data 里的实现） */
+interface QrCheckPayload {
+  code: number
+  cookie?: string
+  message?: string
+  data?: unknown
+  [key: string]: unknown
+}
+
+/**
+ * 单次请求二维码检测接口
+ * @returns null 表示本次为可重试的瞬时失败（HTTP 5xx / 429 / 空响应体 / 非 JSON）
+ *
+ * **每次请求都带 `noCookie=true`**——这不是容错开关，而是官方约定：
+ * 1. 文档明确「如扫码后返回 502，则需加上 noCookie 参数」，而 502 恰恰多发于扫码之后，
+ *    正是需要读 803 的时刻；不加就永远拿不到登录凭证。
+ * 2. 带 Cookie 轮询会让上游尝试改写会话 Cookie，多标签/多账号场景下会互相串；
+ *    noCookie 只抑制响应头里的 Set-Cookie，**803 响应体里的 cookie 字段照常返回**，
+ *    官方参考实现 public/qrlogin-nocookie.html 也是全程带它、再从 body 取 cookie。
+ */
+async function fetchQrCheckOnce(unikey: string, seq: string): Promise<QrCheckPayload | null> {
+  // 网关对同一 URL 有 120s 缓存（Cache-Control: max-age=120），会把上游瞬时错误一起缓存；
+  // 追加序号保证每轮轮询都是全新 URL，避免整段扫码期被一个坏响应污染
+  const params = new URLSearchParams({
+    key: unikey,
+    timestamp: String(Date.now()),
+    noCookie: 'true',
+    seq
+  })
+
+  const resp = await netFetch(`${API_BASE}/login/qr/check?${params.toString()}`)
+  if (!resp.ok) {
+    console.warn(`[neteaseService] 检测扫码状态仍失败 (HTTP ${resp.status})，本轮跳过`)
+    return null
+  }
+  const raw = await readJsonBody(resp)
+  if (!raw) {
+    console.warn('[neteaseService] 检测扫码状态返回内容无法解析，按瞬时失败处理')
+    return null
+  }
+  const nested = (raw.data as { code?: unknown })?.code
+  const code = typeof raw.code === 'number' ? raw.code : nested
+  if (typeof code !== 'number') {
+    console.warn('[neteaseService] 检测扫码状态响应缺少 code，按瞬时失败处理')
+    return null
+  }
+  return { ...raw, code }
+}
+
 /**
  * 轮询检测二维码扫码状态
  * @param unikey 二维码 key
  * @returns code 与登录成功时的用户信息
+ *
+ * 上游抖动（网关 502 / 空响应体）不抛错，而是回 QR_CHECK_SOFT_FAIL 让渲染层继续轮询：
+ * 扫码是持续数分钟的轮询过程，一次瞬时失败不应打断并刷出 IPC handler 错误。
+ * 只有「拿到 Cookie 却校验不过」这类确定性错误才抛出。
  */
 async function checkLoginQr(
   unikey: string
 ): Promise<{ code: number; profile?: NeteaseLoginProfile }> {
-  const checkUrl = `${API_BASE}/login/qr/check?key=${encodeURIComponent(unikey)}&timestamp=${Date.now()}`
-  let resp = await netFetch(checkUrl)
-  if (!resp.ok) {
-    throw new Error(`检测扫码状态失败: HTTP ${resp.status}`)
+  let data: QrCheckPayload | null = null
+  for (let attempt = 0; attempt <= QR_CHECK_RETRY; attempt++) {
+    if (attempt > 0) await delay(600 * attempt)
+    data = await fetchQrCheckOnce(unikey, `${attempt}`)
+    // 非 502 的有效业务码即成功；502 说明上游这一轮确实取不到状态，退避后重试
+    if (data && data.code !== 502) break
+    data = null
   }
-  let data = await resp.json()
 
-  // 502：需要 noCookie=true 重试
-  if (data.code === 502) {
-    resp = await netFetch(`${checkUrl}&noCookie=true`)
-    if (!resp.ok) throw new Error(`检测扫码状态失败: HTTP ${resp.status}`)
-    data = await resp.json()
+  if (!data) {
+    return { code: QR_CHECK_SOFT_FAIL }
   }
+
+  const code = data.code
 
   // 803：扫码授权成功，提取 Cookie 并写入账号列表
-  if (data.code === 803) {
-    const rawCookie = data.cookie || data.data || ''
+  if (code === 803) {
+    const rawCookie = data.cookie || (typeof data.data === 'string' ? data.data : '')
     const cookie = cleanCookie(rawCookie)
     if (!cookie) {
       throw new Error('未获取到登录凭证')
     }
+    // 必须等本地账号列表加载完，否则随后的写回会被 loadAccounts 覆盖掉
+    await ensureAccountsLoaded()
     const status = await fetchStatusWithCookie(cookie)
     if (!status.loggedIn || !status.profile) {
       throw new Error('登录凭证校验失败')
@@ -859,7 +1445,7 @@ async function checkLoginQr(
     return { code: 803, profile: toProfile(account) }
   }
 
-  return { code: data.code ?? -1 }
+  return { code }
 }
 
 /**
@@ -867,6 +1453,7 @@ async function checkLoginQr(
  * @param userId 可选，目标账号 userId
  */
 async function logout(userId?: string): Promise<void> {
+  await ensureAccountsLoaded()
   const targetId = userId || activeUserId
   if (!targetId) return
   neteaseAccounts = neteaseAccounts.filter((a) => a.userId !== targetId)
@@ -887,6 +1474,7 @@ async function switchAccount(userId: string): Promise<{
   accounts: NeteaseLoginProfile[]
   activeUserId: string
 }> {
+  await ensureAccountsLoaded()
   if (!neteaseAccounts.some((a) => a.userId === userId)) {
     return { loggedIn: false, accounts: neteaseAccounts.map(toProfile), activeUserId }
   }
@@ -899,24 +1487,27 @@ async function switchAccount(userId: string): Promise<{
  * 注册网易云相关 IPC handler
  */
 export function registerNeteaseHandlers(): void {
-  // 启动时恢复登录账号
-  void loadAccounts()
+  // 启动时恢复登录账号，随后校正可能存在的身份错位（历史脏数据）
+  void ensureAccountsLoaded()
+    .then(() => verifyAccountsIdentity())
+    .catch((e) => console.warn('[neteaseService] 启动账号校正失败:', e))
 
-  ipcMain.handle(
-    'netease:search',
-    async (_event, keywords: string, offset = 0, limit = 30) => {
-      if (!keywords || !keywords.trim()) {
-        return { songs: [], hasMore: false, total: 0 }
-      }
-      return searchSongs(keywords.trim(), Number(offset) || 0, Number(limit) || 30)
+  ipcMain.handle('netease:search', async (_event, keywords: string, offset = 0, limit = 30) => {
+    if (!keywords || !keywords.trim()) {
+      return { songs: [], hasMore: false, total: 0 }
     }
-  )
+    return searchSongs(keywords.trim(), Number(offset) || 0, Number(limit) || 30)
+  })
 
   ipcMain.handle(
     'netease:song-url',
     async (_event, ids: number[], quality?: string, refresh?: boolean) => {
       if (!Array.isArray(ids)) return {}
-      return getSongUrlMap(ids.map(Number).filter((id) => Number.isFinite(id) && id > 0), quality, refresh)
+      return getSongUrlMap(
+        ids.map(Number).filter((id) => Number.isFinite(id) && id > 0),
+        quality,
+        refresh
+      )
     }
   )
 
@@ -961,5 +1552,39 @@ export function registerNeteaseHandlers(): void {
 
   ipcMain.handle('netease:user-playlists', async () => {
     return getUserPlaylists()
+  })
+
+  ipcMain.handle('netease:daily-songs', async () => {
+    return getDailySongs()
+  })
+
+  ipcMain.handle('netease:recommend-playlists', async (_event, limit = 12) => {
+    return getRecommendPlaylists(Number(limit) || 12)
+  })
+
+  ipcMain.handle('netease:artist-detail', async (_event, id: number) => {
+    return getArtistDetail(Number(id))
+  })
+
+  ipcMain.handle(
+    'netease:artist-songs',
+    async (_event, id: number, offset = 0, limit = ARTIST_SONG_PAGE_SIZE) => {
+      return getArtistSongs(Number(id), Number(offset) || 0, Number(limit) || ARTIST_SONG_PAGE_SIZE)
+    }
+  )
+
+  ipcMain.handle(
+    'netease:artist-albums',
+    async (_event, id: number, offset = 0, limit = ARTIST_ALBUM_PAGE_SIZE) => {
+      return getArtistAlbums(
+        Number(id),
+        Number(offset) || 0,
+        Number(limit) || ARTIST_ALBUM_PAGE_SIZE
+      )
+    }
+  )
+
+  ipcMain.handle('netease:album-tracks', async (_event, id: number) => {
+    return getAlbumTracks(Number(id))
   })
 }

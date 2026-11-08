@@ -211,11 +211,40 @@ function resumeRenderIfNeeded(): void {
   }
 }
 
-/** 标签页可见性变化：重新可见且有内容时恢复渲染循环 */
-function handleVisibilityChange(): void {
-  if (!document.hidden) {
-    resumeRenderIfNeeded()
+/** 注册 FFT 订阅（幂等）。订阅存在时 Rust 侧才会真正计算 FFT。 */
+function subscribeFft(): void {
+  if (isUnmounted || fftCleanup) return
+  fftCleanup = onFftData((spectrum) => {
+    let hasData = false
+    for (let i = 0; i < Math.min(spectrum.length, BAR_COUNT); i++) {
+      rawSpectrum[i] = spectrum[i]
+      if (spectrum[i] > 0) hasData = true
+    }
+    if (hasData) ensureRenderLoop()
+  })
+}
+
+/** 退订 FFT，让 Rust 侧停止计算并停止主进程推送 */
+function unsubscribeFft(): void {
+  if (fftCleanup) {
+    fftCleanup()
+    fftCleanup = null
   }
+}
+
+/** 标签页可见性变化：隐藏时真正退订 FFT（省掉后端计算），重新可见时恢复 */
+function handleVisibilityChange(): void {
+  if (document.hidden) {
+    unsubscribeFft()
+    renderActive = false
+    if (animationId !== null) {
+      cancelAnimationFrame(animationId)
+      animationId = null
+    }
+    return
+  }
+  subscribeFft()
+  resumeRenderIfNeeded()
 }
 
 let resizeTimer: ReturnType<typeof setTimeout> | null = null
@@ -237,14 +266,7 @@ onMounted(() => {
     updateAccentColor()
 
     // 注册 FFT 数据回调，首次收到数据时启动渲染循环
-    fftCleanup = onFftData((spectrum) => {
-      let hasData = false
-      for (let i = 0; i < Math.min(spectrum.length, BAR_COUNT); i++) {
-        rawSpectrum[i] = spectrum[i]
-        if (spectrum[i] > 0) hasData = true
-      }
-      if (hasData) ensureRenderLoop()
-    })
+    subscribeFft()
 
     if (canvasRef.value) {
       setupCanvas(canvasRef.value, props.size)
@@ -289,8 +311,7 @@ onUnmounted(() => {
     observer = null
   }
   if (fftCleanup) {
-    fftCleanup()
-    fftCleanup = null
+    unsubscribeFft()
   }
   if (animationId !== null) {
     cancelAnimationFrame(animationId)

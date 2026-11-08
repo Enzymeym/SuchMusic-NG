@@ -4,11 +4,25 @@
       <div class="title">
         歌曲
         <span class="subtitle">
-          <i class="mgc_music_2_fill"></i> {{ songs.length }} 首</span>
+          <i class="mgc_music_2_fill"></i> {{ songs.length }} 首
+          <template v-if="searchKeyword"> · 匹配 {{ searchTotal }}</template>
+          <template v-if="localMusicStore.scanning">
+            · 扫描中<template v-if="localMusicStore.scanProgress?.scanned">
+              {{ localMusicStore.scanProgress.scanned }} 个文件</template
+            >
+          </template>
+        </span>
       </div>
       <div class="actions">
         <div style="display: flex; gap: 10px">
-          <n-button type="primary" style="padding: 0 16px; font-size: 15px;" size="large" secondary round @click="playAll">
+          <n-button
+            type="primary"
+            style="padding: 0 16px; font-size: 15px"
+            size="large"
+            secondary
+            round
+            @click="playAll"
+          >
             <template #icon>
               <n-icon size="14">
                 <i class="mgc_play_fill"></i>
@@ -30,7 +44,7 @@
               </n-icon>
             </template>
           </n-button>
-          <n-button secondary circle size="large"  @click="openBatchModal">
+          <n-button secondary circle size="large" @click="openBatchModal">
             <template #icon>
               <n-icon size="20">
                 <i class="mgc_list_check_2_line"></i>
@@ -39,13 +53,16 @@
           </n-button>
         </div>
         <n-input
-          v-model:value="searchKeyword"
-          placeholder="模糊搜索"
+          :value="searchKeyword"
+          placeholder="搜索标题 / 歌手 / 专辑 / 文件名"
           clearable
           size="large"
           round
           class="search-input"
-          style="width: 200px"
+          style="width: 240px"
+          @update:value="updateSearch"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
         >
           <template #prefix>
             <n-icon size="18" color="#999">
@@ -55,10 +72,10 @@
         </n-input>
       </div>
     </div>
-    
+
     <div class="content">
-      <SongList 
-        :songs="filteredSongs" 
+      <SongList
+        :songs="filteredSongs"
         :loading="loading"
         :current-playing-song-id="player.currentSong?.id ?? null"
         :extra-menu-options="contextMenuOptions"
@@ -74,21 +91,21 @@
         v-model:show="showBatchModal"
         preset="dialog"
         title="批量管理"
-        style="width: 800px; max-width: 90vw;"
+        style="width: 800px; max-width: 90vw"
       >
-        <div style="height: 500px; display: flex; flex-direction: column;">
+        <div style="height: 500px; display: flex; flex-direction: column">
           <n-data-table
             :columns="batchColumns"
             :data="songs"
             :pagination="{ pageSize: 10 }"
             :row-key="(row) => row.id"
             @update:checked-row-keys="handleCheck"
-            style="flex: 1; overflow: hidden;"
+            style="flex: 1; overflow: hidden"
             flex-height
           />
-          <n-space justify="end" style="margin-top: 16px;">
+          <n-space justify="end" style="margin-top: 16px">
             <n-button @click="showBatchModal = false">取消</n-button>
-            <n-button 
+            <n-button
               type="primary"
               ghost
               :disabled="checkedRowKeys.length === 0"
@@ -96,8 +113,8 @@
             >
               保存为歌单 ({{ checkedRowKeys.length }})
             </n-button>
-            <n-button 
-              type="error" 
+            <n-button
+              type="error"
               :disabled="checkedRowKeys.length === 0"
               @click="handleBatchDelete"
             >
@@ -112,12 +129,23 @@
 
 <script setup lang="ts">
 import { ref, onMounted, h, computed } from 'vue'
-import { NButton, NIcon, useMessage, NInput, NModal, NDataTable, NSpace, useDialog, type DataTableColumns } from 'naive-ui'
+import {
+  NButton,
+  NIcon,
+  useMessage,
+  NInput,
+  NModal,
+  NDataTable,
+  NSpace,
+  useDialog,
+  type DataTableColumns
+} from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import TagEditDialog from '../components/common/TagEditDialog.vue'
 import { usePlayerStore } from '../stores/playerStore'
 import { usePlaylistStore } from '../stores/playlistStore'
 import { useLocalMusicStore, type LocalSong } from '../stores/localMusicStore'
+import { useLibrarySearch } from '../composables/useLibrarySearch'
 
 // 本地音乐歌曲结构，尽量对齐 SongList 组件
 // Use LocalSong from store instead of defining locally, but for compatibility with existing code we can alias it or just use it.
@@ -125,7 +153,6 @@ type Song = LocalSong
 
 const localMusicStore = useLocalMusicStore()
 const songs = computed(() => localMusicStore.songs)
-const searchKeyword = ref('')
 const loading = computed(() => localMusicStore.loading)
 const message = useMessage()
 const dialog = useDialog()
@@ -166,14 +193,14 @@ const handleBatchDelete = () => {
     onPositiveClick: async () => {
       try {
         const filePaths = localMusicStore.songs
-          .filter(s => checkedRowKeys.value.includes(s.id))
-          .map(s => s.filePath)
-          .filter(fp => fp) as string[]
+          .filter((s) => checkedRowKeys.value.includes(s.id))
+          .map((s) => s.filePath)
+          .filter((fp) => fp) as string[]
 
         if (filePaths.length === 0) return
 
         const result = await window.electron.ipcRenderer.invoke('local-music:delete', filePaths)
-        
+
         if (result.success) {
           message.success(`成功删除 ${result.deletedCount} 首歌曲`)
           if (result.failedCount > 0) {
@@ -184,7 +211,7 @@ const handleBatchDelete = () => {
           // But simpler to just rescan or let store handle it.
           // Since we deleted files, rescanning is safer.
           void scanMusic()
-          
+
           checkedRowKeys.value = []
           if (localMusicStore.songs.length === 0) {
             showBatchModal.value = false
@@ -231,15 +258,20 @@ const handleCreatePlaylistFromSelection = () => {
   message.success('已创建本地歌单')
 }
 
-const filteredSongs = computed(() => {
-  if (!searchKeyword.value) return localMusicStore.songs
-  const keyword = searchKeyword.value.toLowerCase().trim()
-  return localMusicStore.songs.filter((song) => {
-    const name = song.name?.toLowerCase() || ''
-    const artist = getSongArtist(song).toLowerCase()
-    const album = (song.al?.name || '').toLowerCase()
-    return name.includes(keyword) || artist.includes(keyword) || album.includes(keyword)
-  })
+/**
+ * 搜索统一走 useLibrarySearch：防抖 200ms、中文输入法合成期不触发、
+ * 支持 title:/artist:/album:/file: 字段限定。
+ */
+const {
+  keyword: searchKeyword,
+  results: filteredSongs,
+  total: searchTotal,
+  update: updateSearch,
+  onCompositionStart,
+  onCompositionEnd
+} = useLibrarySearch({
+  source: () => localMusicStore.songs,
+  limit: 500
 })
 
 onMounted((): void => {
@@ -299,7 +331,7 @@ const playSong = async (song: Song): Promise<void> => {
   // 避免在播放失败（如文件不存在）时出现 UI 状态不一致
   player.setCurrentSong(songInfo)
   player.recordPlay(songInfo)
-  
+
   message.info(`正在播放: ${song.name}`)
 }
 
@@ -330,8 +362,7 @@ const handleContextMenuSelect = (key: string, song: Song) => {
       break
     case 'openFileLocation':
       if (song.filePath) {
-        // window.electron.ipcRenderer.send('show-item-in-folder', song.filePath)
-        message.info(`文件路径: ${song.filePath}`)
+        void localMusicStore.revealInFolder(song.filePath)
       }
       break
     default:
@@ -340,7 +371,12 @@ const handleContextMenuSelect = (key: string, song: Song) => {
 }
 
 const handleTagSaved = () => {
-  // 重新扫描以更新列表信息
+  // 只重读被编辑的那一首，避免为了刷新一行标签去整库扫描
+  const filePath = currentEditingSongPath.value
+  if (filePath) {
+    void localMusicStore.reloadTracks([filePath])
+    return
+  }
   void scanMusic()
 }
 
@@ -385,13 +421,13 @@ const scanMusic = async (): Promise<void> => {
 
 .header {
   display: flex;
-  background-color: #F6F6F6;
+  background-color: #f6f6f6;
   justify-content: space-between;
   align-items: start;
   gap: 4px;
   flex-direction: column;
   margin-bottom: 14px;
-  padding: 8px 1px 4px ;
+  padding: 8px 1px 4px;
   z-index: 10;
   border-radius: 8px;
 }
@@ -412,7 +448,7 @@ html[data-theme='dark'] .search-input {
 }
 
 .subtitle {
-  font-size: 14px; 
+  font-size: 14px;
   color: #999;
   margin-left: 8px;
 }

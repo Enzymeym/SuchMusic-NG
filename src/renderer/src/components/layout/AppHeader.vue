@@ -1,7 +1,22 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed, watch, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { NInput, NIcon, NButton, NDivider, useDialog, NPopover, NScrollbar, useThemeVars, NImage, NSpin, useMessage, NAvatar, NText, NTag } from 'naive-ui'
+import {
+  NInput,
+  NIcon,
+  NButton,
+  NDivider,
+  useDialog,
+  NPopover,
+  NScrollbar,
+  useThemeVars,
+  NImage,
+  NSpin,
+  useMessage,
+  NAvatar,
+  NText,
+  NTag
+} from 'naive-ui'
 
 const props = defineProps<{
   collapsed?: boolean
@@ -14,12 +29,16 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { usePlayerStore } from '../../stores/playerStore'
 import { usePlaylistStore } from '../../stores/playlistStore'
 import { useLocalMusicStore } from '../../stores/localMusicStore'
+import { useSearchHistoryStore } from '../../stores/searchHistoryStore'
+import { getSearchIndex } from '../../utils/librarySearch'
+import { normalizeSearchText } from '../../../../shared/library/normalize'
 const router = useRouter()
 const route = useRoute()
 const settingsStore = useSettingsStore()
 const playerStore = usePlayerStore()
 const playlistStore = usePlaylistStore()
 const localMusicStore = useLocalMusicStore()
+const searchHistoryStore = useSearchHistoryStore()
 const dialog = useDialog()
 const message = useMessage()
 const searchText = ref('')
@@ -46,33 +65,64 @@ const qrImg = ref('')
 const qrUnikey = ref('')
 const qrStatusText = ref('')
 const qrLoading = ref(false)
-let qrPollTimer: ReturnType<typeof setInterval> | null = null
+/** 当前二维码是否已过期：过期后再次打开面板必须重新生成，不能复用失效二维码 */
+const qrExpired = ref(false)
+let qrPollTimer: ReturnType<typeof setTimeout> | null = null
+/** 轮询会话号：停止/重启轮询时自增，用于作废仍在途的旧请求回调 */
+let qrPollSession = 0
+/** 连续软失败次数（上游 5xx / 网络异常），用于退避与文案提示 */
+let qrFailCount = 0
+/** 本轮连续失败起始时间；恢复成功后清零 */
+let qrFailSince = 0
+
+/** 轮询间隔：实测单次检测耗时 2~4s，串行调度（见 startQrPolling）避免请求叠加 */
+const QR_POLL_INTERVAL = 3000
+/**
+ * 连续失败多久后换一张新二维码
+ * `803`（扫码成功回传 Cookie）只会在一次检测里出现，一旦整段时间都读不到状态，
+ * 就有可能已经错过它 —— 继续轮询旧 key 只会一直「等待扫码」，换新码才是唯一出路。
+ */
+const QR_SOFT_FAIL_REFRESH_MS = 45_000
+
+/**
+ * 黑胶 VIP 判定：vipType 是位标志而非等级 —— 1 只代表「音乐包」，
+ * 10 / 100 / 110 才是黑胶。与主进程 neteaseAccount.ts#isBlackVipType 保持同一口径。
+ */
+const isBlackVip = (vipType?: number): boolean =>
+  typeof vipType === 'number' && vipType > 0 && ((vipType & 10) !== 0 || vipType >= 100)
 
 /** 当前账号是否为黑胶 VIP */
-const isVip = computed(() => {
-  const u = neteaseUser.value
-  return !!u && typeof u.vipType === 'number' && u.vipType > 0
-})
+const isVip = computed(() => isBlackVip(neteaseUser.value?.vipType))
 
-/** VIP 文案（黑胶VIP Lv.X） */
+/** 会员文案（黑胶VIP Lv.X / 音乐包） */
 const vipLabel = computed(() => {
-  if (!isVip.value) return ''
   const u = neteaseUser.value
-  return u?.vipLevel ? `黑胶VIP Lv.${u.vipLevel}` : '黑胶VIP'
+  if (!u) return ''
+  if (isBlackVip(u.vipType)) {
+    return u.vipLevel && u.vipLevel > 0 ? `黑胶VIP Lv.${u.vipLevel}` : '黑胶VIP'
+  }
+  if (u.vipType === 1) return '音乐包'
+  return ''
 })
 
 const stopQrPolling = () => {
+  qrPollSession++
   if (qrPollTimer) {
-    clearInterval(qrPollTimer)
+    clearTimeout(qrPollTimer)
     qrPollTimer = null
   }
+  qrFailCount = 0
+  qrFailSince = 0
 }
 
 const loadLoginStatus = async () => {
   try {
     const status = await window.api.netease.loginStatus()
-    neteaseUser.value = status.loggedIn ? status.profile || null : null
     neteaseAccounts.value = status.accounts || []
+    // 网络抖动时主进程会返回 loggedIn=false 但仍带 profile：
+    // 此时继续展示已知账号，避免「明明已登录却跳回扫码登录」的信息错乱
+    neteaseUser.value =
+      status.profile || neteaseAccounts.value.find((a) => a.userId === status.activeUserId) || null
   } catch (e) {
     console.error('[AppHeader] 获取网易云登录状态失败:', e)
   }
@@ -81,6 +131,7 @@ const loadLoginStatus = async () => {
 const loadLoginQr = async () => {
   stopQrPolling()
   qrLoading.value = true
+  qrExpired.value = false
   qrStatusText.value = '正在生成二维码...'
   try {
     const { unikey, qrimg } = await window.api.netease.loginQr()
@@ -96,45 +147,100 @@ const loadLoginQr = async () => {
   }
 }
 
+/**
+ * 启动扫码状态轮询
+ *
+ * 用「上一次请求结束后再排下一次」的串行调度替代 setInterval：
+ * 单次检测（含主进程内的网关重试）可能远超 3s，setInterval 会让请求叠加，
+ * 反而把网关压到 429/502 —— 也就是扫码时偶发「检测扫码状态失败: HTTP 502」的放大器。
+ * 上游瞬时失败（主进程回软失败码 <0）不中断轮询，只退避重试。
+ */
 const startQrPolling = () => {
   stopQrPolling()
-  qrPollTimer = setInterval(async () => {
+  const session = qrPollSession
+
+  /** 记录一次失败；连续失败过久则刷新二维码并返回 true（调用方应结束本轮） */
+  const noteFailure = (tip: string): boolean => {
+    qrFailCount++
+    if (!qrFailSince) qrFailSince = Date.now()
+    if (qrFailSince && Date.now() - qrFailSince >= QR_SOFT_FAIL_REFRESH_MS) {
+      // loadLoginQr 内部会 stopQrPolling（作废本会话）并重新开轮询
+      qrStatusText.value = '网络异常，已为你刷新二维码'
+      void loadLoginQr()
+      return true
+    }
+    if (qrFailCount >= 3) qrStatusText.value = tip
+    return false
+  }
+
+  const tick = async (): Promise<void> => {
+    qrPollTimer = null
+    /** 下一次轮询延迟；null 表示停止轮询 */
+    let nextDelay: number | null = QR_POLL_INTERVAL
+
     try {
       const res = await window.api.netease.loginQrCheck(qrUnikey.value)
+      if (session !== qrPollSession) return
+
       if (res.code === 801) {
+        qrFailCount = 0
+        qrFailSince = 0
         qrStatusText.value = '等待扫码...'
       } else if (res.code === 802) {
+        qrFailCount = 0
+        qrFailSince = 0
         qrStatusText.value = '已扫码，请在手机上确认登录'
       } else if (res.code === 800) {
         stopQrPolling()
+        qrExpired.value = true
         qrStatusText.value = '二维码已过期，请点击刷新'
+        nextDelay = null
       } else if (res.code === 803) {
         stopQrPolling()
-        if (res.profile) {
-          neteaseUser.value = res.profile
-          await loadLoginStatus()
-          message.success(`登录成功，欢迎 ${res.profile.nickname}`)
+        qrExpired.value = true
+        // 一律以主进程回传的账号信息为准，避免先用占位昵称渲染出「假的」用户信息
+        await loadLoginStatus()
+        if (neteaseUser.value) {
+          const nickname = res.profile?.nickname || neteaseUser.value.nickname
+          message.success(`登录成功，欢迎 ${nickname}`)
+          showUserPanel.value = false
         } else {
-          neteaseUser.value = { nickname: '网易云用户', userId: '' }
-          message.success('登录成功')
+          qrStatusText.value = '登录成功但未能获取账号信息，请点击刷新重试'
         }
-        showUserPanel.value = false
+        nextDelay = null
+      } else {
+        // 软失败（主进程已重试仍失败）：保留二维码，退避后继续轮询
+        if (noteFailure('网络不稳定，正在重试…')) return
+        nextDelay = Math.min(QR_POLL_INTERVAL * (1 + qrFailCount), 15000)
       }
     } catch (e) {
+      if (session !== qrPollSession) return
       console.error('[AppHeader] 检测网易云扫码状态失败:', e)
+      if (noteFailure('检测登录状态失败，正在重试…')) return
+      nextDelay = Math.min(QR_POLL_INTERVAL * (1 + qrFailCount), 15000)
     }
-  }, 3000)
+
+    if (session === qrPollSession && nextDelay !== null) {
+      qrPollTimer = setTimeout(tick, nextDelay)
+    }
+  }
+
+  qrPollTimer = setTimeout(tick, QR_POLL_INTERVAL)
 }
 
 const handleUserButtonClick = () => {
   showUserPanel.value = !showUserPanel.value
-  if (showUserPanel.value) {
-    if (neteaseUser.value) {
-      // 打开面板时刷新账号状态（VIP / 等级等）
-      loadLoginStatus()
-    } else if (!qrImg.value) {
-      loadLoginQr()
-    }
+  if (!showUserPanel.value) return
+  if (neteaseUser.value) {
+    // 打开面板时刷新账号状态（VIP / 等级等）
+    loadLoginStatus()
+    return
+  }
+  // 未登录：二维码可能已过期或轮询已被关闭，重新生成，避免展示失效二维码配旧状态文案
+  if (!qrImg.value || qrExpired.value) {
+    loadLoginQr()
+  } else {
+    startQrPolling()
   }
 }
 
@@ -160,6 +266,7 @@ const handleLogout = async (userId?: string) => {
   qrImg.value = ''
   qrUnikey.value = ''
   qrStatusText.value = ''
+  qrExpired.value = false
   stopQrPolling()
   message.success('已退出登录')
 }
@@ -186,10 +293,12 @@ let hotSearchLoaded = false
 const suggestions = ref<{
   localSongs: any[]
   localPlaylists: any[]
+  localFolders: any[]
   recent: any[]
 }>({
   localSongs: [],
   localPlaylists: [],
+  localFolders: [],
   recent: []
 })
 const suggestionLoading = ref(false)
@@ -223,29 +332,33 @@ watch(searchText, (newVal) => {
   searchTimer = setTimeout(async () => {
     suggestionLoading.value = true
     try {
-      const keyword = newVal.toLowerCase().trim()
-
-      // 1. Local Songs
-      const localSongs = localMusicStore.songs.filter(s =>
-        s.name?.toLowerCase().includes(keyword) ||
-        s.ar?.some(a => a.name.toLowerCase().includes(keyword)) ||
-        s.al?.name?.toLowerCase().includes(keyword)
-      ).slice(0, 5)
+      // 本地匹配统一交给曲库搜索（标题/歌手/专辑/文件名，同一套归一化规则）
+      const localSongs = getSearchIndex(localMusicStore.songs).search(newVal, { limit: 5 }).items
 
       // 2. Local Playlists
-      const localPlaylists = playlistStore.playlists.filter(p =>
-        p.name.toLowerCase().includes(keyword)
-      ).slice(0, 3)
+      const normalized = normalizeSearchText(newVal)
+      const localPlaylists = playlistStore.playlists
+        .filter((p) => normalizeSearchText(p.name).includes(normalized))
+        .slice(0, 3)
+
+      // 2.5 文件夹歌单（目录名命中，直接跳文件夹详情）
+      const localFolders = localMusicStore.folderPlaylists
+        .filter((f) => normalizeSearchText(f.displayName).includes(normalized))
+        .slice(0, 4)
 
       // 3. Recent Play
-      const recent = playerStore.playHistory.filter(p =>
-        p.title.toLowerCase().includes(keyword) ||
-        p.artist.toLowerCase().includes(keyword)
-      ).slice(0, 5)
+      const recent = playerStore.playHistory
+        .filter(
+          (p) =>
+            normalizeSearchText(p.title).includes(normalized) ||
+            normalizeSearchText(p.artist).includes(normalized)
+        )
+        .slice(0, 5)
 
       suggestions.value = {
         localSongs,
         localPlaylists,
+        localFolders,
         recent
       }
 
@@ -269,6 +382,20 @@ const handleSearch = () => {
     showSuggestions.value = false
     router.push({ name: 'search', query: { q: searchText.value } })
   }
+}
+
+// ===== 搜索历史 =====
+/** 下拉里最多展示的历史条数（完整列表仍保留在 store 中） */
+const MAX_VISIBLE_HISTORY = 8
+const visibleSearchHistory = computed(() => searchHistoryStore.items.slice(0, MAX_VISIBLE_HISTORY))
+
+const handleRemoveHistory = (keyword: string): void => {
+  searchHistoryStore.remove(keyword)
+}
+
+const handleClearHistory = (): void => {
+  searchHistoryStore.clear()
+  message.success('已清空搜索历史')
 }
 
 // 点击热搜词 / 搜索建议：填入关键词并跳转搜索页
@@ -296,14 +423,9 @@ const handleSuggestionClick = (type: string, item: any) => {
     playerStore.setCurrentSong(song)
     playerStore.recordPlay(song)
   } else if (type === 'local-playlist') {
-    // Navigate to playlist detail? Or play?
-    // Assuming we have a route for local playlist or just playlist detail
-    // For now, maybe just do nothing or implement if playlist detail supports it
-    // The current PlaylistDetailView seems to support 'id' param.
-    // Let's assume we can navigate to it.
-    // But wait, playlistStore playlists are user created.
-    // We need to check routes.
     router.push({ name: 'playlist-detail', params: { id: item.id } })
+  } else if (type === 'folder') {
+    router.push({ name: 'folder-detail', params: { id: String(item.id) } })
   } else if (type === 'recent') {
     const song = {
       id: item.songId,
@@ -417,13 +539,15 @@ const goForward = () => {
 
 // 检查是否需要透明背景
 const isTransparent = computed(() => {
-  // 全尺寸歌单页和首页使用透明背景
-  return route.name === 'playlist-detail' || route.name === 'home'
+  // 仅全尺寸歌单页：封面顶到窗口最上方，头部控件需要半透明浮在封面上。
+  // 首页已是普通内容页（内容从头部下方起排），走常规控件样式。
+  return route.name === 'playlist-detail'
 })
 
 // 背景磨砂效果：单层模糊从上到下渐进消失
 const headerGradientStyle = computed(() => {
-  if (route.name === 'playlist-detail' || route.name === 'home') return { display: 'none' }
+  // 沉浸式封面页头部直接压在封面上，不加模糊层，避免封面被糊成一片
+  if (route.name === 'playlist-detail') return { display: 'none' }
   return {
     background: 'transparent',
     backdropFilter: 'blur(40px) saturate(160%)',
@@ -440,7 +564,6 @@ const headerPaddingStyle = computed(() => {
   }
   return {}
 })
-
 </script>
 
 <template>
@@ -450,10 +573,7 @@ const headerPaddingStyle = computed(() => {
     :class="{ 'is-transparent': isTransparent }"
     :style="headerPaddingStyle"
   >
-    <div
-      class="header-gradient-bg"
-      :style="headerGradientStyle"
-    ></div>
+    <div class="header-gradient-bg" :style="headerGradientStyle"></div>
     <div class="left-controls">
       <div style="display: flex; align-items: center; gap: 6px">
         <n-button circle strong secondary size="large" @click="goBack" class="nav-btn">
@@ -472,7 +592,7 @@ const headerPaddingStyle = computed(() => {
         trigger="manual"
         :show="showSuggestions"
         placement="bottom-start"
-        style="padding: 0; width: 350px; border-radius: 14px; overflow: hidden;"
+        style="padding: 0; width: 350px; border-radius: 14px; overflow: hidden"
         :show-arrow="false"
       >
         <template #trigger>
@@ -493,10 +613,47 @@ const headerPaddingStyle = computed(() => {
           <n-scrollbar style="max-height: 400px">
             <!-- 热搜榜：聚焦且未输入时显示 -->
             <template v-if="!searchText.trim()">
+              <!-- 搜索历史 -->
+              <template v-if="visibleSearchHistory.length">
+                <div class="suggestion-header suggestion-header-row">
+                  <span>搜索历史</span>
+                  <button
+                    type="button"
+                    class="history-clear"
+                    title="清空搜索历史"
+                    @mousedown.prevent
+                    @click="handleClearHistory"
+                  >
+                    <n-icon size="13"><i class="mgc_delete_2_line"></i></n-icon>
+                    <span>清空</span>
+                  </button>
+                </div>
+                <div class="history-chips">
+                  <div
+                    v-for="item in visibleSearchHistory"
+                    :key="'history-' + item.keyword"
+                    class="history-chip"
+                    :title="item.keyword"
+                    @click="handleKeywordClick(item.keyword)"
+                  >
+                    <span class="history-chip-text">{{ item.keyword }}</span>
+                    <button
+                      type="button"
+                      class="history-chip-delete"
+                      title="删除该记录"
+                      @mousedown.prevent
+                      @click.stop="handleRemoveHistory(item.keyword)"
+                    >
+                      <n-icon size="12"><i class="mgc_close_line"></i></n-icon>
+                    </button>
+                  </div>
+                </div>
+              </template>
+
               <div class="suggestion-header">热搜榜</div>
               <div
                 v-for="(item, i) in hotSearches"
-                :key="'hot-'+item.searchWord"
+                :key="'hot-' + item.searchWord"
                 class="suggestion-item"
                 @click="handleKeywordClick(item.searchWord)"
               >
@@ -515,7 +672,7 @@ const headerPaddingStyle = computed(() => {
                 <div class="suggestion-header">网易云搜索建议</div>
                 <div
                   v-for="kw in neteaseSuggestions"
-                  :key="'wy-'+kw"
+                  :key="'wy-' + kw"
                   class="suggestion-item"
                   @click="handleKeywordClick(kw)"
                 >
@@ -535,7 +692,7 @@ const headerPaddingStyle = computed(() => {
                 <!-- Local Songs -->
                 <div
                   v-for="item in suggestions.localSongs"
-                  :key="'local-'+item.id"
+                  :key="'local-' + item.id"
                   class="suggestion-item"
                   @click="handleSuggestionClick('local-song', item)"
                 >
@@ -551,7 +708,7 @@ const headerPaddingStyle = computed(() => {
                 <!-- Recent Play -->
                 <div
                   v-for="item in suggestions.recent"
-                  :key="'recent-'+item.songId"
+                  :key="'recent-' + item.songId"
                   class="suggestion-item"
                   @click="handleSuggestionClick('recent', item)"
                 >
@@ -570,7 +727,7 @@ const headerPaddingStyle = computed(() => {
                   <!-- Local Playlists -->
                   <div
                     v-for="item in suggestions.localPlaylists"
-                    :key="'lp-'+item.id"
+                    :key="'lp-' + item.id"
                     class="playlist-item"
                     @click="handleSuggestionClick('local-playlist', item)"
                   >
@@ -582,11 +739,35 @@ const headerPaddingStyle = computed(() => {
                 </div>
               </template>
 
+              <!-- 文件夹歌单 -->
+              <template v-if="suggestions.localFolders.length">
+                <div class="suggestion-header">文件夹</div>
+                <div class="playlist-grid">
+                  <div
+                    v-for="item in suggestions.localFolders"
+                    :key="'fd-' + item.id"
+                    class="playlist-item"
+                    @click="handleSuggestionClick('folder', item)"
+                  >
+                    <div class="playlist-cover-wrapper">
+                      <n-icon size="40"><i class="mgc_folder_2_line"></i></n-icon>
+                    </div>
+                    <div class="playlist-title">{{ item.displayName }}</div>
+                  </div>
+                </div>
+              </template>
+
               <div
-                v-if="!neteaseSuggestions.length && !suggestions.recent.length && !suggestions.localSongs.length && !suggestions.localPlaylists.length"
+                v-if="
+                  !neteaseSuggestions.length &&
+                  !suggestions.recent.length &&
+                  !suggestions.localSongs.length &&
+                  !suggestions.localPlaylists.length &&
+                  !suggestions.localFolders.length
+                "
                 class="no-suggestions"
               >
-                  未找到相关结果
+                未找到相关结果
               </div>
             </template>
           </n-scrollbar>
@@ -600,7 +781,7 @@ const headerPaddingStyle = computed(() => {
         :show="showUserPanel"
         placement="bottom-end"
         :show-arrow="false"
-        style="width: 280px; border-radius: 12px;"
+        style="width: 280px; border-radius: 12px"
       >
         <template #trigger>
           <n-button
@@ -609,7 +790,7 @@ const headerPaddingStyle = computed(() => {
             secondary
             size="large"
             class="action-btn"
-            style="margin-right: 8px;"
+            style="margin-right: 8px"
             title="网易云账号"
             @click="handleUserButtonClick"
           >
@@ -640,7 +821,10 @@ const headerPaddingStyle = computed(() => {
             <n-text strong :depth="1" class="user-panel-name">{{ neteaseUser.nickname }}</n-text>
             <div class="user-panel-tags">
               <n-tag v-if="isVip" type="warning" size="small" :bordered="false">VIP</n-tag>
-              <n-tag v-if="neteaseUser.level" size="small" :bordered="false">
+              <n-tag v-else-if="neteaseUser.vipType === 1" size="small" :bordered="false">
+                音乐包
+              </n-tag>
+              <n-tag v-if="(neteaseUser.level || 0) > 0" size="small" :bordered="false">
                 Lv.{{ neteaseUser.level }}
               </n-tag>
             </div>
@@ -660,18 +844,16 @@ const headerPaddingStyle = computed(() => {
                 :class="{ 'menu-item-active': acc.userId === neteaseUser.userId }"
                 @click="handleSwitchAccount(acc.userId)"
               >
-                <n-avatar
-                  :src="acc.avatarUrl || undefined"
-                  round
-                  :size="28"
-                  class="menu-item-icon"
-                >
+                <n-avatar :src="acc.avatarUrl || undefined" round :size="28" class="menu-item-icon">
                   <n-icon v-if="!acc.avatarUrl" size="16"><i class="mgc_user_fill"></i></n-icon>
                 </n-avatar>
                 <span class="menu-item-label">
                   <span class="menu-item-text">{{ acc.nickname }}</span>
-                  <span v-if="acc.vipType && acc.vipType > 0" class="menu-item-badge vip">VIP</span>
-                  <span v-if="acc.level" class="menu-item-badge">Lv.{{ acc.level }}</span>
+                  <span v-if="isBlackVip(acc.vipType)" class="menu-item-badge vip">黑胶</span>
+                  <span v-else-if="acc.vipType === 1" class="menu-item-badge">音乐包</span>
+                  <span v-if="(acc.level || 0) > 0" class="menu-item-badge"
+                    >Lv.{{ acc.level }}</span
+                  >
                 </span>
                 <n-icon v-if="acc.userId === neteaseUser.userId" size="16" class="menu-item-check">
                   <i class="mgc_check_line"></i>
@@ -694,19 +876,14 @@ const headerPaddingStyle = computed(() => {
           <n-text depth="3" class="user-panel-qr-status">
             {{ qrStatusText || '正在准备二维码...' }}
           </n-text>
-          <n-image v-if="qrImg" :src="qrImg" width="200" style="border-radius: 8px;" />
+          <n-image v-if="qrImg" :src="qrImg" width="200" style="border-radius: 8px" />
           <div v-else-if="qrLoading" class="user-panel-qr-loading">
             <n-spin size="medium" />
           </div>
           <n-divider style="margin: 6px 0 0" />
           <!-- 操作选项：下拉菜单项样式 -->
           <div class="user-panel-menu">
-            <button
-              type="button"
-              class="menu-item"
-              :disabled="qrLoading"
-              @click="handleRefreshQr"
-            >
+            <button type="button" class="menu-item" :disabled="qrLoading" @click="handleRefreshQr">
               <n-icon size="16" class="menu-item-icon"><i class="mgc_refresh_4_line"></i></n-icon>
               <span class="menu-item-label menu-item-text">刷新二维码</span>
             </button>
@@ -909,7 +1086,10 @@ html[data-theme='dark'] .app-header:not(.is-transparent) .search-bar {
 /* } */
 
 html[data-theme='dark'] .app-header:not(.is-transparent) .search-bar :deep(.n-input),
-html[data-theme='dark'] .app-header:not(.is-transparent) .search-bar :deep(.n-input .n-input-wrapper) {
+html[data-theme='dark']
+  .app-header:not(.is-transparent)
+  .search-bar
+  :deep(.n-input .n-input-wrapper) {
   /* 同样不需要做太多，只要文字颜色对就行 */
 }
 
@@ -1032,6 +1212,105 @@ html[data-theme='dark'] .app-header:not(.is-transparent) .search-bar :deep(.n-in
 .search-suggestions {
   max-height: 400px;
   overflow-y: auto;
+}
+
+
+/* 搜索历史标题行：标题 + 清空按钮 */
+.suggestion-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-right: 8px;
+}
+
+.history-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--n-text-color-3);
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.history-clear:hover {
+  color: #d03050;
+  background-color: rgba(128, 128, 128, 0.14);
+}
+
+/* 历史条目：chip 布局，比图标行紧凑，不与下面的热搜榜抢高度 */
+.history-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px 12px;
+}
+
+.history-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 3px 3px 3px 11px;
+  border-radius: 999px;
+  background-color: rgba(128, 128, 128, 0.12);
+  color: var(--n-text-color);
+  font-size: 13px;
+  line-height: 1.6;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.history-chip:hover {
+  background-color: rgba(61, 136, 155, 0.18);
+  color: #3d889b;
+}
+
+html[data-theme='dark'] .history-chip:hover {
+  background-color: rgba(61, 136, 155, 0.3);
+  color: #9dd6e0;
+}
+
+.history-chip-text {
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 单条删除按钮：常显半透明（保证可发现），悬停 chip 或按钮本身时高亮 */
+.history-chip-delete {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  opacity: 0.5;
+  cursor: pointer;
+  transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.history-chip:hover .history-chip-delete {
+  opacity: 1;
+}
+
+.history-chip-delete:hover {
+  color: #d03050;
+  background-color: rgba(208, 48, 80, 0.16);
 }
 
 .no-suggestions {
@@ -1226,7 +1505,9 @@ html[data-theme='dark'] .hot-rank-top {
   text-align: left;
   line-height: 1.3;
   cursor: pointer;
-  transition: background-color 0.18s ease, color 0.18s ease;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease;
 }
 
 .menu-item:hover {

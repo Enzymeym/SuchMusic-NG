@@ -1,96 +1,38 @@
+/**
+ * 原生标签读取的 **electron 侧入口**。
+ *
+ * 只做一件事：用 `nativeModuleLoader` 在「开发 / 打包」两种形态下把
+ * `music_tag_reader.node` 找出来并加载；真正的读取与规范化逻辑在
+ * `tagReaderCore.ts`（纯 Node，可被 scanner 子进程复用）。
+ */
 import { tryLoadNativeModule as tryLoadNative } from './nativeModuleLoader'
+import {
+  describeReader,
+  readManyTagsWith,
+  readTagsWith,
+  resolveReader,
+  type NativeTagReader,
+  type NativeTags
+} from './tagReaderCore'
 
-// napi-rs 自动将 Rust snake_case 字段转成 camelCase，可选字段在缺省时会被省略
-export interface NativePicture {
-  mimeType?: string
-  description?: string
-  data: Uint8Array
-}
+export type {
+  NativePicture,
+  NativeTagInfo,
+  NativeTagReader,
+  NativeTags
+} from './tagReaderCore'
 
-export interface NativeTagInfo {
-  title?: string
-  artist?: string
-  artists?: string[]
-  album?: string
-  albumArtist?: string
-  genre?: string
-  year?: number
-  track?: number
-  totalTracks?: number
-  disc?: number
-  totalDiscs?: number
-  lyrics?: string
-  comment?: string
-  composer?: string
-  picture?: NativePicture
-  durationMs?: number
-  sampleRate?: number
-  bitDepth?: number
-  channels?: number
-  bitrate?: number
-  fileFormat?: string
-}
-
-// 描述 music_tag_reader.node 导出的 camelCase 模块
-export interface NativeTagReader {
-  readTags?: (path: string, options?: { includeCover?: boolean }) => NativeTagInfo | null
-  readMany?: (
-    paths: string[],
-    options?: { includeCover?: boolean }
-  ) => Array<NativeTagInfo | null>
-  default?: NativeTagReader
-}
-
-// 规范化后的标签结构，经由 IPC 返回给渲染进程
-export interface NativeTags {
-  source: 'native'
-  durationMs?: number
-  bitrate?: number
-  sampleRate?: number
-  cover?: { mimeType: string; base64: string }
-  title?: string
-  artists?: string[]
-  artist?: string
-  album?: string
-  albumArtist?: string
-  year?: number
-  lyrics?: string
-  genre?: string
-  track?: number
-  totalTracks?: number
-  disc?: number
-  totalDiscs?: number
-  comment?: string
-  composer?: string
-  fileFormat?: string
-}
-
-let nativeAvailable = false
 let nativeReader: NativeTagReader | null = null
+let nativeReaderPath = ''
+let nativeAvailable = false
+let loadAttempted = false
 
-// 从 native 模块中解析出真正可用的 readTags / readMany
-function resolveReader(module: NativeTagReader): {
-  readTags: ((path: string, options?: { includeCover?: boolean }) => NativeTagInfo | null) | null
-  readMany: ((
-    paths: string[],
-    options?: { includeCover?: boolean }
-  ) => Array<NativeTagInfo | null>) | null
-} {
-  const readTags =
-    module.readTags ||
-    module.default?.readTags ||
-    null
-  const readMany =
-    module.readMany ||
-    module.default?.readMany ||
-    null
-  return { readTags, readMany }
-}
-
-// 懒加载 native 标签读取模块；加载失败或缺少 readTags 时降级为不可用，绝不崩溃
-// 路径解析统一交给 nativeModuleLoader（开发/打包两种形态共用同一套候选目录）
+/**
+ * 懒加载原生模块；失败时静默降级（非 Windows 平台本来就没有这份二进制）。
+ */
 function ensureLoaded(): void {
-  if (nativeReader !== null) return
+  if (loadAttempted) return
+  loadAttempted = true
 
   const result = tryLoadNative<NativeTagReader>({
     label: 'music_tag_reader',
@@ -101,16 +43,17 @@ function ensureLoaded(): void {
   if (!result) {
     console.warn('[music_tag_reader] 原生模块不可用，标签读取降级为内置实现')
     nativeAvailable = false
-    nativeReader = {}
     return
   }
 
   nativeReader = result.module
+  nativeReaderPath = result.path
   const { readTags } = resolveReader(result.module)
-  // 只有拿到了 readTags 才认为 native 可用
   nativeAvailable = typeof readTags === 'function'
   if (!nativeAvailable) {
     console.error('[music_tag_reader] 模块未导出 readTags：', result.module)
+  } else {
+    console.log(`[music_tag_reader] 能力探测：${describeReader(result.module)}`)
   }
 }
 
@@ -119,60 +62,19 @@ export function isTagReaderAvailable(): boolean {
   return nativeAvailable
 }
 
-// 将 napi 返回的 TagInfo 规范化为 IPC 使用的高层结构
-function normalizeTags(info: NativeTagInfo | null): NativeTags | null {
-  if (!info) return null
+/**
+ * 原生模块的绝对路径，供 scanner 子进程加载。
+ * 子进程不能自己调 `nativeModuleLoader`（它依赖 `app`），必须由主进程传入。
+ */
+export function getNativeTagReaderPath(): string {
+  ensureLoaded()
+  return nativeReaderPath
+}
 
-  const trimStr = (v: unknown): string | undefined =>
-    typeof v === 'string' ? v.trim() || undefined : undefined
-
-  let artists: string[] | undefined
-  if (Array.isArray(info.artists) && info.artists.some((a) => typeof a === 'string' && a.trim())) {
-    artists = info.artists
-      .map((a) => String(a || '').trim())
-      .filter((a) => a.length > 0)
-  } else if (typeof info.artist === 'string' && info.artist.trim()) {
-    // 单一 artist 字符串按 '/' 或 ',' 拆分（music-metadata 风格）
-    artists = info.artist
-      .split(/[/,]/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-  }
-
-  let cover: { mimeType: string; base64: string } | undefined
-  if (info.picture && info.picture.data && info.picture.data.byteLength > 0) {
-    cover = {
-      mimeType: info.picture.mimeType || 'image/jpeg',
-      base64: Buffer.from(info.picture.data).toString('base64')
-    }
-  }
-
-  const tags: NativeTags = {
-    source: 'native',
-    durationMs:
-      typeof info.durationMs === 'number' && Number.isFinite(info.durationMs)
-        ? Math.round(info.durationMs)
-        : undefined,
-    bitrate: info.bitrate,
-    sampleRate: info.sampleRate,
-    cover,
-    title: trimStr(info.title),
-    artists,
-    artist: trimStr(info.artist),
-    album: trimStr(info.album),
-    albumArtist: trimStr(info.albumArtist),
-    year: info.year,
-    lyrics: trimStr(info.lyrics),
-    genre: trimStr(info.genre),
-    track: info.track,
-    totalTracks: info.totalTracks,
-    disc: info.disc,
-    totalDiscs: info.totalDiscs,
-    comment: trimStr(info.comment),
-    composer: trimStr(info.composer),
-    fileFormat: trimStr(info.fileFormat)
-  }
-  return tags
+/** 已加载的读取器；不可用时返回 null */
+export function getNativeTagReader(): NativeTagReader | null {
+  ensureLoaded()
+  return nativeAvailable ? nativeReader : null
 }
 
 // 读取单个文件的 native 标签；native 不可用时返回 'UNAVAILABLE'
@@ -182,19 +84,8 @@ export async function readNativeTags(
 ): Promise<NativeTags | null | 'UNAVAILABLE'> {
   ensureLoaded()
   if (!nativeAvailable) return 'UNAVAILABLE'
-  const reader = nativeReader
-  const { readTags } = resolveReader(reader ?? {})
-  try {
-    if (typeof readTags !== 'function') {
-      nativeAvailable = false
-      return 'UNAVAILABLE'
-    }
-    const info = readTags(filePath, opts)
-    return normalizeTags(info)
-  } catch (error) {
-    console.error('读取 native 标签失败:', filePath, error)
-    return null
-  }
+  const tags = await readTagsWith(nativeReader, filePath, opts)
+  return tags
 }
 
 // 批量读取多个文件的 native 标签；native 不可用时返回空数组
@@ -204,23 +95,5 @@ export async function readNativeTagsMany(
 ): Promise<Array<NativeTags | null>> {
   ensureLoaded()
   if (!nativeAvailable) return []
-  const reader = nativeReader
-  const { readMany } = resolveReader(reader ?? {})
-  try {
-    if (typeof readMany !== 'function') {
-      // 若只有 readTags，则逐个降级读取
-      const results: Array<NativeTags | null> = []
-      for (const fp of filePaths) {
-        const r = await readNativeTags(fp, opts)
-        results.push(r === 'UNAVAILABLE' ? null : r)
-      }
-      return results
-    }
-    const infos = readMany(filePaths, opts)
-    if (!Array.isArray(infos)) return []
-    return infos.map((info) => normalizeTags(info))
-  } catch (error) {
-    console.error('批量读取 native 标签失败:', error)
-    return []
-  }
+  return readManyTagsWith(nativeReader, filePaths, opts)
 }

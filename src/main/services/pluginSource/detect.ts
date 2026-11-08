@@ -1,14 +1,15 @@
 /**
  * 音源插件类型识别
  *
- * 三类插件在同一目录下可能混杂，加载前需判定归属：
+ * 几类插件在同一目录下可能混杂，加载前需判定归属：
  *  - lx：洛雪 LX Music v2 desktop 自定义源（JSDoc 头 + globalThis.lx）
  *  - ceru：澜音 Ceru v2（exports.manifest / definePlugin）
- *  - such：本应用 Such 插件（window.source），应走「插件管理」而非音源插件
+ *  - such-v2：本应用 v2 插件（JSDoc 头 + such.register），由「设置 → 插件」加载
+ *  - such：v1 老插件（window.source），已不再支持
  */
 import type { SourcePluginKind } from './types'
 
-export type DetectResult = SourcePluginKind | 'such' | 'unknown'
+export type DetectResult = SourcePluginKind | 'such' | 'such-v2' | 'unknown'
 
 /** 洛雪插件头部元信息 */
 export interface LxScriptInfo {
@@ -48,6 +49,17 @@ export function detectPluginKind(code: string): DetectResult {
     return 'ceru'
   }
 
+  // Such v2：必须排在洛雪之前！
+  // v2 的 JSDoc 头（@name/@version/@author/@homepage）与洛雪完全重合，
+  // 若不先判定，v2 插件会被当成洛雪脚本执行并报「未在 5 秒内发送 inited」。
+  if (
+    /@apiLevel\b/i.test(code) ||
+    /\bsuch\s*\.\s*register\s*\(/.test(code) ||
+    /globalThis\s*\.\s*such\b/.test(code)
+  ) {
+    return 'such-v2'
+  }
+
   // 洛雪：JSDoc 头 或 lx 运行时特征
   if (
     /@(name|version|author|homepage|description)\b/.test(code) ||
@@ -59,7 +71,7 @@ export function detectPluginKind(code: string): DetectResult {
     return 'lx'
   }
 
-  // Such 应用插件
+  // Such v1 应用插件（已停止支持）
   if (/window\s*\.\s*source\s*=/.test(code)) {
     return 'such'
   }

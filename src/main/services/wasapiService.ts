@@ -70,6 +70,49 @@ function loadNativeModule(): any {
 }
 
 /**
+ * 解析实际可用的 WASAPI 输出设备 ID
+ *
+ * 设置中记录的设备 ID 可能为空（首次启动）或已失效（外置声卡/HDMI 拔出、
+ * 设备被禁用）。若把失效 ID 直接交给原生层，设备打开会失败，而原生层在
+ * 「用户明确指定设备」时不会自动回退，最终表现为无法切换输出模式/没有声音。
+ *
+ * @param deviceId 记录的设备 ID（可为空）
+ * @returns 可用设备 ID；系统无可用输出设备时返回 null（交由原生层使用默认设备）
+ */
+export function resolveWasapiDeviceId(deviceId?: string | null): string | null {
+  const trimmed = (deviceId ?? '').trim();
+  // 未指定设备时直接交给原生层使用系统默认设备（原生层本身带默认设备回退），
+  // 避免每首歌创建引擎前都做一次设备枚举
+  if (!trimmed) return null;
+
+  let devices: WasapiDeviceInfo[] = [];
+  try {
+    const native = loadNativeModule();
+    const tempEngine = new native.WasapiOutputEngine();
+    try {
+      devices = tempEngine.enumerateDevices() ?? [];
+    } finally {
+      try { tempEngine.reset(); } catch (e) {}
+    }
+  } catch {
+    // 枚举失败时保留原值，让原生层自行决定
+    return trimmed;
+  }
+
+  if (devices.length === 0) return trimmed;
+
+  if (devices.some((d) => d.id === trimmed)) return trimmed;
+
+  const fallback = devices.find((d) => d.isDefault) ?? devices[0];
+  if (fallback) {
+    console.warn(
+      `[WASAPI] 记录的输出设备不存在，自动改用${fallback.isDefault ? '默认设备' : '首个可用设备'}: ${fallback.name}`
+    );
+  }
+  return fallback?.id ?? null;
+}
+
+/**
  * 创建 WASAPI 输出引擎实例
  * @returns 引擎实例 ID
  */
@@ -152,12 +195,15 @@ export function registerWasapiHandlers(): void {
       const engineId = generateWasapiEngineId();
       const engine = new native.WasapiOutputEngine();
 
-      engine.create(sampleRate, channels, mode, deviceId ?? null);
+      // 自动选择输出设备：记录为空或设备已失效时回退到系统默认设备
+      const resolvedDeviceId = resolveWasapiDeviceId(deviceId);
+      engine.create(sampleRate, channels, mode, resolvedDeviceId);
       wasapiEngines.set(engineId, engine);
 
       return {
         success: true,
         engineId,
+        deviceId: resolvedDeviceId,
         deviceName: engine.getDeviceName(),
         mode
       };

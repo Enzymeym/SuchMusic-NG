@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { NAlert, NDropdown, useMessage } from 'naive-ui'
 import SongList from '../components/common/SongList.vue'
 import { usePlayerStore } from '../stores/playerStore'
@@ -8,24 +8,43 @@ import type { PlayerSong } from '../stores/playerStore'
 import { useLocalMusicStore } from '../stores/localMusicStore'
 import { useSourcePluginStore } from '../stores/sourcePluginStore'
 import { normalizeSourceKey, resolvePluginUrlDetailed } from '../utils/pluginSource'
+import { useLibrarySearch } from '../composables/useLibrarySearch'
+import { useSearchHistoryStore } from '../stores/searchHistoryStore'
+import { normalizeSearchText } from '../../../shared/library/normalize'
+import type { SearchSource } from '../../../shared/plugin/types'
 
 const route = useRoute()
+const router = useRouter()
 const playerStore = usePlayerStore()
 const localMusicStore = useLocalMusicStore()
+const searchHistoryStore = useSearchHistoryStore()
 const message = useMessage()
 
 const keywords = ref('')
 
 // ===== 平台下拉菜单 =====
-type SearchTab = 'local' | 'netease' | 'qq'
+type SearchTab = 'local' | 'netease' | 'qq' | 'plugin'
 const activeTab = ref<SearchTab>('local')
 
-// 平台选项（作为下拉菜单放入标题中）
-const platformOptions = [
-  { label: '本地', key: 'local' },
-  { label: '网易云', key: 'netease' },
-  { label: 'QQ音乐', key: 'qq' }
-]
+/**
+ * 平台下拉菜单：本地 / 网易云 / QQ音乐 / 各插件（每个插件都是一级父项）。
+ *
+ * 多平台插件自带 children（全部平台 + 各平台），单平台插件点一下即选中；
+ * 没有「插件」这个中间层，来源选择也并入这里，标题右侧不再有独立下拉。
+ */
+const platformOptions = computed(() => {
+  const base = [
+    { label: '本地', key: 'local' },
+    { label: '网易云', key: 'netease' },
+    { label: 'QQ音乐', key: 'qq' },
+    { type: 'divider' as const, key: 'plugin-divider' }
+  ]
+  const plugins = buildPluginEntries()
+  if (plugins.length === 0) {
+    return [...base, { label: '暂无可用插件来源', key: 'plugin-empty', disabled: true }]
+  }
+  return [...base, ...plugins]
+})
 
 const platformLabel = computed(() => {
   switch (activeTab.value) {
@@ -33,6 +52,8 @@ const platformLabel = computed(() => {
       return '网易云'
     case 'qq':
       return 'QQ音乐'
+    case 'plugin':
+      return activeSourceLabel.value
     default:
       return '本地'
   }
@@ -44,13 +65,32 @@ const platformIcon = computed(() => {
       return 'mgc_netease_music_line'
     case 'qq':
       return 'mgc_qq_fill'
+    case 'plugin':
+      return 'mgc_extension_line'
     default:
       return 'mgc_computer_line'
   }
 })
 
+/** 展开下拉时顺手拉一次来源列表，避免首次打开「插件」是空的 */
+const onPlatformMenuToggle = (show: boolean): void => {
+  if (show && pluginSources.value.length === 0) void loadPluginSources()
+}
+
 const onPlatformSelect = (key: string | number) => {
-  activeTab.value = String(key) as SearchTab
+  const value = String(key)
+  if (value === 'local' || value === 'netease' || value === 'qq') {
+    activeTab.value = value
+    return
+  }
+  // 插件或插件下的具体平台：切到插件视图并按新来源重搜
+  if (!isPluginScope(value) && !pluginSources.value.some((s) => s.key === value)) return
+  activeSource.value = value
+  if (activeTab.value !== 'plugin') {
+    activeTab.value = 'plugin'
+  } else if (keywords.value.trim()) {
+    searchPluginFromStart()
+  }
 }
 
 // ===== 本地搜索 =====
@@ -62,16 +102,38 @@ const getSongArtist = (song: any): string => {
   return '未知歌手'
 }
 
-// 本地搜索结果：按关键词过滤本地音乐
-const searchResults = computed(() => {
-  if (!keywords.value.trim()) return []
-  const keyword = keywords.value.toLowerCase().trim()
-  return localMusicStore.songs.filter((song) => {
-    const name = song.name?.toLowerCase() || ''
-    const artist = getSongArtist(song).toLowerCase()
-    const album = (song.al?.name || '').toLowerCase()
-    return name.includes(keyword) || artist.includes(keyword) || album.includes(keyword)
-  })
+// 本地搜索结果：走统一的曲库搜索（标题 / 歌手 / 专辑 / 文件名，支持字段前缀）。
+// 本页没有输入框（关键词来自路由 query），所以用 submit 跳过防抖直接生效。
+const localSearch = useLibrarySearch({
+  source: () => localMusicStore.songs,
+  limit: 200
+})
+
+watch(
+  keywords,
+  (value) => localSearch.submit(value ?? ''),
+  { immediate: true }
+)
+
+// 记录搜索历史：本页是唯一「真正执行搜索」的入口，
+// 头部搜索框跳转、热搜词点击、从外部带 query 进入都会经过这里。
+// 统一在此写入，避免各处重复调用；store 内部会去重并置顶。
+watch(keywords, (value) => {
+  const keyword = (value ?? '').trim()
+  if (keyword) searchHistoryStore.add(keyword)
+})
+
+const searchResults = computed(() =>
+  localSearch.hasQuery.value ? localSearch.results.value : []
+)
+
+/** 命中的文件夹歌单（最多 6 个，避免把歌曲列表挤下去） */
+const matchedFolders = computed(() => {
+  const q = normalizeSearchText(keywords.value)
+  if (!q) return []
+  return localMusicStore.folderPlaylists
+    .filter((folder) => normalizeSearchText(folder.displayName).includes(q))
+    .slice(0, 6)
 })
 
 // 处理歌曲点击播放（仅本地文件）
@@ -195,6 +257,17 @@ const resolveNeteaseSong = async (song: any) => {
     source: 'netease',
     sourceSongId: id
   }
+}
+
+/** 点击网易云搜索结果的歌手名：进入该歌手的网易云歌手详情页 */
+const handleNeteaseArtistClick = (artist: { id?: number | string; name: string }) => {
+  if (!artist?.name) return
+  const id = Number(artist.id)
+  router.push({
+    name: 'singer-detail',
+    params: { name: artist.name },
+    query: id > 0 ? { wy: String(id) } : {}
+  })
 }
 
 // 处理网易云歌曲点击播放
@@ -355,6 +428,309 @@ const handleQQSongClick = async (song: any) => {
   }
 }
 
+// ===== 插件搜索（v2 插件 musicSearch 源 + 澜音 provider 统一目录） =====
+
+/** 可用的插件搜索源（只保留已启用且加载成功的） */
+const pluginSources = ref<SearchSource[]>([])
+const pluginSourcesLoading = ref(false)
+
+/**
+ * 选中的来源。一级选项永远是「插件」，多平台插件再级联到具体平台。
+ *
+ * 三种取值，统一用字符串表达，减少一层状态对象：
+ * - `plugin:<pluginId>`     该插件（多平台即「全部平台」）
+ * - 其他                    具体某个来源的 key（即 `source:list-sources` 返回的 key）
+ * - `''`                    尚未选择；读取来源后会自动落到第一个插件
+ */
+const activeSource = ref('')
+const PLUGIN_SCOPE_PREFIX = 'plugin:'
+
+const isPluginScope = (value: string): boolean => value.startsWith(PLUGIN_SCOPE_PREFIX)
+
+/** 按插件聚合：搜索页的一级选项是插件，平台只在插件有多个时级联展开 */
+interface PluginGroup {
+  pluginId: string
+  pluginName: string
+  sources: SearchSource[]
+}
+
+const pluginGroups = computed<PluginGroup[]>(() => {
+  const map = new Map<string, PluginGroup>()
+  for (const source of pluginSources.value) {
+    let group = map.get(source.pluginId)
+    if (!group) {
+      group = { pluginId: source.pluginId, pluginName: source.pluginName, sources: [] }
+      map.set(source.pluginId, group)
+    }
+    group.sources.push(source)
+  }
+  return [...map.values()]
+})
+
+async function loadPluginSources(force = false): Promise<void> {
+  if (!force && pluginSources.value.length > 0) return
+  pluginSourcesLoading.value = true
+  try {
+    const res = await window.api.sources.listSources()
+    const list = res?.success ? (res.sources ?? []) : []
+    pluginSources.value = list.filter((s) => s.enabled && s.state === 'running')
+    // 首次进入或选中的插件已被停用 / 移除：落到第一个可用插件
+    if (!activeSource.value || resolveTargets().length === 0) {
+      const first = pluginGroups.value[0]
+      activeSource.value = first ? `${PLUGIN_SCOPE_PREFIX}${first.pluginId}` : ''
+    }
+  } catch (e) {
+    console.error('[SearchView] 读取插件搜索源失败:', e)
+    pluginSources.value = []
+  } finally {
+    pluginSourcesLoading.value = false
+  }
+}
+
+/** 当前选择对应的来源集合（顺序稳定，用于并发搜索与计数） */
+function resolveTargets(): SearchSource[] {
+  const value = activeSource.value
+  if (isPluginScope(value)) {
+    const pluginId = value.slice(PLUGIN_SCOPE_PREFIX.length)
+    const grouped = pluginSources.value.filter((s) => s.pluginId === pluginId)
+    if (grouped.length > 0) return grouped
+  } else if (value) {
+    const exact = pluginSources.value.filter((s) => s.key === value)
+    if (exact.length > 0) return exact
+  }
+  // 未选择 / 选择已失效：回落到第一个插件
+  return pluginGroups.value[0]?.sources ?? []
+}
+
+/**
+ * 平台下拉里的插件项：每个插件都是一级父项，没有跨插件的聚合项。
+ *
+ * - 只有一个平台 → 直接选中该插件
+ * - 多个平台     → 级联子菜单，子项首条是「全部平台」，其后是各平台
+ *
+ * 父项 key 用 `group:` 前缀，避免与子项（`plugin:<id>`）重复。
+ */
+function buildPluginEntries(): {
+  label: string
+  key: string
+  children?: { label: string; key: string }[]
+}[] {
+  return pluginGroups.value.map((group) => {
+    const pluginKey = `${PLUGIN_SCOPE_PREFIX}${group.pluginId}`
+    if (group.sources.length === 1) {
+      const only = group.sources[0]
+      return {
+        label:
+          only.label && only.label !== group.pluginName
+            ? `${group.pluginName} · ${only.label}`
+            : group.pluginName,
+        key: pluginKey
+      }
+    }
+    return {
+      label: group.pluginName,
+      key: `group:${group.pluginId}`,
+      children: [
+        { label: '全部平台', key: pluginKey },
+        ...group.sources.map((s) => ({ label: s.label, key: s.key }))
+      ]
+    }
+  })
+}
+
+const activeSourceLabel = computed(() => {
+  const value = activeSource.value
+  if (!value) return '插件'
+
+  const group = pluginGroups.value.find((g) => g.pluginId === groupPluginId(value))
+  if (isPluginScope(value)) {
+    if (!group) return '插件'
+    return group.sources.length > 1 ? `${group.pluginName}（全部平台）` : group.pluginName
+  }
+
+  const found = pluginSources.value.find((s) => s.key === value)
+  if (!found) return '插件'
+  return group && group.sources.length > 1 ? `${found.pluginName} · ${found.label}` : found.pluginName
+})
+
+/** 从 key 里取出 pluginId（插件级或具体来源两种形态都适用） */
+function groupPluginId(key: string): string {
+  if (isPluginScope(key)) return key.slice(PLUGIN_SCOPE_PREFIX.length)
+  return pluginSources.value.find((s) => s.key === key)?.pluginId ?? ''
+}
+
+const pluginSongs = ref<any[]>([])
+const pluginLoading = ref(false)
+const pluginLoadMore = ref(false)
+const pluginHasMore = ref(false)
+const pluginSearched = ref(false)
+const pluginCursor = ref<string | undefined>(undefined)
+
+/** 主进程 SourceTrack → SongList 兼容结构（保留插件解析所需的全部字段） */
+const mapPluginItem = (t: any) => {
+  const sourceKey = normalizeSourceKey(t.sourceKey)
+  return {
+    id: `plg-${t.pluginId || 'x'}-${t.sourceKey || ''}-${t.id}`,
+    name: t.title,
+    ar: [{ name: t.artist || '未知歌手' }],
+    al: { name: t.album || '未知专辑', picUrl: t.coverUrl || '' },
+    dt: t.durationMs || 0,
+    picUrl: t.coverUrl || '',
+    source: sourceKey || 'plugin',
+    sourceKey: sourceKey || undefined,
+    sourceSongId: t.id,
+    pluginId: t.pluginId || '',
+    providerId: t.providerId || undefined,
+    // ref 必须是纯数据：这里在请求返回后立即脱离响应式包装前先做一次浅拷贝
+    trackRef: t.ref
+  }
+}
+
+const doSearchPlugin = async (cursor: string | undefined, reset: boolean): Promise<void> => {
+  const kw = keywords.value.trim()
+  if (!kw) return
+  const seq = ++requestSeq
+  pluginLoading.value = true
+  if (reset) {
+    pluginSongs.value = []
+    pluginLoadMore.value = false
+    pluginCursor.value = undefined
+  } else {
+    pluginLoadMore.value = true
+  }
+  try {
+    let raw: any[] = []
+    let nextCursor: string | undefined
+    let hasMore = false
+
+    const targets = resolveTargets()
+    if (targets.length === 0) throw new Error('没有可用的插件搜索源')
+
+    if (targets.length === 1) {
+      // 单来源：直接用插件自己的游标分页
+      const res = await window.api.sources.search({
+        key: targets[0].key,
+        query: kw,
+        limit: PAGE_SIZE,
+        cursor
+      })
+      if (!res?.success) throw new Error(res?.error || '搜索失败')
+      raw = res.items ?? []
+      nextCursor = res.nextCursor
+      hasMore = !!res.hasMore
+    } else {
+      // 多来源（某插件的全部平台）：并发取各源首页后合并，
+      // 跨源游标不通用，因此这一档不提供「加载更多」
+      const batches = await Promise.all(
+        targets.map(async (source) => {
+          try {
+            const res = await window.api.sources.search({
+              key: source.key,
+              query: kw,
+              limit: 20
+            })
+            return res?.success ? (res.items ?? []) : []
+          } catch {
+            return []
+          }
+        })
+      )
+      raw = batches.flat()
+      hasMore = false
+    }
+
+    if (seq !== requestSeq) return // 过期结果，丢弃
+
+    const mapped = raw.map(mapPluginItem)
+    // 同一首歌可能被多个插件返回，按 (插件, 平台, 曲目 id) 去重
+    const seen = new Set<string>()
+    const items = mapped.filter((item) => {
+      const dedupeKey = `${item.pluginId}|${item.sourceKey}|${item.sourceSongId}`
+      if (seen.has(dedupeKey)) return false
+      seen.add(dedupeKey)
+      return true
+    })
+
+    pluginSongs.value = reset ? items : [...pluginSongs.value, ...items]
+    pluginCursor.value = nextCursor
+    pluginHasMore.value = hasMore
+    pluginSearched.value = true
+  } catch (e: any) {
+    console.error('[SearchView] 插件搜索失败:', e)
+    if (seq === requestSeq) message.error(e?.message || '搜索失败，请稍后重试')
+  } finally {
+    if (seq === requestSeq) {
+      pluginLoading.value = false
+      pluginLoadMore.value = false
+    }
+  }
+}
+
+const searchPluginFromStart = () => {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    doSearchPlugin(undefined, true)
+  }, 300)
+}
+
+const handlePluginScroll = (e: Event) => {
+  const target = e.target as HTMLElement
+  if (!target || typeof target.scrollTop !== 'number') return
+  const nearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 150
+  if (nearBottom && pluginHasMore.value && !pluginLoading.value && !pluginLoadMore.value) {
+    doSearchPlugin(pluginCursor.value, false)
+  }
+}
+
+/** 插件曲目 → 可播放对象 */
+const buildPluginPlayerBase = (song: any): PlayerSong => ({
+  id: song.id,
+  title: song.name,
+  artist: getSongArtist(song),
+  cover: song.picUrl || song.al?.picUrl || '',
+  durationMs: song.dt || 0,
+  album: typeof song.al?.name === 'string' ? song.al.name : undefined,
+  source: song.source,
+  sourceKey: song.sourceKey,
+  sourceSongId: song.sourceSongId,
+  pluginId: song.pluginId,
+  providerId: song.providerId,
+  trackRef: song.trackRef
+})
+
+const resolvePluginSongDetail = async (
+  song: any
+): Promise<{ song: PlayerSong | null; error?: string; code?: string }> => {
+  const base = buildPluginPlayerBase(song)
+  const detail = await resolvePluginUrlDetailed(base)
+  if (!detail.url) return { song: null, error: detail.error, code: detail.code }
+  return { song: { ...base, filePath: detail.url, requestHeaders: detail.requestHeaders } }
+}
+
+const resolvePluginSong = async (song: any): Promise<PlayerSong | null> => {
+  const { song: resolved } = await resolvePluginSongDetail(song)
+  return resolved
+}
+
+const handlePluginSongClick = async (song: any) => {
+  const loadingMsg = message.loading('正在获取播放地址…', { duration: 0 })
+  try {
+    const detail = await resolvePluginSongDetail(song)
+    loadingMsg.destroy()
+    if (!detail.song) {
+      const hint = detail.code === 'NO_PLUGIN' ? '（请到「设置 → 插件」导入音源插件）' : ''
+      message.error(`${detail.error || '插件未能解析出播放地址'}${hint}`, { duration: 8000 })
+      return
+    }
+    playerStore.setCurrentSong(detail.song)
+    playerStore.recordPlay(detail.song)
+  } catch (e) {
+    loadingMsg.destroy()
+    console.error('[SearchView] 插件播放地址解析失败:', e)
+    message.error('获取播放地址失败，请稍后重试')
+  }
+}
+
 // ===== 路由关键词同步 =====
 onMounted(() => {
   if (route.query.q) {
@@ -363,6 +739,8 @@ onMounted(() => {
   // 同步音源插件列表，用于「QQ 音乐」标签页的前置可用性提示
   sourcePluginStore.initListeners()
   void sourcePluginStore.refresh()
+  // 插件搜索源目录（v2 musicSearch + 澜音 provider）
+  void loadPluginSources()
 })
 
 watch(() => route.query, (newQuery) => {
@@ -381,26 +759,35 @@ watch(keywords, () => {
       neteaseSearched.value = false
       neteaseHasMore.value = false
       neteaseTotal.value = 0
-    } else {
+    } else if (activeTab.value === 'qq') {
       qqSongs.value = []
       qqSearched.value = false
       qqHasMore.value = false
+    } else {
+      pluginSongs.value = []
+      pluginSearched.value = false
+      pluginHasMore.value = false
+      pluginCursor.value = undefined
     }
     loadHotSearch()
     return
   }
   if (activeTab.value === 'netease') searchNeteaseFromStart()
-  else searchQQFromStart()
+  else if (activeTab.value === 'qq') searchQQFromStart()
+  else searchPluginFromStart()
 })
 
 watch(activeTab, (tab) => {
   if (tab === 'local') return
+  if (tab === 'plugin') void loadPluginSources()
   if (!keywords.value.trim()) {
     loadHotSearch()
   } else if (tab === 'netease') {
     searchNeteaseFromStart()
-  } else {
+  } else if (tab === 'qq') {
     searchQQFromStart()
+  } else {
+    searchPluginFromStart()
   }
 })
 
@@ -415,6 +802,9 @@ const resultCountText = computed(() => {
   }
   if (activeTab.value === 'qq' && qqSearched.value) {
     return `已加载 ${qqSongs.value.length} 首`
+  }
+  if (activeTab.value === 'plugin' && pluginSearched.value) {
+    return `已加载 ${pluginSongs.value.length} 首`
   }
   return ''
 })
@@ -431,10 +821,11 @@ const resultCountText = computed(() => {
               placement="bottom-start"
               :options="platformOptions"
               @select="onPlatformSelect"
+              @update:show="onPlatformMenuToggle"
             >
               <span class="platform-trigger">
                 <i :class="['platform-icon', platformIcon]"></i>
-                <span class="platform-label">{{ platformLabel }}</span>
+                <span class="platform-label" :title="platformLabel">{{ platformLabel }}</span>
                 <i class="mgc_selector_vertical_line platform-arrow"></i>
               </span>
             </n-dropdown>
@@ -448,6 +839,24 @@ const resultCountText = computed(() => {
     <div class="search-content">
       <!-- 本地搜索 -->
       <template v-if="activeTab === 'local'">
+        <!-- 命中的文件夹歌单：先给「整张专辑/某个目录」的入口，再列单曲 -->
+        <div v-if="matchedFolders.length > 0" class="folder-hits">
+          <div class="folder-hits-title">文件夹</div>
+          <div class="folder-hits-list">
+            <button
+              v-for="folder in matchedFolders"
+              :key="folder.id"
+              type="button"
+              class="folder-hit"
+              @click="router.push(`/folder/${folder.id}`)"
+            >
+              <i class="mgc_folder_2_line"></i>
+              <span class="folder-hit-name">{{ folder.displayName }}</span>
+              <span class="folder-hit-count">{{ folder.totalTrackCount }}</span>
+            </button>
+          </div>
+        </div>
+
         <SongList
           v-if="searchResults.length > 0"
           :songs="searchResults"
@@ -455,13 +864,14 @@ const resultCountText = computed(() => {
           @song-click="handleSongClick"
         />
 
-        <div v-else-if="keywords" class="empty-state">
+        <div v-else-if="keywords && matchedFolders.length === 0" class="empty-state">
           <p>本地音乐中未找到匹配"{{ keywords }}"的歌曲</p>
           <p class="hint">请确保已添加本地音乐目录，或切换「网易云」标签在线搜索</p>
         </div>
 
-        <div v-else class="empty-state">
+        <div v-else-if="!keywords" class="empty-state">
           <p>请输入关键词搜索本地音乐</p>
+          <p class="hint">支持按标题、歌手、专辑、文件名匹配，也可用 artist:xxx 限定字段</p>
         </div>
       </template>
 
@@ -488,6 +898,8 @@ const resultCountText = computed(() => {
           :loading="neteaseLoading"
           :load-more="neteaseLoadMore"
           :get-playable-song="resolveNeteaseSong"
+          artist-clickable
+          @artist-click="handleNeteaseArtistClick"
           @song-click="handleNeteaseSongClick"
           @scroll="handleNeteaseScroll"
         />
@@ -506,7 +918,7 @@ const resultCountText = computed(() => {
       </template>
 
       <!-- QQ 音乐搜索（vkeys API 搜索，播放地址由音源插件提供） -->
-      <template v-else>
+      <template v-else-if="activeTab === 'qq'">
         <!-- 插件缺失前置提示：避免点了歌才发现「未找到音源插件」 -->
         <n-alert
           v-if="!hasQQSourcePlugin && (qqSongs.length > 0 || keywords)"
@@ -552,6 +964,58 @@ const resultCountText = computed(() => {
         <div v-else class="empty-state">
           <p>请输入关键词搜索 QQ 音乐</p>
         </div>
+      </template>
+
+      <!-- 插件搜索（v2 插件声明的 musicSearch 源 + 澜音 provider） -->
+      <template v-else>
+        <!-- 没有任何可用搜索源 -->
+        <div v-if="pluginSources.length === 0" class="empty-state">
+          <p>{{ pluginSourcesLoading ? '正在读取插件来源…' : '暂无可用插件来源' }}</p>
+          <p class="hint">
+            请到「设置 → 插件」导入支持搜索的插件并启用（v2 插件需声明 musicSearch，澜音插件自带 provider）
+          </p>
+        </div>
+
+        <template v-else>
+          <!-- 热搜推荐（与网易云 / QQ 共用同一份数据） -->
+          <div v-if="!keywords" class="netease-hot">
+            <p class="hot-title">热搜推荐</p>
+            <div class="hot-list">
+              <span
+                v-for="(item, i) in hotSearches"
+                :key="item.searchWord"
+                class="hot-item"
+                @click="onHotSearchClick(item.searchWord)"
+              >{{ i + 1 }}. {{ item.searchWord }}</span>
+            </div>
+            <p class="hint">
+              当前来源：{{ activeSourceLabel }}（共 {{ pluginGroups.length }} 个插件 ·
+              {{ pluginSources.length }} 个平台）
+            </p>          </div>
+
+          <SongList
+            v-else-if="pluginSongs.length > 0"
+            :songs="pluginSongs"
+            :loading="pluginLoading"
+            :load-more="pluginLoadMore"
+            :get-playable-song="resolvePluginSong"
+            @song-click="handlePluginSongClick"
+            @scroll="handlePluginScroll"
+          />
+
+          <div v-else-if="pluginLoading" class="empty-state">
+            <p>正在搜索「{{ keywords }}」…</p>
+          </div>
+
+          <div v-else-if="pluginSearched" class="empty-state">
+            <p>未找到与"{{ keywords }}"相关的歌曲</p>
+            <p class="hint">可切换到其他来源，或确认插件是否支持该平台搜索</p>
+          </div>
+
+          <div v-else class="empty-state">
+            <p>请输入关键词搜索插件音源</p>
+          </div>
+        </template>
       </template>
     </div>
   </div>
@@ -624,6 +1088,12 @@ const resultCountText = computed(() => {
 
 .platform-label {
   font-weight: 900;
+  /* 插件名可能较长（如「洛雪音乐音源（全部平台）」），超出就省略，避免挤压标题 */
+  max-width: 320px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .platform-arrow {
@@ -681,6 +1151,47 @@ const resultCountText = computed(() => {
 .empty-state .hint {
   font-size: 13px;
   color: #aaa;
+}
+
+/* 本地搜索：命中的文件夹歌单 */
+.folder-hits {
+  padding: 4px 4px 12px;
+}
+
+.folder-hits-title {
+  font-size: 13px;
+  color: var(--n-text-color-3, #888);
+  margin: 4px 0 10px;
+}
+
+.folder-hits-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.folder-hit {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--n-border-color, rgba(0, 0, 0, 0.08));
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.16s ease, border-color 0.16s ease;
+}
+
+.folder-hit:hover {
+  background: var(--n-color-hover, rgba(0, 0, 0, 0.04));
+  border-color: var(--n-border-color-hover, rgba(0, 0, 0, 0.16));
+}
+
+.folder-hit-count {
+  font-size: 12px;
+  color: var(--n-text-color-3, #999);
 }
 
 /* 网易云热搜 */

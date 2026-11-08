@@ -11,7 +11,7 @@ import PlayerBar from '../components/layout/PlayerBar.vue'
 const route = useRoute()
 const player = usePlayerStore()
 
-const immersiveRoutes = ['playlist-detail']
+const immersiveRoutes = ['playlist-detail', 'singer-detail']
 
 const isImmersive = computed(() => {
   return immersiveRoutes.includes(route.name as string)
@@ -125,7 +125,7 @@ onUnmounted(() => {
             <router-view v-slot="{ Component, route }">
               <PageTransition>
                 <keep-alive
-                  :include="['local', 'playlist', 'recent', 'singer', 'album']"
+                  :include="['local', 'playlist', 'recent', 'singer', 'album', 'folder-detail']"
                   :max="3">
                   <component :is="Component" :key="route.fullPath" />
                 </keep-alive>
@@ -241,6 +241,8 @@ html[data-theme='dark'] .header {
   box-sizing: border-box;
   overflow-y: auto;
   overflow-x: hidden;
+  /* 页面过渡时离场元素是 absolute，需要这里作为定位参照 */
+  position: relative;
 }
 
 /* 沉浸式页面容器：去除顶部内边距，内容直接顶到顶部，且去除最大宽度限制 */

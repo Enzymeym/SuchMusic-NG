@@ -53,6 +53,20 @@ export function isWebAudioMode(): boolean {
   }
 }
 
+/**
+ * 判断当前是否为 WASAPI 独占模式。
+ *
+ * 独占模式下应用绕过系统混音器，系统音量对实际输出无效
+ * （用于「低音量补偿」判断是否把系统音量计入实际响度）。
+ */
+export function isWasapiExclusiveMode(): boolean {
+  try {
+    return useSettingsStore().playback.audioOutputMode === 'wasapi-exclusive';
+  } catch {
+    return false;
+  }
+}
+
 /// 音频设备信息接口
 export interface AudioDevice {
   id: string;
@@ -68,6 +82,18 @@ interface WasapiEngineState {
   isReady: boolean;
   deviceName: string;
   mode: string;
+}
+
+/// 模式切换结果
+export interface SwitchModeResult {
+  success: boolean;
+  error?: string;
+  /// 引擎实际使用的设备 ID（可能由默认设备自动补全）
+  deviceId?: string;
+  /// 引擎实际使用的设备名称
+  deviceName?: string;
+  /// 引擎实际生效的模式（独占失败时会回退为共享）
+  mode?: AudioOutputMode;
 }
 
 /**
@@ -275,6 +301,43 @@ export class AudioOutputModeManager {
   }
 
   /**
+   * 解析实际可用的输出设备
+   *
+   * 切换模式时并不总能拿到有效设备 ID：首次启动 store 中可能为空，
+   * 用户之前选择的外置声卡/HDMI 设备也可能已被拔出（ID 失效）。
+   * 此时必须自动回退到系统默认设备，否则 WASAPI 初始化会因
+   * 「获取设备失败」直接报错，表现为模式切换不了。
+   *
+   * @param preferredId 用户/设置中记录的设备 ID（可为空）
+   * @returns 可用的设备 ID 与名称；无任何可用设备时返回空对象
+   */
+  async resolveDeviceId(
+    preferredId?: string
+  ): Promise<{ deviceId?: string; deviceName?: string }> {
+    if (!isWindowsPlatform()) return {};
+
+    const devices = await this.enumerateDevices();
+    if (devices.length === 0) return {};
+
+    const trimmed = (preferredId ?? '').trim();
+    const matched = trimmed ? devices.find((d) => d.id === trimmed) : undefined;
+    if (matched) {
+      return { deviceId: matched.id, deviceName: matched.name };
+    }
+
+    // 记录的设备不存在（为空 / 已拔出 / 来自旧版本），自动选择默认设备
+    const fallback = devices.find((d) => d.isDefault) ?? devices[0];
+    if (!fallback) return {};
+
+    if (trimmed) {
+      console.warn(
+        `[AudioOutput] 记录的输出设备不存在，自动改用${fallback.isDefault ? '默认设备' : '首个可用设备'}: ${fallback.name}`
+      );
+    }
+    return { deviceId: fallback.id, deviceName: fallback.name };
+  }
+
+  /**
    * 切换到指定音频输出模式
    *
    * # 参数
@@ -285,7 +348,7 @@ export class AudioOutputModeManager {
    *   - `deviceId`: 目标设备 ID (可选)
    *
    * # 返回值
-   * 成功返回 { success: true }，失败返回 { success: false, error }
+   * 成功返回 { success: true, deviceId, deviceName, mode }，失败返回 { success: false, error }
    */
   async switchMode(
     mode: AudioOutputMode,
@@ -294,7 +357,7 @@ export class AudioOutputModeManager {
       channels?: number;
       deviceId?: string;
     }
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<SwitchModeResult> {
     // 先停止当前 WASAPI 会话
     if (this.wasapiState.engineId) {
       await this.stopWasapi();
@@ -305,7 +368,7 @@ export class AudioOutputModeManager {
     if (mode === 'webaudio') {
       this.currentMode = 'webaudio';
       this.onModeChanged?.('webaudio');
-      return { success: true };
+      return { success: true, mode: 'webaudio' };
     }
 
     // WASAPI 模式切换
@@ -316,19 +379,37 @@ export class AudioOutputModeManager {
     try {
       const api = getWasapiApi();
       if (!api) return { success: false, error: 'WASAPI API 未就绪' };
-      const result = await api.create(
-        sampleRate,
-        channels,
-        wasapiMode,
-        config?.deviceId
-      );
+
+      // 自动选择输出设备：未指定 / 设备已失效时回退到默认设备
+      const resolved = await this.resolveDeviceId(config?.deviceId);
+      let targetDeviceId = resolved.deviceId;
+      let result = await api.create(sampleRate, channels, wasapiMode, targetDeviceId);
+
+      // 指定设备初始化失败（例如独占被其他应用占用、设备不支持该格式）时，
+      // 再尝试一次系统默认设备，避免直接判失败导致模式切换不了
+      if (!result.success && targetDeviceId) {
+        console.warn(
+          '[AudioOutput] 指定设备初始化失败，尝试使用默认设备重试:',
+          cleanRustError(result.error || '未知错误')
+        );
+        targetDeviceId = undefined;
+        result = await api.create(sampleRate, channels, wasapiMode, undefined);
+      }
 
       if (result.success && result.engineId) {
+        // 回退到默认设备时没有显式 ID，用引擎回报的设备名反查设备 ID，
+        // 以便设置页把实际生效的设备写回 store（否则下次切换又会重试一遍）
+        let actualDeviceId = targetDeviceId;
+        if (!actualDeviceId && result.deviceName) {
+          const devices = await this.enumerateDevices();
+          actualDeviceId = devices.find((d) => d.name === result.deviceName)?.id;
+        }
+
         this.wasapiState = {
           engineId: result.engineId,
           isRunning: false,
           isReady: true,
-          deviceName: result.deviceName ?? '',
+          deviceName: result.deviceName ?? resolved.deviceName ?? '',
           mode: result.mode ?? wasapiMode,
         };
         this.currentMode = mode;
@@ -343,7 +424,12 @@ export class AudioOutputModeManager {
         }
 
         this.onModeChanged?.(this.currentMode);
-        return { success: true };
+        return {
+          success: true,
+          deviceId: actualDeviceId,
+          deviceName: this.wasapiState.deviceName,
+          mode: this.currentMode,
+        };
       }
 
       // 记录失败原因并回退到 Web Audio

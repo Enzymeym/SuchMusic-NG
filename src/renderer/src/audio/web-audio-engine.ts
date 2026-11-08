@@ -23,6 +23,17 @@ const BASS_SWAP_HP_MIN = 20
 const BASS_SWAP_HP_MAX = 250
 /** 交叉淡化曲线分段数：用折线逼近等功率曲线（等功率为曲线，需多点拟合） */
 const FADE_CURVE_SEGMENTS = 64
+/**
+ * 交叉淡化重叠区预留的峰值余量（幅度系数）。
+ *
+ * 等功率曲线满足 cos²+sin²=1（功率恒定），但两轨在 50% 处各自的幅度都是 0.707，
+ * 若两轨内容相关（同类素材、同相低频、都被母带压到 0 dBFS 附近），叠加幅度可达
+ * 1.414（+3 dB）→ 超过满刻度被硬削波，听感就是"过渡时爆音/失真"。
+ * 这里在中点把双轨幅度按该系数收一点，使最坏叠加不超过 1.0；曲线形状用
+ * sin⁴ 收窄，让这点衰减只集中在重叠区中部，两端（单一曲目独奏）仍是 1.0，
+ * 不会让整段过渡变小。置为 1 可恢复"纯等功率"的旧行为。
+ */
+const CROSSFADE_HEADROOM = Math.SQRT1_2
 
 /** 交叉淡化选项 */
 export interface CrossfadeOptions {
@@ -42,6 +53,14 @@ export class WebAudioOutputEngine {
   private sourceB: AudioBufferSourceNode | null = null
   /** 用户音量节点（DSP 链/输出的入口），替代原 gainNode 语义 */
   private masterGain: GainNode | null = null
+  /**
+   * 最近一次设定的用户音量。
+   *
+   * GainNode 可能晚于音量设置才创建（AudioContext 懒初始化，例如交叉淡化预解码
+   * 先建上下文），此时 setVolume 无处可写。记住该值并在每次新建 GainNode 时套用，
+   * 否则新上下文一律从 1.0 起播 —— 表现为「音量条是 30%，一开声却是满音量」。
+   */
+  private masterVolume = 1
   /** 当前曲子增益（交叉淡化用），初始 1 */
   private gainA: GainNode | null = null
   /** 下一曲子增益（交叉淡化用），初始 1 */
@@ -65,6 +84,66 @@ export class WebAudioOutputEngine {
   // ====== 音频可视化 ======
 
   private analyserNode: AnalyserNode | null = null
+
+  /** attachDspChain 幂等标记：当前已接线的 DSP 链与输出端 */
+  private dspAttachTarget: WebAudioDspChain | null = null
+  private dspAttachDest: AudioNode | null = null
+
+  // ====== 动态 EQ 分析 tap（pre-EQ，高分辨率） ======
+  /**
+   * 专用频谱分析节点：从 masterGain 引出（DSP 链之前），不接 destination。
+   * fftSize=2048（bin 宽 ~21.5Hz @44.1k），保证 32/64/125Hz 低频段有足够分辨率
+   * —— 可视化用的 analyserNode（fftSize=256，bin 宽 ~172Hz）低频完全糊掉。
+   * pre-EQ 取样可避免"自己提升自己"的反馈回路。
+   */
+  private analysisTap: AnalyserNode | null = null
+  private analysisTapBuffer: Float32Array<ArrayBuffer> | null = null
+  /** 分析 tap 的静音输出端（保证 AnalyserNode 被渲染线程驱动） */
+  private analysisTapSink: GainNode | null = null
+
+  /** 确保 pre-EQ 分析 tap 存在并接到 masterGain（connect 对同一对是幂等的） */
+  private ensureAnalysisTap(): void {
+    if (!this.audioContext || !this.masterGain) return
+    if (!this.analysisTap) {
+      const tap = this.audioContext.createAnalyser()
+      tap.fftSize = 2048
+      tap.smoothingTimeConstant = 0.6
+      this.analysisTap = tap
+      this.analysisTapBuffer = new Float32Array(tap.frequencyBinCount)
+      // AnalyserNode 必须位于"有输出"的支路上才会被渲染线程驱动；
+      // 串一个 0 增益 GainNode 到 destination，保证有数据且完全静音。
+      const silent = this.audioContext.createGain()
+      silent.gain.value = 0
+      tap.connect(silent)
+      silent.connect(this.audioContext.destination)
+      this.analysisTapSink = silent
+    }
+    // doPlay / attachDspChain 会调用 masterGain.disconnect() 清掉全部输出，
+    // 这里每次重连保证 tap 始终在线（幂等，无副作用）
+    try {
+      this.masterGain.connect(this.analysisTap)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** 当前 AudioContext 采样率（Hz）；未创建时返回 44100 */
+  get outputSampleRate(): number {
+    return this.audioContext?.sampleRate || 44100
+  }
+
+  /**
+   * 读取 pre-EQ 频谱（dB 域，Float32Array，frequencyBinCount 长度）。
+   * 供动态 EQ 实时分析使用；上下文未就绪返回 null。
+   */
+  readAnalysisSpectrumDb(): Float32Array | null {
+    if (!this.audioContext || !this.masterGain) return null
+    this.ensureAnalysisTap()
+    if (!this.analysisTap || !this.analysisTapBuffer) return null
+    this.analysisTap.getFloatFrequencyData(this.analysisTapBuffer)
+    return this.analysisTapBuffer
+  }
+
   private fftCallbacks: Array<(spectrum: number[]) => void> = []
   private timeDomainCallbacks: Array<(data: Float32Array) => void> = []
   private timeDomainBuffer: Float32Array<ArrayBuffer> | null = null
@@ -148,7 +227,11 @@ export class WebAudioOutputEngine {
     if (this.fftRafId !== null) return // 防止重复启动
     const buffer = new Uint8Array(128)
     const normalized = new Array<number>(128)
-    const tick = () => {
+    // 限帧：AnalyserNode 的数据在 ~30fps 下已足够可视化，
+    // 无需跟随 60fps 的 rAF，省掉一半的 getByteFrequencyData + 归一化
+    const FRAME_INTERVAL_MS = 33
+    let lastReadAt = 0
+    const tick = (now: number) => {
       if (
         !this.analyserNode ||
         (this.fftCallbacks.length === 0 && this.timeDomainCallbacks.length === 0)
@@ -156,21 +239,25 @@ export class WebAudioOutputEngine {
         this.fftRafId = null
         return
       }
-      // FFT 频谱数据（喂给 onFftData 回调）
-      if (this.fftCallbacks.length > 0) {
-        this.analyserNode.getByteFrequencyData(buffer)
-        for (let i = 0; i < 128; i++) {
-          normalized[i] = buffer[i] / 255
+      // 窗口隐藏时跳过读取（播放继续，只是不再算可视化）
+      if (!document.hidden && now - lastReadAt >= FRAME_INTERVAL_MS) {
+        lastReadAt = now
+        // FFT 频谱数据（喂给 onFftData 回调）
+        if (this.fftCallbacks.length > 0) {
+          this.analyserNode.getByteFrequencyData(buffer)
+          for (let i = 0; i < 128; i++) {
+            normalized[i] = buffer[i] / 255
+          }
+          for (const cb of this.fftCallbacks) {
+            cb(normalized)
+          }
         }
-        for (const cb of this.fftCallbacks) {
-          cb(normalized)
-        }
-      }
-      // 实时时域帧数据（喂给 onTimeDomainData 回调）
-      if (this.timeDomainCallbacks.length > 0 && this.timeDomainBuffer) {
-        this.analyserNode.getFloatTimeDomainData(this.timeDomainBuffer)
-        for (const cb of this.timeDomainCallbacks) {
-          cb(this.timeDomainBuffer)
+        // 实时时域帧数据（喂给 onTimeDomainData 回调）
+        if (this.timeDomainCallbacks.length > 0 && this.timeDomainBuffer) {
+          this.analyserNode.getFloatTimeDomainData(this.timeDomainBuffer)
+          for (const cb of this.timeDomainCallbacks) {
+            cb(this.timeDomainBuffer)
+          }
         }
       }
       this.fftRafId = requestAnimationFrame(tick)
@@ -218,7 +305,8 @@ export class WebAudioOutputEngine {
     const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext
     const ctx = new AudioContextClass({ sampleRate })
     const gain = ctx.createGain()
-    gain.gain.value = 1.0
+    // 套用已记录的用户音量（而非固定 1.0），避免新建上下文把音量重置为满
+    gain.gain.value = this.masterVolume
     // 注意：masterGain 的输出连接统一由 doPlay/attachDspChain 路由，
     // 这里不再直连 destination，避免与后续 analyser/DSP 链路形成多路并联（重音根因）
     this.audioContext = ctx
@@ -288,7 +376,7 @@ export class WebAudioOutputEngine {
       const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext
       ctx = new AudioContextClass() as AudioContext
       gain = ctx.createGain()
-      gain.gain.value = 1.0
+      gain.gain.value = this.masterVolume
       this.audioContext = ctx
       this.masterGain = gain
       this.restoreAnalyserIfNeeded()
@@ -328,6 +416,13 @@ export class WebAudioOutputEngine {
    * @returns 解码成功与否
    */
   async loadNextFromArrayBuffer(buffer: ArrayBuffer): Promise<boolean> {
+    // 交叉淡化进行中：nextBuffer 此刻正是"在飞的下一曲"，覆盖它会让
+    // finalizeCrossfade 把错误的缓冲提升为当前曲（听感上是串曲/错歌）。
+    if (this._isCrossfading) {
+      console.warn('[WebAudioEngine] 交叉淡化进行中，忽略新的下一曲预解码')
+      return false
+    }
+
     let ctx = this.audioContext
 
     // 自动初始化（首次调用时创建 AudioContext + GainNode）
@@ -335,7 +430,7 @@ export class WebAudioOutputEngine {
       const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext
       ctx = new AudioContextClass() as AudioContext
       const gain = ctx.createGain()
-      gain.gain.value = 1.0
+      gain.gain.value = this.masterVolume
       this.audioContext = ctx
       this.masterGain = gain
       this.restoreAnalyserIfNeeded()
@@ -348,6 +443,12 @@ export class WebAudioOutputEngine {
 
     try {
       const decoded = await ctx.decodeAudioData(buffer)
+      // 解码期间可能已经开始了一次交叉淡化：此时 nextBuffer 已被占用，
+      // 直接丢弃本次解码结果，交由下一轮预解码重新准备。
+      if (this._isCrossfading) {
+        console.warn('[WebAudioEngine] 解码期间进入交叉淡化，丢弃本次预解码结果')
+        return false
+      }
       this.nextBuffer = decoded
       return true
     } catch (err) {
@@ -370,6 +471,23 @@ export class WebAudioOutputEngine {
     if (this.analyserNode) {
       this.analyserNode.disconnect()
       this.analyserNode = null
+    }
+    if (this.analysisTap) {
+      try {
+        this.analysisTap.disconnect()
+      } catch {
+        /* ignore */
+      }
+      this.analysisTap = null
+      this.analysisTapBuffer = null
+    }
+    if (this.analysisTapSink) {
+      try {
+        this.analysisTapSink.disconnect()
+      } catch {
+        /* ignore */
+      }
+      this.analysisTapSink = null
     }
     if (this.audioContext) {
       this.audioContext.close().catch((err) => {
@@ -398,14 +516,20 @@ export class WebAudioOutputEngine {
   attachDspChain(chain: WebAudioDspChain): void {
     this.dspChain = chain
     if (this.audioContext && this.masterGain) {
+      const finalDest = this.analyserNode ?? this.audioContext.destination
+      // 幂等保护：动态 EQ 每拍都会走 ensureDspChain → attachDspChain，
+      // 若无条件 disconnect/connect，会每秒数十次反复断线重连（爆音风险，
+      // 且会把 pre-EQ 分析 tap 一起摘掉）。同一链 + 同一输出端时直接返回。
+      if (this.dspAttachTarget === chain && this.dspAttachDest === finalDest) return
       // 断开 masterGain 全部旧输出，确保仅保留唯一输出路径
       try {
         this.masterGain.disconnect()
       } catch {
         /* 忽略 */
       }
-      const finalDest = this.analyserNode ?? this.audioContext.destination
       chain.connect(this.masterGain, finalDest)
+      this.dspAttachTarget = chain
+      this.dspAttachDest = finalDest
     }
   }
 
@@ -490,8 +614,13 @@ export class WebAudioOutputEngine {
       // DSP 链的 connect() 已优化为复用内部节点，仅在首次时构建
       // 此处仅重新连线 masterGain → DSP 链 → finalDest
       this.dspChain.connect(this.masterGain, finalDest)
+      // 记下已接线状态，避免后续 attachDspChain 重复断线重连
+      this.dspAttachTarget = this.dspChain
+      this.dspAttachDest = finalDest
     } else {
       this.masterGain.connect(finalDest)
+      this.dspAttachTarget = null
+      this.dspAttachDest = null
     }
 
     const now = ctx.currentTime
@@ -534,7 +663,7 @@ export class WebAudioOutputEngine {
     // getPositionSeconds 依赖 _isPlaying=true 才会计算，若先置 false 将永远读到 _pausedOffset
     const pos = this.getPositionSeconds()
 
-    // 若处于交叉淡化中，打断并清理（复位增益、停止 sourceB、触发 onended 供上层感知）
+    // 若处于交叉淡化中，打断并清理（复位增益、停止 sourceB；下一曲已出声时切到其时间轴）
     this.interruptCrossfade()
 
     this._pausedOffset = Math.max(0, pos)
@@ -563,7 +692,7 @@ export class WebAudioOutputEngine {
    * 停止播放并重置
    */
   stop(): void {
-    // 若处于交叉淡化中，先打断（复位增益、停止 sourceB、清空 nextBuffer、触发 onended）
+    // 若处于交叉淡化中，先打断（复位增益、停止 sourceB、清空 nextBuffer）
     this.interruptCrossfade()
     this.stopSourceNode()
     this._isPlaying = false
@@ -578,9 +707,10 @@ export class WebAudioOutputEngine {
    * @param positionMs 目标位置（毫秒）
    */
   seek(positionMs: number): void {
-    const offsetSeconds = Math.max(0, Math.min(positionMs / 1000, this._duration))
-    // 若处于交叉淡化中，先打断（复位增益、停止 sourceB、清空 nextBuffer、触发 onended）
+    // 先打断交叉淡化：若下一曲已出声，这里会把播放上下文切到下一曲，
+    // 之后按最终时间轴的时长钳制目标位置才正确（否则会拿上一曲的时长做上限）
     this.interruptCrossfade()
+    const offsetSeconds = Math.max(0, Math.min(positionMs / 1000, this._duration))
     this.stopSourceNode()
     this._pausedOffset = offsetSeconds
     this._isPlaying = false
@@ -594,8 +724,11 @@ export class WebAudioOutputEngine {
    * @param volume 音量增益（>= 0.0，可大于 1.0 用于增强）
    */
   setVolume(volume: number): void {
+    // 记录最新值：GainNode 可能尚未创建（AudioContext 懒初始化），
+    // 创建时会用 masterVolume 初始化，避免新上下文从满音量起播
+    this.masterVolume = Number.isFinite(volume) ? Math.max(0, volume) : this.masterVolume
     if (this.masterGain) {
-      this.masterGain.gain.value = Math.max(0, volume)
+      this.masterGain.gain.value = this.masterVolume
     }
   }
 
@@ -647,6 +780,20 @@ export class WebAudioOutputEngine {
       curveType === 'linear'
         ? buildLinearCurves(FADE_CURVE_SEGMENTS)
         : buildEqualPowerCurves(FADE_CURVE_SEGMENTS)
+
+    // 等功率曲线在两轨内容相关时叠加幅度会超过满刻度（见 CROSSFADE_HEADROOM），
+    // 这里把重叠区中部按余量收一点，避免过渡时被硬削波成爆音。
+    // 线性曲线本身满足 fadeOut+fadeIn=1（幅度互补），不存在该问题，不做处理。
+    if (curveType !== 'linear' && CROSSFADE_HEADROOM < 1) {
+      const n = curves.fadeOut.length
+      for (let i = 0; i < n; i++) {
+        const t = n > 1 ? i / (n - 1) : 0
+        const s = Math.sin(Math.PI * t)
+        const trim = 1 - (1 - CROSSFADE_HEADROOM) * s * s * s * s
+        curves.fadeOut[i] *= trim
+        curves.fadeIn[i] *= trim
+      }
+    }
 
     // 确保 gainB / filterB 节点存在（懒创建；AudioNode.connect 对同一输出/输入对是幂等的）
     if (!this.gainB) {
@@ -764,11 +911,16 @@ export class WebAudioOutputEngine {
     const n = curve.length
     if (n < 2) return
     param.cancelScheduledValues(now)
-    // 固定当前值，避免延迟窗口内沿用旧自动化
-    param.setValueAtTime(param.value, now)
-    if (startAt > now) param.setValueAtTime(curve[0], startAt)
+    // 起播前保持当前值，避免延迟窗口内沿用上一次的残留自动化
+    if (startAt > now) param.setValueAtTime(param.value, now)
+    // 起播时刻必须钉到曲线起点 curve[0]。
+    // 旧实现只在 startAt > now 时才钉 curve[0]，于是 startDelayMs === 0（进度轮询
+    // 正好跨过触发点）时，gainB 会从它的初始值 1.0 开始做第一段斜坡 —— 等于下一曲
+    // 在起播瞬间以满音量爆出一小段（约 fadeMs/64，3 秒过渡约 47ms），并与仍在满音量
+    // 淡出的当前曲叠加到 +6 dB，被硬削波，听感就是"非常严重的爆音"。
+    param.setValueAtTime(curve[0], Math.max(now, startAt))
     for (let i = 1; i < n; i++) {
-      const t = startAt + (dur * i) / (n - 1)
+      const t = Math.max(now, startAt) + (dur * i) / (n - 1)
       param.linearRampToValueAtTime(curve[i], t)
     }
   }
@@ -826,14 +978,25 @@ export class WebAudioOutputEngine {
    */
   private finalizeCrossfade(): void {
     if (!this._isCrossfading) return // 幂等保护，防止兜底与 onended 重入
+
+    const now = this.audioContext?.currentTime ?? 0
+    // sourceB 尚未起播就收尾（当前曲提前结束 / 触发点计算偏差）时不能交换槽位：
+    // 此时把未起播的 sourceB 提升为当前源会让播放"凭空跳到下一曲开头"，
+    // 位置时间轴也会错乱。交给兜底定时器在真正起播后再收尾。
+    if (this.crossfadeStartAt > 0 && now < this.crossfadeStartAt) {
+      console.warn(
+        '[WebAudioEngine] 交叉淡化在起播前收尾，延后至起播后再处理',
+        { now, startAt: this.crossfadeStartAt }
+      )
+      return
+    }
+
     this._isCrossfading = false
 
     if (this.crossfadeFallbackTimer !== null) {
       clearTimeout(this.crossfadeFallbackTimer)
       this.crossfadeFallbackTimer = null
     }
-
-    const now = this.audioContext?.currentTime ?? 0
 
     // 停止并断开已结束的 sourceA
     if (this.sourceA) {
@@ -898,8 +1061,13 @@ export class WebAudioOutputEngine {
     this.crossfadeOffsetSec = 0
 
     // audioBuffer 引用指向下一曲，同步元数据
-    if (this.nextBuffer) {
-      this.audioBuffer = this.nextBuffer
+    // 兜底：nextBuffer 意外缺失时以已接管的 sourceA.buffer 为准，
+    // 否则 audioBuffer 仍指向上一曲，attachSourceEndedHandler 的
+    // "sourceA.buffer === audioBuffer" 判定永远不成立，本曲播完不再触发 onEnded，
+    // 播放会静默卡死（UI 显示播放中、实际没有声音也不再切歌）。
+    const promotedBuffer = this.nextBuffer ?? this.sourceA?.buffer ?? null
+    if (promotedBuffer) {
+      this.audioBuffer = promotedBuffer
       this._duration = this.audioBuffer.duration
       this._sampleRate = this.audioBuffer.sampleRate
       this._channels = this.audioBuffer.numberOfChannels
@@ -916,8 +1084,11 @@ export class WebAudioOutputEngine {
 
   /**
    * 打断交叉淡化（stop/seek/pause/dispose/loadFromArrayBuffer 共用）
-   * 复位子增益、停止并断开 sourceB、清空 nextBuffer、清除兜底定时器，
-   * 并触发 onended 供上层 handleSongEnd 感知（保持现有语义）
+   * 复位子增益与低频避让滤波、停止并断开 sourceB、清空 nextBuffer、清除兜底定时器。
+   *
+   * 若打断发生在 sourceB **已经起播之后**（交叉淡化中段被打断，如暂停/拖动进度），
+   * 则把当前曲缓冲提升为下一曲：此时用户听到的就是下一曲，暂停后恢复/seek 都必须
+   * 落在下一曲的时间轴上，否则会"恢复播放却放出上一首"、位置与总时长也对不上。
    */
   private interruptCrossfade(): void {
     if (!this._isCrossfading) return
@@ -929,6 +1100,10 @@ export class WebAudioOutputEngine {
     }
 
     const now = this.audioContext?.currentTime ?? 0
+    // 下一曲是否已经真正出声（延迟排程窗口内被中断时为 false）
+    const nextAudible =
+      this.crossfadeStartAt > 0 && now >= this.crossfadeStartAt && this.nextBuffer !== null
+
     if (this.gainA) {
       try {
         this.gainA.gain.cancelScheduledValues(now)
@@ -957,10 +1132,6 @@ export class WebAudioOutputEngine {
       f.frequency.value = BASS_SWAP_HP_MIN
     }
 
-    // 清空交叉淡化排程状态（延迟窗口内被中断时，未起播的 sourceB 已被 stop 取消）
-    this.crossfadeStartAt = 0
-    this.crossfadeOffsetSec = 0
-
     // 停止并断开 sourceB
     if (this.sourceB) {
       try {
@@ -973,10 +1144,24 @@ export class WebAudioOutputEngine {
       this.sourceB = null
     }
 
+    // 下一曲已出声：把播放上下文切到下一曲，保证暂停/恢复/seek 落在正确的时间轴
+    if (nextAudible && this.nextBuffer) {
+      this.audioBuffer = this.nextBuffer
+      this._duration = this.audioBuffer.duration
+      this._sampleRate = this.audioBuffer.sampleRate
+      this._channels = this.audioBuffer.numberOfChannels
+      this._startTime = this.crossfadeStartAt - this.crossfadeOffsetSec
+    }
+
+    // 清空交叉淡化排程状态（延迟窗口内被中断时，未起播的 sourceB 已被 stop 取消）
+    this.crossfadeStartAt = 0
+    this.crossfadeOffsetSec = 0
     this.nextBuffer = null
 
-    // 触发 onended，供上层 handleSongEnd 感知
-    this.onEndedCallback?.()
+    // 注意：这里**不能**触发 onEndedCallback。
+    // 中断（stop/pause/seek/切歌）不是「歌曲自然结束」，把中断当成 ended 会让上层
+    // handleSongEnd 误以为本曲播完而切到下一首：切歌 → load → stop → 再触发 ended
+    // 的连锁反应会表现为「一直自动切歌/反复过渡」，而两首歌同时出声就是严重爆音。
   }
 
   // ====== 状态查询 ======

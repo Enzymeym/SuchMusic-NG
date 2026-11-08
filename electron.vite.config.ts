@@ -11,7 +11,22 @@ const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8')
 export default defineConfig(() => {
   return {
     main: {
-      plugins: [externalizeDepsPlugin()]
+      plugins: [externalizeDepsPlugin()],
+      build: {
+        rollupOptions: {
+          // 两个入口：
+          // - index：主进程
+          // - library-scanner：曲库扫描子进程（utilityProcess.fork 启动）
+          // 必须是对象形式：数组形式会被 Rollup 按 basename 命名，产物会变成 entry.js。
+          // main 侧没有 isolatedEntries（Electron 只给 preload/renderer 提供），
+          // 所以两个入口的公共模块会落到 out/main/chunks/*.js —— 因此整个 out/** 都要
+          // 留在 asar 内，不要单独解包 library-scanner.js。
+          input: {
+            index: resolve(__dirname, 'src/main/index.ts'),
+            'library-scanner': resolve(__dirname, 'src/main/services/library/scanner/entry.ts')
+          }
+        }
+      }
     },
     preload: {
       plugins: [externalizeDepsPlugin()]

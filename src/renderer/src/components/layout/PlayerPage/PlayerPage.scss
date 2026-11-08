@@ -13,21 +13,67 @@
   inset: 0;
   z-index: 10;
   overflow: hidden;
+  /* 不透明兜底底：AMLL 画布自带 alpha 且每帧先清成 rgba(0,0,0,0)，
+     首个封面加载期间（alpha 从 0 淡入 ~500ms）整块背景是透明的。
+     本层是 z-index:10 的层叠上下文，负 z-index 的子层永远画在它自己的背景之上、
+     主界面之下，所以只要这里有颜色，就绝不会透出主界面 UI。 */
+  background: #07070b;
 
   .bg-image {
+    /* 绝对定位：交叉淡入淡出期间新旧两张图必须重叠在同一层，
+       否则它们会按文档流上下堆叠并把画面顶偏 */
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
     object-fit: cover;
-    filter: blur(100px) brightness(0.6);
-    transform: scale(1.2);
-    transition: opacity 0.4s ease;
+    /* 模糊已在 Canvas 里烘焙进小图（见 PlayerPage.vue 的 bakeBlurredBackground），
+       此处不再对全屏大图做高斯卷积 */
+    filter: none;
+    transform: scale(1.1);
+
+    /* 预模糊失败（跨域污染 / 解码失败）时回退到运行时模糊 */
+    &--fallback {
+      filter: blur(100px) brightness(0.6);
+      transform: scale(1.2);
+    }
+
+    /* AMLL 动态背景的垫底层：渲染器把画布内联设为 z-index:-1，
+       垫底图必须再低一级才在画布之下 */
+    &--base {
+      z-index: -2;
+      transform: none;
+    }
+  }
+
+  /* 切歌背景交叉淡入淡出（由 PlayerPage.vue 的 <Transition name="bg-fade"> 驱动）
+     真实的交叉淡变 = 旧图保持不透明垫底、新图在上层淡入。
+     绝不能两张一起做 opacity：都停在 0.5 时合成浓度只有 ~0.75，中段会整体压暗，
+     观感就是「先淡出再淡入」的闪黑。所以这里只给 enter 一个 from，
+     leave 侧仅保留一个同名时长的 transition 好让 Vue 把旧图留在 DOM 里当底。 */
+  .bg-fade-enter-active {
+    transition: opacity 0.6s ease;
+    z-index: 1;
+  }
+
+  .bg-fade-leave-active {
+    transition: opacity 0.6s ease;
+    z-index: 0;
+  }
+
+  .bg-fade-enter-from {
+    opacity: 0;
   }
 
   .bg-mask {
     position: absolute;
     inset: 0;
+    /* 必须显式压过交叉淡变中的新图（离场 z-index:0 / 入场 z-index:1），
+       否则过渡的那 0.6s 里新图会跑到遮罩之上，画面先亮一下再变暗 */
+    z-index: 2;
     background: rgba(0, 0, 0, 0.2);
-    backdrop-filter: blur(20px);
+    /* 背景本身已重度模糊，这层全屏 backdrop-filter 只是让下方每次变化都重新栅格化 */
+    backdrop-filter: none;
   }
 }
 
